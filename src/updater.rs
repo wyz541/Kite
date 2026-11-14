@@ -416,7 +416,11 @@ fn validate_asset_name(name: &str) -> Result<(), String> {
 }
 
 fn validate_asset_url(url: &str) -> Result<(), String> {
-    if !url.starts_with(RELEASE_DOWNLOAD_PREFIX) || url.contains(char::is_whitespace) {
+    if !url
+        .to_ascii_lowercase()
+        .starts_with(RELEASE_DOWNLOAD_PREFIX)
+        || url.contains(char::is_whitespace)
+    {
         return Err("更新包地址不在 Kite Release 中".to_string());
     }
     Ok(())
@@ -1192,7 +1196,15 @@ semver = { version = "1" }
             validate_asset_url("https://github.com/wyz541/kite/releases/download/v0.6.13/Kite.exe")
                 .is_ok()
         );
+        assert!(
+            validate_asset_url("https://github.com/wyz541/Kite/releases/download/v0.6.13/Kite.exe")
+                .is_ok()
+        );
         assert!(validate_asset_url("https://example.com/Kite.exe").is_err());
+        assert!(
+            validate_asset_url("https://github.com/other/Kite/releases/download/v0.6.13/Kite.exe")
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "windows")]
