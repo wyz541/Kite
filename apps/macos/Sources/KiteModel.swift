@@ -771,6 +771,9 @@ final class KiteModel: ObservableObject {
     @Published private(set) var updateInProgress = false
     @Published private(set) var updateStatusMessage: String?
     @Published private(set) var updateDownload: UpdateDownloadState?
+    @Published private(set) var updateLatestVersion: String?
+    @Published private(set) var updateReleaseNotes: String?
+    private var pendingUpdate: UpdateInfoDto?
     @Published var activeColumnSearchPath: String?
     @Published var columnSearchText = ""
     @Published private(set) var columnSearchLoading = false
@@ -2053,6 +2056,9 @@ final class KiteModel: ObservableObject {
         updateInProgress = true
         updateStatusMessage = "正在检查 Kite 更新…"
         updateDownload = nil
+        updateLatestVersion = nil
+        updateReleaseNotes = nil
+        pendingUpdate = nil
         errorMessage = nil
 
         Task {
@@ -2060,20 +2066,29 @@ final class KiteModel: ObservableObject {
             do {
                 let update = try await Self.fetchUpdateInfo()
                 guard update.updateAvailable else {
-                    updateStatusMessage = nil
-                    showUpdateAlert(
-                        title: "Kite 已是最新版本",
-                        message: "当前版本：\(update.currentVersion)\n最新版本：\(update.latestVersion)",
-                        style: .informational
-                    )
+                    updateStatusMessage = "Kite \(update.currentVersion) 已是最新版本"
                     return
                 }
-                guard confirmUpdate(update) else {
-                    updateStatusMessage = nil
-                    return
-                }
+                pendingUpdate = update
+                updateLatestVersion = update.latestVersion
+                updateReleaseNotes = summarizedReleaseNotes(update.releaseNotes)
+                updateStatusMessage = "发现 Kite \(update.latestVersion) 新版本，可在设置中安装"
+            } catch {
+                updateStatusMessage = "Kite 更新检查失败"
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
 
-                updateStatusMessage = "正在下载 Kite \(update.latestVersion)…"
+    func installAvailableUpdate() {
+        guard !updateInProgress, let update = pendingUpdate else { return }
+        updateInProgress = true
+        updateStatusMessage = "正在下载 Kite \(update.latestVersion)…"
+        errorMessage = nil
+
+        Task {
+            defer { updateInProgress = false }
+            do {
                 let archive: String
                 do {
                     let progressTask = startUpdateDownloadMonitor(initialTotal: update.assetSize)
@@ -2090,15 +2105,20 @@ final class KiteModel: ObservableObject {
                 )
                 NSApp.terminate(nil)
             } catch {
-                updateStatusMessage = nil
+                updateStatusMessage = "Kite 更新失败，可在设置中重试"
                 errorMessage = error.localizedDescription
-                showUpdateAlert(
-                    title: "Kite 更新失败",
-                    message: error.localizedDescription,
-                    style: .warning
-                )
             }
         }
+    }
+
+    func openAvailableUpdateReleaseNotes() {
+        guard let update = pendingUpdate else { return }
+        guard update.releaseUrl.hasPrefix("https://github.com/wyz541/kite/releases/"),
+              let url = URL(string: update.releaseUrl) else {
+            errorMessage = "发布说明地址无效。"
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     nonisolated private static func fetchUpdateInfo() async throws -> UpdateInfoDto {
@@ -2129,29 +2149,6 @@ final class KiteModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 150_000_000)
             }
         }
-    }
-
-    private func confirmUpdate(_ update: UpdateInfoDto) -> Bool {
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "发现 Kite \(update.latestVersion)"
-        alert.informativeText = "当前版本：\(update.currentVersion)\n\n\(summarizedReleaseNotes(update.releaseNotes))"
-        alert.addButton(withTitle: "下载并更新")
-        alert.addButton(withTitle: "稍后")
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
-    private func showUpdateAlert(
-        title: String,
-        message: String,
-        style: NSAlert.Style
-    ) {
-        let alert = NSAlert()
-        alert.alertStyle = style
-        alert.messageText = title
-        alert.informativeText = message
-        alert.addButton(withTitle: "确定")
-        alert.runModal()
     }
 
     private func summarizedReleaseNotes(_ notes: String) -> String {
