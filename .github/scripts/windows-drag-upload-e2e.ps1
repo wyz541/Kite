@@ -238,6 +238,35 @@ function Find-FileRow {
     }
 }
 
+function Find-ColumnHeaderBottom {
+    param([int]$ProcessId)
+    $rootElement = [System.Windows.Automation.AutomationElement]::RootElement
+    $processCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $ProcessId
+    )
+    $headerNames = @("搜索此分栏", "分栏显示规则")
+    $bottoms = @()
+    foreach ($element in $rootElement.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        $processCondition
+    )) {
+        try {
+            if ($headerNames -contains $element.Current.Name) {
+                $rect = $element.Current.BoundingRectangle
+                if ($rect.Width -gt 0 -and $rect.Height -gt 0 -and -not $element.Current.IsOffscreen) {
+                    $bottoms += $rect.Bottom
+                }
+            }
+        } catch {
+        }
+    }
+    if ($bottoms.Count -eq 0) {
+        return $null
+    }
+    return ($bottoms | Measure-Object -Maximum).Maximum
+}
+
 function Move-Window {
     param([IntPtr]$Handle, [int]$X, [int]$Y, [int]$Width, [int]$Height)
     [KiteDragNative]::ShowWindow($Handle, 9) | Out-Null
@@ -381,7 +410,13 @@ function Test-BrowserUpload {
             $rect = $kiteWindow.Current.BoundingRectangle
             # The E2E directory contains one file in the rightmost active column.
             $fromX = [int]($rect.Left + ($rect.Width * 0.75))
-            $fromY = [int]($rect.Top + 211)
+            $columnHeaderBottom = Find-ColumnHeaderBottom -ProcessId $KiteProcess.Id
+            if ($null -ne $columnHeaderBottom) {
+                # The first file row follows the 32 px column header and 30 px row.
+                $fromY = [int]($columnHeaderBottom + 15)
+            } else {
+                $fromY = [int]($rect.Top + 178)
+            }
         }
         $toX = [int]($BrowserX + ($BrowserWidth / 2))
         $toY = [int]($BrowserY + ($BrowserHeight / 2))
