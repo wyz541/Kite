@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,6 +15,12 @@ const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/wyz541/kite/releases/d
 const MAX_RELEASE_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 const MAX_UPDATE_BYTES: u64 = 256 * 1024 * 1024;
+const DOWNLOAD_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(300),
+    Duration::from_millis(900),
+    Duration::from_millis(1_800),
+    Duration::from_millis(3_000),
+];
 const USER_AGENT: &str = concat!(
     "Kite/",
     env!("CARGO_PKG_VERSION"),
@@ -236,12 +242,11 @@ fn fetch_api_release() -> Result<GithubRelease, String> {
 }
 
 fn fetch_redirected_release() -> Result<GithubRelease, String> {
-    let response = agent()
-        .get(LATEST_RELEASE_PAGE_URL)
-        .set("Accept", "text/html")
-        .set("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|error| format!("无法读取 GitHub 最新 Release 页面：{error}"))?;
+    let response = http_get_response(
+        LATEST_RELEASE_PAGE_URL,
+        "text/html",
+        "GitHub 最新 Release 页面",
+    )?;
     let final_url = response.get_url().to_string();
     drop(response);
     let tag = final_url
@@ -292,13 +297,7 @@ fn fetch_redirected_release() -> Result<GithubRelease, String> {
 }
 
 fn http_get_bytes(url: &str, accept: &str, limit: u64, context: &str) -> Result<Vec<u8>, String> {
-    let response = agent()
-        .get(url)
-        .set("Accept", accept)
-        .set("X-GitHub-Api-Version", "2022-11-28")
-        .set("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|error| format!("无法连接{context}：{error}"))?;
+    let response = http_get_response(url, accept, context)?;
     let mut reader = response.into_reader().take(limit + 1);
     let mut bytes = Vec::new();
     reader
@@ -308,6 +307,26 @@ fn http_get_bytes(url: &str, accept: &str, limit: u64, context: &str) -> Result<
         return Err(format!("{context}超过大小限制"));
     }
     Ok(bytes)
+}
+
+fn http_get_response(url: &str, accept: &str, context: &str) -> Result<ureq::Response, String> {
+    let mut last_error = None;
+    for agent in request_agents() {
+        match agent
+            .get(url)
+            .set("Accept", accept)
+            .set("X-GitHub-Api-Version", "2022-11-28")
+            .set("User-Agent", USER_AGENT)
+            .call()
+        {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    Err(format!(
+        "无法连接{context}：{}",
+        last_error.unwrap_or_else(|| "没有可用的网络连接".to_string())
+    ))
 }
 
 fn checksum_for(checksums: &str, asset_name: &str) -> Option<String> {
@@ -434,12 +453,266 @@ fn parse_sha256(value: &str) -> Result<String, String> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
+fn update_agent(proxy: Option<&str>) -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .https_only(true)
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(60))
-        .timeout_write(Duration::from_secs(60))
-        .build()
+        .timeout_write(Duration::from_secs(60));
+    if let Some(proxy) = proxy
+        && let Ok(proxy) = ureq::Proxy::new(proxy)
+    {
+        builder = builder.proxy(proxy);
+    }
+    builder.build()
+}
+
+fn request_agents() -> Vec<ureq::Agent> {
+    let mut agents = configured_proxy_urls()
+        .into_iter()
+        .map(|proxy| update_agent(Some(&proxy)))
+        .collect::<Vec<_>>();
+    agents.push(update_agent(None));
+    agents
+}
+
+fn configured_proxy_urls() -> Vec<String> {
+    let mut proxies = Vec::new();
+    for name in [
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            let value = value.trim();
+            if !value.is_empty() && !proxies.iter().any(|proxy| proxy == value) {
+                proxies.push(value.to_string());
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(proxy) = windows_system_proxy_url()
+        && !proxies.iter().any(|value| value == &proxy)
+    {
+        proxies.push(proxy);
+    }
+    proxies
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_proxy_url() -> Option<String> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let settings = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        .ok()?;
+    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
+    if enabled == 0 {
+        return None;
+    }
+    let server: String = settings.get_value("ProxyServer").ok()?;
+    parse_windows_proxy_server(&server)
+}
+
+fn parse_windows_proxy_server(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if !value.contains('=') {
+        return Some(proxy_url("http", value));
+    }
+
+    let mut http = None;
+    let mut socks = None;
+    for entry in value.split(';') {
+        let Some((scheme, address)) = entry.split_once('=') else {
+            continue;
+        };
+        let address = address.trim();
+        if address.is_empty() {
+            continue;
+        }
+        match scheme.trim().to_ascii_lowercase().as_str() {
+            "https" => return Some(proxy_url("https", address)),
+            "http" => http = Some(proxy_url("http", address)),
+            "socks" | "socks5" => socks = Some(proxy_url("socks5", address)),
+            _ => {}
+        }
+    }
+    http.or(socks)
+}
+
+fn proxy_url(scheme: &str, address: &str) -> String {
+    if address.contains("://") {
+        address.to_string()
+    } else {
+        format!("{scheme}://{address}")
+    }
+}
+
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+#[derive(Debug)]
+enum DownloadAttemptError {
+    Local(String),
+    Rejected(String),
+    Transient(String),
+    Integrity(String),
+}
+
+impl DownloadAttemptError {
+    fn detail(&self) -> &str {
+        match self {
+            Self::Local(detail)
+            | Self::Rejected(detail)
+            | Self::Transient(detail)
+            | Self::Integrity(detail) => detail,
+        }
+    }
+
+    fn should_retry(&self) -> bool {
+        matches!(self, Self::Transient(_) | Self::Integrity(_))
+    }
+}
+
+fn download_once(
+    info: &UpdateInfo,
+    partial: &Path,
+    agent: &ureq::Agent,
+) -> Result<(), DownloadAttemptError> {
+    let mut resume_offset = fs::metadata(partial)
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+    if info.asset_size > 0 && resume_offset >= info.asset_size {
+        fs::remove_file(partial)
+            .map_err(|error| DownloadAttemptError::Local(format!("无法重置更新文件：{error}")))?;
+        resume_offset = 0;
+    }
+
+    let mut request = agent
+        .get(&info.asset_url)
+        .set("Accept", "application/octet-stream")
+        .set("User-Agent", USER_AGENT);
+    if resume_offset > 0 {
+        request = request.set("Range", &format!("bytes={resume_offset}-"));
+    }
+    let response = request.call().map_err(|error| match error {
+        ureq::Error::Status(416, _) => DownloadAttemptError::Integrity(error.to_string()),
+        ureq::Error::Status(status, _) if retryable_status(status) => {
+            DownloadAttemptError::Transient(error.to_string())
+        }
+        ureq::Error::Status(_, _) => DownloadAttemptError::Rejected(error.to_string()),
+        ureq::Error::Transport(_) => DownloadAttemptError::Transient(error.to_string()),
+    })?;
+
+    let append = response.status() == 206
+        && content_range_start(response.header("Content-Range")) == Some(resume_offset);
+    if !append {
+        resume_offset = 0;
+    }
+    let content_length = response
+        .header("Content-Length")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let total_bytes = if info.asset_size > 0 {
+        info.asset_size
+    } else {
+        resume_offset.saturating_add(content_length)
+    };
+    if total_bytes > MAX_UPDATE_BYTES {
+        return Err(DownloadAttemptError::Integrity(
+            "更新包大小无效".to_string(),
+        ));
+    }
+    publish_download_progress(resume_offset, total_bytes);
+
+    let mut reader = response.into_reader().take(MAX_UPDATE_BYTES + 1);
+    let mut file = if append {
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(partial)
+            .map_err(|error| DownloadAttemptError::Local(format!("无法打开更新文件：{error}")))?
+    } else {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(partial)
+            .map_err(|error| DownloadAttemptError::Local(format!("无法创建更新文件：{error}")))?
+    };
+    let mut total = resume_offset;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                let _ = file.flush();
+                return Err(DownloadAttemptError::Transient(format!(
+                    "无法读取更新文件：{error}"
+                )));
+            }
+        };
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > MAX_UPDATE_BYTES {
+            drop(file);
+            return Err(DownloadAttemptError::Integrity(
+                "更新文件超过大小限制".to_string(),
+            ));
+        }
+        file.write_all(&buffer[..count])
+            .map_err(|error| DownloadAttemptError::Local(format!("无法写入更新文件：{error}")))?;
+        publish_download_progress(total, total_bytes);
+    }
+    file.flush()
+        .map_err(|error| DownloadAttemptError::Local(format!("无法写入更新文件：{error}")))?;
+    file.sync_all()
+        .map_err(|error| DownloadAttemptError::Local(format!("无法保存更新文件：{error}")))?;
+    drop(file);
+    publish_download_progress(total, total_bytes);
+
+    if info.asset_size > 0 && total != info.asset_size {
+        return Err(DownloadAttemptError::Integrity(format!(
+            "更新文件大小不匹配：期望 {}，实际 {total}",
+            info.asset_size
+        )));
+    }
+    let actual_hash = sha256_file(partial).map_err(DownloadAttemptError::Local)?;
+    if actual_hash != info.asset_sha256 {
+        return Err(DownloadAttemptError::Integrity(
+            "更新文件 SHA-256 校验失败".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn content_range_start(value: Option<&str>) -> Option<u64> {
+    value?
+        .strip_prefix("bytes ")?
+        .split_once('-')?
+        .0
+        .parse()
+        .ok()
+}
+
+fn download_failure_message(version: &str) -> String {
+    format!(
+        "无法下载 Kite {version} 更新。请检查网络或系统代理设置后重试，或前往 GitHub Releases 手动下载。"
+    )
+}
+
+fn integrity_failure_message(version: &str) -> String {
+    format!("下载的 Kite {version} 更新包校验失败。请稍后重试，或前往 GitHub Releases 手动下载。")
 }
 
 pub fn download_update(info: &UpdateInfo) -> Result<PathBuf, String> {
@@ -471,63 +744,54 @@ pub fn download_update(info: &UpdateInfo) -> Result<PathBuf, String> {
     }
 
     let partial = destination.with_extension("part");
-    let _ = fs::remove_file(&partial);
-    let response = agent()
-        .get(&info.asset_url)
-        .set("Accept", "application/octet-stream")
-        .set("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|error| format!("无法下载 Kite 更新：{error}"))?;
-    let total_bytes = if info.asset_size > 0 {
-        info.asset_size
-    } else {
-        response
-            .header("Content-Length")
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_default()
-    };
-    start_download_progress(total_bytes);
-    let mut reader = response.into_reader().take(MAX_UPDATE_BYTES + 1);
-    let mut file = File::create(&partial).map_err(|error| format!("无法创建更新文件：{error}"))?;
-    let mut hasher = Sha256::new();
-    let mut total = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("无法读取更新文件：{error}"))?;
-        if count == 0 {
+    let agents = request_agents();
+    let mut last_error = None;
+    let mut integrity_failed = false;
+    for pass in 0..=DOWNLOAD_RETRY_DELAYS.len() {
+        if pass > 0 {
+            std::thread::sleep(DOWNLOAD_RETRY_DELAYS[pass - 1]);
+        }
+        let mut retry_recommended = false;
+        let mut downloaded = false;
+        for agent in &agents {
+            start_download_progress(info.asset_size);
+            match download_once(info, &partial, agent) {
+                Ok(()) => {
+                    downloaded = true;
+                    break;
+                }
+                Err(DownloadAttemptError::Local(detail)) => {
+                    let _ = fs::remove_file(&partial);
+                    return Err(detail);
+                }
+                Err(error) => {
+                    retry_recommended |= error.should_retry();
+                    if matches!(error, DownloadAttemptError::Integrity(_)) {
+                        integrity_failed = true;
+                        let _ = fs::remove_file(&partial);
+                    }
+                    last_error = Some(error.detail().to_string());
+                }
+            }
+        }
+        if downloaded {
             break;
         }
-        total = total.saturating_add(count as u64);
-        if total > MAX_UPDATE_BYTES {
-            drop(file);
-            let _ = fs::remove_file(&partial);
-            return Err("更新文件超过大小限制".to_string());
+        if !retry_recommended {
+            break;
         }
-        hasher.update(&buffer[..count]);
-        file.write_all(&buffer[..count])
-            .map_err(|error| format!("无法写入更新文件：{error}"))?;
-        publish_download_progress(total, total_bytes);
     }
-    file.flush()
-        .map_err(|error| format!("无法写入更新文件：{error}"))?;
-    file.sync_all()
-        .map_err(|error| format!("无法保存更新文件：{error}"))?;
-    drop(file);
-    publish_download_progress(total, total_bytes);
 
-    if info.asset_size > 0 && total != info.asset_size {
+    if !partial.is_file() {
         let _ = fs::remove_file(&partial);
-        return Err(format!(
-            "更新文件大小不匹配：期望 {}，实际 {total}",
-            info.asset_size
-        ));
-    }
-    let actual_hash = format!("{:x}", hasher.finalize());
-    if actual_hash != expected_hash {
-        let _ = fs::remove_file(&partial);
-        return Err("更新文件 SHA-256 校验失败".to_string());
+        if let Some(detail) = last_error {
+            eprintln!("Kite update download failed: {detail}");
+        }
+        return Err(if integrity_failed {
+            integrity_failure_message(&info.latest_version)
+        } else {
+            download_failure_message(&info.latest_version)
+        });
     }
     if destination.exists() {
         fs::remove_file(&destination).map_err(|error| format!("无法替换旧更新文件：{error}"))?;
@@ -1145,6 +1409,66 @@ semver = { version = "1" }
         assert!(!message.contains("status code"));
         assert!(!message.contains("docs.rs"));
         assert!(!message.contains("TLS"));
+    }
+
+    #[test]
+    fn retryable_http_statuses_cover_transient_failures() {
+        for status in [408, 425, 429, 500, 502, 503, 504] {
+            assert!(retryable_status(status), "status {status} should retry");
+        }
+        for status in [400, 401, 403, 404, 422] {
+            assert!(
+                !retryable_status(status),
+                "status {status} should not retry"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_proxy_parser_prefers_https_entry() {
+        assert_eq!(
+            parse_windows_proxy_server("http=127.0.0.1:7890;https=127.0.0.1:7891"),
+            Some("https://127.0.0.1:7891".to_string())
+        );
+        assert_eq!(
+            parse_windows_proxy_server("127.0.0.1:7890"),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+        assert_eq!(
+            parse_windows_proxy_server("socks=127.0.0.1:7892"),
+            Some("socks5://127.0.0.1:7892".to_string())
+        );
+        assert_eq!(parse_windows_proxy_server("  "), None);
+    }
+
+    #[test]
+    fn download_failure_message_omits_transport_details() {
+        let message = download_failure_message("0.6.77");
+        assert!(message.contains("Kite 0.6.77"));
+        assert!(message.contains("系统代理"));
+        assert!(message.contains("GitHub Releases"));
+        assert!(!message.contains("Connection"));
+        assert!(!message.contains("https://github.com"));
+    }
+
+    #[test]
+    fn download_retries_are_short_and_bounded() {
+        assert_eq!(DOWNLOAD_RETRY_DELAYS.len(), 4);
+        assert!(
+            DOWNLOAD_RETRY_DELAYS
+                .iter()
+                .all(|delay| *delay <= Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn content_range_parser_requires_a_byte_range_start() {
+        assert_eq!(
+            content_range_start(Some("bytes 1024-2047/4096")),
+            Some(1024)
+        );
+        assert_eq!(content_range_start(Some("items 1024-2047/4096")), None);
+        assert_eq!(content_range_start(None), None);
     }
 
     #[test]
