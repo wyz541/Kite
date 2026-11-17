@@ -12,6 +12,12 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Theme, ThemeMode, h_flex, v_fl
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+const WINDOW_SHELL_PADDING: f32 = 4.;
+const WINDOW_SHELL_GAP: f32 = 4.;
+const TAB_BAR_HEIGHT: f32 = 34.;
+const TAB_HEIGHT: f32 = 26.;
+const TAB_WIDTH: f32 = 168.;
+
 struct TabEntry {
     view: Entity<KiteApp>,
     _subscription: Subscription,
@@ -343,10 +349,10 @@ impl KiteWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .gap_2()
+                    .gap_1p5()
                     .items_center()
-                    .pl_3()
-                    .pr(if can_close { px(4.) } else { px(12.) })
+                    .pl_2()
+                    .pr(if can_close { px(2.) } else { px(10.) })
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover_color))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -389,8 +395,8 @@ impl KiteWindow {
                 h_flex()
                     .id(format!("kite-tab-{index}"))
                     .relative()
-                    .w(px(174.))
-                    .h(px(28.))
+                    .w(px(TAB_WIDTH))
+                    .h(px(TAB_HEIGHT))
                     .flex_shrink_0()
                     .items_center()
                     .rounded_lg()
@@ -412,11 +418,11 @@ impl KiteWindow {
             .collect::<Vec<_>>();
 
         h_flex()
-            .h(px(38.))
+            .h(px(TAB_BAR_HEIGHT))
             .w_full()
             .flex_shrink_0()
-            .px_2()
-            .gap_2()
+            .px(px(WINDOW_SHELL_PADDING))
+            .gap(px(WINDOW_SHELL_GAP))
             .items_center()
             .rounded_lg()
             .bg(cx.theme().title_bar)
@@ -428,7 +434,7 @@ impl KiteWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .gap_1()
+                    .gap(px(WINDOW_SHELL_GAP))
                     .items_center()
                     .overflow_x_scroll()
                     .track_scroll(&self.tab_scroll)
@@ -440,14 +446,14 @@ impl KiteWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(28.))
+                    .size(px(26.))
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover_color))
                     .on_click(cx.listener(Self::new_tab_clicked))
                     .child(Icon::new(IconName::Plus).size_4()),
             )
-            .child(div().h(px(18.)).w(px(0.5)).bg(cx.theme().border))
+            .child(div().h(px(16.)).w(px(0.5)).bg(cx.theme().border))
             .child(
                 Button::new("toggle-preview")
                     .ghost()
@@ -515,8 +521,8 @@ impl Render for KiteWindow {
             .track_focus(&self.focus_handle)
             .relative()
             .size_full()
-            .p_2()
-            .gap_2()
+            .p(px(WINDOW_SHELL_PADDING))
+            .gap(px(WINDOW_SHELL_GAP))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_new_tab))

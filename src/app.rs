@@ -58,10 +58,19 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 
-const SIDEBAR_WIDTH: f32 = 218.;
-const TOOLBAR_CONTROL_HEIGHT: f32 = 40.;
-const STORAGE_SIDEBAR_ROW_HEIGHT: f32 = 52.;
-const COLUMN_WIDTH: f32 = 274.;
+const SIDEBAR_WIDTH: f32 = 208.;
+const TOOLBAR_CONTROL_HEIGHT: f32 = 36.;
+const TOOLBAR_VERTICAL_PADDING: f32 = 4.;
+const STORAGE_SIDEBAR_ROW_HEIGHT: f32 = 48.;
+const COLUMN_WIDTH: f32 = 252.;
+const COLUMN_STRIP_GAP: f32 = 4.;
+const COLUMN_STRIP_PADDING: f32 = 4.;
+const COLUMN_HEADER_HEIGHT: f32 = 32.;
+const COLUMN_SEARCH_HEIGHT: f32 = 32.;
+const PREVIEW_WIDTH: f32 = 300.;
+const ISLAND_GAP: f32 = 4.;
+const COMPACT_ISLAND_PADDING: f32 = 6.;
+const STATUS_BAR_HEIGHT: f32 = 28.;
 const DETAILED_COLUMN_MIN_WIDTH: f32 = 250.;
 const DETAILED_COLUMN_MAX_WIDTH: f32 = 640.;
 const DETAILED_COLUMN_NAME_OVERHEAD: f32 = 150.;
@@ -4753,7 +4762,7 @@ impl KiteApp {
             .w_full()
             .flex_shrink_0()
             .gap_1()
-            .py(px(6.))
+            .py(px(TOOLBAR_VERTICAL_PADDING))
             .rounded_lg()
             .bg(cx.theme().title_bar)
             .border_1()
@@ -4762,7 +4771,7 @@ impl KiteApp {
                 h_flex()
                     .h(px(TOOLBAR_CONTROL_HEIGHT))
                     .w_full()
-                    .gap_2()
+                    .gap(px(ISLAND_GAP))
                     .items_center()
                     .child(navigation_slot)
                     .child(address_control)
@@ -5253,7 +5262,7 @@ impl KiteApp {
         let mut content = v_flex().gap_0p5();
         content = content.child(
             div()
-                .px_2()
+                .px(px(COMPACT_ISLAND_PADDING))
                 .pt_1()
                 .pb_1()
                 .text_xs()
@@ -5280,8 +5289,8 @@ impl KiteApp {
         }
         content = content.child(
             div()
-                .px_2()
-                .pt_4()
+                .px(px(COMPACT_ISLAND_PADDING))
+                .pt_3()
                 .pb_1()
                 .text_xs()
                 .font_medium()
@@ -5291,7 +5300,7 @@ impl KiteApp {
         if self.favorites.is_empty() {
             content = content.child(
                 div()
-                    .px_2()
+                    .px(px(COMPACT_ISLAND_PADDING))
                     .pb_2()
                     .text_xs()
                     .text_color(section_color)
@@ -5307,8 +5316,8 @@ impl KiteApp {
         if !self.connected_devices.is_empty() || !self.portable_devices.is_empty() {
             content = content.child(
                 div()
-                    .px_2()
-                    .pt_4()
+                    .px(px(COMPACT_ISLAND_PADDING))
+                    .pt_3()
                     .pb_1()
                     .text_xs()
                     .font_medium()
@@ -5338,8 +5347,8 @@ impl KiteApp {
         }
         content = content.child(
             div()
-                .px_2()
-                .pt_4()
+                .px(px(COMPACT_ISLAND_PADDING))
+                .pt_3()
                 .pb_1()
                 .text_xs()
                 .font_medium()
@@ -5388,7 +5397,7 @@ impl KiteApp {
             .h_full()
             .flex_shrink_0()
             .gap_1()
-            .p_2()
+            .p(px(COMPACT_ISLAND_PADDING))
             .rounded_lg()
             .bg(cx.theme().sidebar)
             .border_1()
@@ -5402,7 +5411,7 @@ impl KiteApp {
             )
             .child(
                 h_flex()
-                    .h(px(38.))
+                    .h(px(34.))
                     .w_full()
                     .px_1()
                     .gap_1()
@@ -5465,8 +5474,8 @@ impl KiteApp {
             .id("column-strip")
             .size_full()
             .items_stretch()
-            .gap_2()
-            .p_2()
+            .gap(px(COLUMN_STRIP_GAP))
+            .p(px(COLUMN_STRIP_PADDING))
             .bg(cx.theme().background)
             .overflow_hidden()
             .track_scroll(&scroll_handle);
@@ -5767,7 +5776,7 @@ impl KiteApp {
                 .into_any_element()
         };
 
-        let mut properties = v_flex().w_full().gap_3();
+        let mut properties = v_flex().w_full().gap_2();
         properties = properties
             .child(preview_property("名称", entry.name.clone(), cx))
             .child(preview_property("类型", entry.type_label(), cx))
@@ -5786,7 +5795,7 @@ impl KiteApp {
         }
 
         v_flex()
-            .w(px(316.))
+            .w(px(PREVIEW_WIDTH))
             .h_full()
             .flex_shrink_0()
             .rounded_lg()
@@ -5796,7 +5805,7 @@ impl KiteApp {
             .border_color(border)
             .child(
                 h_flex()
-                    .h(px(34.))
+                    .h(px(COLUMN_HEADER_HEIGHT))
                     .w_full()
                     .px_2()
                     .gap_1()
@@ -5878,8 +5887,8 @@ impl KiteApp {
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
-                    .p_3()
-                    .gap_4()
+                    .p(px(COMPACT_ISLAND_PADDING))
+                    .gap_2()
                     .child(preview_area)
                     .child(properties),
             )
@@ -6011,7 +6020,7 @@ impl KiteApp {
             .into_any_element()
         };
         let mut header = h_flex()
-            .h(px(36.))
+            .h(px(COLUMN_HEADER_HEIGHT))
             .w_full()
             .px_2()
             .gap_2()
@@ -6291,7 +6300,7 @@ impl KiteApp {
 
         let search_bar = search_open.then(|| {
             h_flex()
-                .h(px(34.))
+                .h(px(COLUMN_SEARCH_HEIGHT))
                 .w_full()
                 .px_2()
                 .gap_1()
@@ -8457,7 +8466,7 @@ impl Render for KiteApp {
             .track_focus(&self.focus_handle)
             .relative()
             .size_full()
-            .gap_2()
+            .gap(px(ISLAND_GAP))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(
@@ -8564,7 +8573,7 @@ impl Render for KiteApp {
                     .min_h_0()
                     .w_full()
                     .items_stretch()
-                    .gap_2()
+                    .gap(px(ISLAND_GAP))
                     .when(show_sidebar, |this| this.child(sidebar))
                     .child(
                         v_flex()
@@ -8596,11 +8605,11 @@ impl Render for KiteApp {
             )
             .child(
                 h_flex()
-                    .h(px(30.))
+                    .h(px(STATUS_BAR_HEIGHT))
                     .w_full()
                     .flex_shrink_0()
-                    .px_3()
-                    .gap_3()
+                    .px_2()
+                    .gap_2()
                     .items_center()
                     .justify_between()
                     .rounded_lg()
