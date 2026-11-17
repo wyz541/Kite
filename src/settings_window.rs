@@ -1,14 +1,16 @@
 use std::path::PathBuf;
 
-use crate::app::KiteApp;
+use crate::app::{KiteApp, SettingsUpdateState};
 use crate::ui_preferences::{self, AppearancePreference, UiPreferences};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, StyledExt as _, Theme, ThemeMode, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size, StyledExt as _, Theme, ThemeMode,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -83,7 +85,7 @@ pub(crate) struct SettingsWindow {
     main_app: Entity<KiteApp>,
     page: SettingsPage,
     preferences: UiPreferences,
-    update_in_progress: bool,
+    update_state: SettingsUpdateState,
     status: Option<SharedString>,
     _main_app_subscription: Subscription,
 }
@@ -91,26 +93,24 @@ pub(crate) struct SettingsWindow {
 impl SettingsWindow {
     pub(crate) fn new(
         main_app: Entity<KiteApp>,
-        initial_update_status: (bool, Option<SharedString>),
+        initial_update_state: SettingsUpdateState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // The main app is mutably leased while its click handler opens this window.
         // Use the caller's snapshot instead of reading the entity here.
         let preferences = ui_preferences::load_ui_preferences();
-        let (update_in_progress, status) = initial_update_status;
         let subscription = cx.observe_in(&main_app, window, |this, main_app, _, cx| {
-            let (update_in_progress, status) = main_app.read(cx).settings_update_status();
-            this.update_in_progress = update_in_progress;
-            this.status = status;
+            this.update_state = main_app.read(cx).settings_update_state();
+            this.status = this.update_state.status.clone();
             cx.notify();
         });
         Self {
             main_app,
             page: SettingsPage::General,
             preferences,
-            update_in_progress,
-            status,
+            status: initial_update_state.status.clone(),
+            update_state: initial_update_state,
             _main_app_subscription: subscription,
         }
     }
@@ -479,12 +479,14 @@ impl SettingsWindow {
     }
 
     fn render_updates(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let update_in_progress = self.update_state.in_progress;
         let check = Button::new("check-updates")
             .small()
             .outline()
             .icon(IconName::RefreshCw)
             .label("检查更新…")
-            .loading(self.update_in_progress)
+            .loading(update_in_progress)
+            .disabled(update_in_progress)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.main_app.update(cx, |app, cx| {
                     app.check_for_updates_from_settings(window, cx);
@@ -510,11 +512,49 @@ impl SettingsWindow {
             check,
             cx,
         )];
-        if !self.update_in_progress
-            && let Some(status) = self.status.clone()
+        if let (Some(version), Some(current)) = (
+            self.update_state.available_version.clone(),
+            self.update_state.current_version.clone(),
+        ) {
+            let install = Button::new("download-update")
+                .small()
+                .primary()
+                .label("下载并安装")
+                .loading(update_in_progress)
+                .disabled(update_in_progress)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.main_app.update(cx, |app, cx| {
+                        app.start_update_download_from_settings(window, cx);
+                    });
+                }))
+                .into_any_element();
+            let notes = Button::new("show-update-release-notes")
+                .small()
+                .outline()
+                .label("查看发布说明")
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.main_app.update(cx, |app, cx| {
+                        app.open_update_release_notes_from_settings(cx)
+                    });
+                }))
+                .into_any_element();
+            rows.push(self.separator(cx));
+            rows.push(self.update_available_row(version, current, install, notes, cx));
+            if let Some(notes) = self.update_state.notes.clone() {
+                rows.push(self.separator(cx));
+                rows.push(self.update_notes_row(notes, cx));
+            }
+        }
+
+        if let Some(progress) = self.update_state.download_progress {
+            rows.push(self.separator(cx));
+            rows.push(self.update_progress_row(progress, cx));
+        } else if (self.update_state.available_version.is_none()
+            || self.update_state.status_is_error)
+            && let Some(status) = self.update_state.status.clone()
         {
             rows.push(self.separator(cx));
-            rows.push(self.update_status_row(status, cx));
+            rows.push(self.update_status_row(status, self.update_state.status_is_error, cx));
         }
         rows.push(self.separator(cx));
         rows.push(self.row(
@@ -637,7 +677,12 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    fn update_status_row(&self, status: SharedString, cx: &App) -> AnyElement {
+    fn update_status_row(&self, status: SharedString, is_error: bool, cx: &App) -> AnyElement {
+        let color = if is_error {
+            cx.theme().danger
+        } else {
+            cx.theme().muted_foreground
+        };
         h_flex()
             .id("updates-status")
             .w_full()
@@ -646,10 +691,14 @@ impl SettingsWindow {
             .px_4()
             .py_3()
             .child(
-                Icon::new(IconName::Info)
-                    .size_4()
-                    .mt(px(1.))
-                    .text_color(cx.theme().muted_foreground),
+                Icon::new(if is_error {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::Info
+                })
+                .size_4()
+                .mt(px(1.))
+                .text_color(color),
             )
             .child(
                 div()
@@ -657,8 +706,99 @@ impl SettingsWindow {
                     .min_w_0()
                     .text_sm()
                     .line_height(relative(1.35))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(color)
                     .child(status),
+            )
+            .into_any_element()
+    }
+
+    fn update_available_row(
+        &self,
+        version: SharedString,
+        current: SharedString,
+        install: AnyElement,
+        release_notes: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        h_flex()
+            .id("updates-available")
+            .w_full()
+            .gap_6()
+            .items_center()
+            .px_4()
+            .py_3()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child(format!("Kite {version} 可用")),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("当前版本：{current}")),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_2()
+                    .child(release_notes)
+                    .child(install),
+            )
+            .into_any_element()
+    }
+
+    fn update_notes_row(&self, notes: SharedString, cx: &App) -> AnyElement {
+        v_flex()
+            .id("updates-notes")
+            .w_full()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .child(div().text_sm().font_medium().child("更新内容"))
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(relative(1.45))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(notes),
+            )
+            .into_any_element()
+    }
+
+    fn update_progress_row(
+        &self,
+        progress: crate::updater::UpdateDownloadProgress,
+        cx: &App,
+    ) -> AnyElement {
+        let status = self
+            .update_state
+            .status
+            .clone()
+            .unwrap_or_else(|| "正在下载 Kite 更新…".into());
+        v_flex()
+            .id("updates-progress")
+            .w_full()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .child(div().text_sm().child(status))
+            .child(
+                Progress::new("settings-update-progress")
+                    .when_some(progress.fraction(), |this, fraction| {
+                        this.value((fraction * 100.0) as f32)
+                    })
+                    .when(progress.fraction().is_none(), |this| this.loading(true))
+                    .color(cx.theme().primary)
+                    .with_size(Size::Small)
+                    .accessibility_label("Kite 更新下载进度"),
             )
             .into_any_element()
     }
@@ -789,7 +929,7 @@ impl Render for SettingsWindow {
 
 pub(crate) fn open_settings_window(
     main_app: Entity<KiteApp>,
-    initial_update_status: (bool, Option<SharedString>),
+    initial_update_state: SettingsUpdateState,
     cx: &mut App,
 ) -> Result<(), String> {
     let options = WindowOptions {
@@ -802,7 +942,7 @@ pub(crate) fn open_settings_window(
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| SettingsWindow::new(main_app.clone(), initial_update_status, window, cx))
+        cx.new(|cx| SettingsWindow::new(main_app.clone(), initial_update_state, window, cx))
     })
     .map(|_| ())
     .map_err(|error| format!("无法打开设置窗口：{error}"))

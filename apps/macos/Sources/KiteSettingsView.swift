@@ -387,12 +387,51 @@ struct KiteSettingsView: View {
                         .disabled(model.updateInProgress)
                     }
 
-                    if let message = model.updateStatusMessage,
-                       model.updateDownload != nil {
+                    if let latestVersion = model.updateLatestVersion {
                         SettingsDivider()
-                        SettingsRow(title: message, detail: nil) {
-                            if let download = model.updateDownload,
-                               let fraction = download.fraction {
+                        SettingsRow(
+                            title: "Kite \(latestVersion) 可用",
+                            detail: "当前版本：\(KiteSettingsView.appVersion)"
+                        ) {
+                            HStack(spacing: 8) {
+                                Button("查看发布说明") {
+                                    model.openAvailableUpdateReleaseNotes()
+                                }
+                                .controlSize(.small)
+
+                                Button("下载并安装") {
+                                    model.installAvailableUpdate()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(model.updateInProgress)
+                            }
+                        }
+
+                        if let notes = model.updateReleaseNotes, !notes.isEmpty {
+                            SettingsDivider()
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("更新内容")
+                                    .font(.system(size: 12, weight: .medium))
+                                Text(notes)
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                        }
+                    }
+
+                    if model.updateDownload != nil
+                        || model.updateLatestVersion == nil
+                        || model.errorMessage != nil,
+                       let message = model.updateStatusMessage {
+                        SettingsDivider()
+                        if let download = model.updateDownload,
+                           let fraction = download.fraction {
+                            SettingsRow(title: message, detail: nil) {
                                 VStack(alignment: .trailing, spacing: 4) {
                                     ProgressView(value: fraction)
                                         .frame(width: 150)
@@ -400,9 +439,18 @@ struct KiteSettingsView: View {
                                         .font(.system(size: 10.5, design: .monospaced))
                                         .foregroundStyle(.secondary)
                                 }
-                            } else {
-                                ProgressView()
-                                    .controlSize(.small)
+                            }
+                        } else if let error = model.errorMessage,
+                                  model.updateLatestVersion != nil {
+                            SettingsRow(title: message, detail: error) {
+                                EmptyView()
+                            }
+                        } else {
+                            SettingsRow(title: message, detail: nil) {
+                                if model.updateInProgress {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
                             }
                         }
                     }
