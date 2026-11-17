@@ -2072,7 +2072,7 @@ final class KiteModel: ObservableObject {
                 pendingUpdate = update
                 updateLatestVersion = update.latestVersion
                 updateReleaseNotes = summarizedReleaseNotes(update.releaseNotes)
-                updateStatusMessage = "发现 Kite \(update.latestVersion) 新版本"
+                updateStatusMessage = "发现 Kite \(update.latestVersion) 新版本，可在设置中安装"
             } catch {
                 updateStatusMessage = "Kite 更新检查失败"
                 errorMessage = error.localizedDescription
