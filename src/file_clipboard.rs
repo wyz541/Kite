@@ -138,7 +138,7 @@ pub(crate) fn request_file_drag(window: &Window, paths: &[PathBuf]) -> Result<()
     Ok(())
 }
 
-fn window_hwnd(window: &Window) -> Result<HWND, String> {
+pub(crate) fn window_hwnd(window: &Window) -> Result<HWND, String> {
     let handle = HasWindowHandle::window_handle(window)
         .map_err(|error| format!("无法读取 Kite 窗口句柄：{error}"))?;
     match handle.as_raw() {

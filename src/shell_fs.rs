@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::fs::{DirectorySnapshot, EntryKind, FileEntry, SortSpec, sort_entries};
+use futures_channel::oneshot;
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
@@ -14,12 +16,13 @@ use windows::Win32::System::SystemServices::{
     SFGAO_CANDELETE, SFGAO_CANMOVE, SFGAO_CANRENAME, SFGAO_FOLDER,
 };
 use windows::Win32::UI::Shell::{
-    BHID_EnumItems, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_RENAMEONCOLLISION, FileOperation,
-    IEnumShellItems, IFileOperation, IFileOperationProgressSink, IShellItem,
-    SHCreateItemFromParsingName, SHCreateItemFromRelativeName, SIGDN_DESKTOPABSOLUTEPARSING,
-    SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, ShellExecuteW,
+    BHID_EnumItems, FILEOPERATION_FLAGS, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI,
+    FOF_RENAMEONCOLLISION, FOFX_PRESERVEFILEEXTENSIONS, FileOperation, IEnumShellItems,
+    IFileOperation, IFileOperationProgressSink, IShellItem, SHCreateItemFromParsingName,
+    SHCreateItemFromRelativeName, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
+    SIGDN_PARENTRELATIVEPARSING, ShellExecuteW,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SW_SHOWNORMAL};
 use windows::core::{PCWSTR, PWSTR};
 
 type ItemCapabilities = (bool, bool, bool);
@@ -132,6 +135,88 @@ pub(crate) fn can_move_item(path: &Path) -> bool {
     item_capabilities(path).2
 }
 
+pub(crate) async fn copy_item_with_progress(
+    source: PathBuf,
+    destination: PathBuf,
+    owner: Option<isize>,
+) -> Result<(), String> {
+    let (sender, receiver) = oneshot::channel();
+    // Use a fresh STA for Shell UI without blocking Kite's window thread.
+    std::thread::Builder::new()
+        .name("kite-shell-copy".into())
+        .spawn(move || {
+            let owner = owner.map(|handle| HWND(handle as *mut c_void));
+            let _ = sender.send(copy_item(&source, &destination, owner));
+        })
+        .map_err(|error| format!("无法启动复制任务：{error}"))?;
+    receiver.await.map_err(|_| "复制任务意外结束".to_string())?
+}
+
+fn copy_item(source: &Path, destination: &Path, owner: Option<HWND>) -> Result<(), String> {
+    let mut target_name = None;
+    if !is_shell_namespace_path(source) && !is_shell_namespace_path(destination) {
+        let name = source
+            .file_name()
+            .ok_or_else(|| "不能复制或移动根目录".to_string())?;
+        if !destination.is_dir() {
+            return Err("目标文件夹不存在".to_string());
+        }
+        let metadata = std::fs::symlink_metadata(source)
+            .map_err(|error| format!("无法读取源项目：{error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("暂不支持复制或移动符号链接".to_string());
+        }
+        if metadata.is_dir() {
+            let source_dir = dunce::canonicalize(source)
+                .map_err(|error| format!("无法读取源文件夹：{error}"))?;
+            let target_dir = dunce::canonicalize(destination)
+                .map_err(|error| format!("无法打开目标文件夹：{error}"))?;
+            if target_dir
+                .ancestors()
+                .any(|ancestor| crate::platform::paths_equal(&source_dir, ancestor))
+            {
+                return Err("不能把文件夹复制或移动到自身内部".to_string());
+            }
+        }
+        let target = crate::fs::unique_destination(destination, name);
+        target_name = target
+            .file_name()
+            .filter(|target_name| *target_name != name)
+            .map(|name| {
+                name.encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<_>>()
+            });
+    }
+
+    let _com = ComGuard::new()?;
+    let source_item = resolve_item(source)
+        .map_err(|error| format!("无法读取源项目 {}：{error}", source.display()))?;
+    let destination_item = resolve_item(destination)
+        .map_err(|error| format!("无法打开目标文件夹 {}：{error}", destination.display()))?;
+    let operation = file_operation_with_flags(
+        FOF_NOCONFIRMMKDIR | FOF_RENAMEONCOLLISION | FOFX_PRESERVEFILEEXTENSIONS,
+    )?;
+    unsafe {
+        if let Some(owner) = owner.filter(|&hwnd| IsWindow(Some(hwnd)).as_bool()) {
+            operation
+                .SetOwnerWindow(owner)
+                .map_err(|error| format!("无法设置 Windows 复制窗口：{error}"))?;
+        }
+        operation
+            .CopyItem(
+                &source_item,
+                &destination_item,
+                target_name
+                    .as_ref()
+                    .map_or(PCWSTR::null(), |name| PCWSTR(name.as_ptr())),
+                None::<&IFileOperationProgressSink>,
+            )
+            .map_err(|error| format!("无法准备复制：{error}"))?;
+    }
+    perform_operations(&operation, "复制")
+}
+
 pub(crate) fn transfer_items(
     sources: &[PathBuf],
     destination: &Path,
@@ -224,13 +309,17 @@ pub(crate) fn create_item_in(
 }
 
 fn file_operation() -> Result<IFileOperation, String> {
+    file_operation_with_flags(FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_RENAMEONCOLLISION)
+}
+
+fn file_operation_with_flags(flags: FILEOPERATION_FLAGS) -> Result<IFileOperation, String> {
     let operation: IFileOperation = unsafe {
         CoCreateInstance(&FileOperation, None::<&windows::core::IUnknown>, CLSCTX_ALL)
             .map_err(|error| format!("无法创建 Windows 文件操作：{error}"))?
     };
     unsafe {
         operation
-            .SetOperationFlags(FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_RENAMEONCOLLISION)
+            .SetOperationFlags(flags)
             .map_err(|error| format!("无法配置 Windows 文件操作：{error}"))?;
     }
     Ok(operation)
@@ -544,11 +633,59 @@ impl Drop for ComGuard {
 #[cfg(test)]
 mod tests {
     use super::{
-        cached_item_capabilities_or_else, clear_shell_caches, is_shell_namespace_path,
+        cached_item_capabilities_or_else, clear_shell_caches, copy_item, is_shell_namespace_path,
         relative_child_path,
     };
     use std::cell::Cell;
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn copy_test_root(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kite-shell-copy-{label}-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create test root");
+        root
+    }
+
+    #[test]
+    fn copy_with_progress_preserves_existing_folder_and_copies_contents() {
+        let root = copy_test_root("collision");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let existing = destination.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(source.join("note.txt"), b"new").unwrap();
+        fs::write(existing.join("note.txt"), b"original").unwrap();
+        let expected = crate::fs::unique_destination(&destination, source.file_name().unwrap());
+
+        copy_item(&source, &destination, None).expect("copy the folder through the Shell");
+
+        assert_eq!(fs::read(expected.join("note.txt")).unwrap(), b"new");
+        assert_eq!(fs::read(existing.join("note.txt")).unwrap(), b"original");
+        assert_eq!(fs::read(source.join("note.txt")).unwrap(), b"new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_with_progress_rejects_a_destination_inside_source() {
+        let source = copy_test_root("recursive");
+        let destination = source.join("inside");
+        fs::create_dir(&destination).unwrap();
+
+        let error = copy_item(&source, &destination, None).unwrap_err();
+
+        assert_eq!(error, "不能把文件夹复制或移动到自身内部");
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+        fs::remove_dir_all(source).unwrap();
+    }
 
     #[test]
     #[ignore = "requires a connected portable device"]

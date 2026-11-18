@@ -1737,12 +1737,15 @@ final class KiteModel: ObservableObject {
         }
     }
 
-    func extract(_ path: String, to directory: String) {
+    func extract(_ path: String, to directory: String? = nil) {
         let core = self.core
         Task {
             do {
                 _ = try await Task.detached(priority: .userInitiated) {
-                    try core.extractArchive(path: path, destinationDirectory: directory)
+                    if let directory {
+                        return try core.extractArchive(path: path, destinationDirectory: directory)
+                    }
+                    return try core.extractArchiveHere(path: path)
                 }.value
                 errorMessage = nil
                 refreshVisibleColumns()
