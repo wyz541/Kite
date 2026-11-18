@@ -5,7 +5,7 @@ use std::sync::{
 };
 use std::time::UNIX_EPOCH;
 
-use crate::archive::{self, ArchiveFormat};
+use crate::archive::{self, ArchiveFormat, ArchivePhase, ArchiveProgress};
 use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSearchSnapshot};
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
@@ -96,6 +96,66 @@ pub struct UpdateDownloadProgressDto {
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
     pub active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum ArchiveProgressPhaseDto {
+    #[default]
+    Preparing,
+    Checking,
+    Working,
+    Finishing,
+}
+
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct ArchiveProgressDto {
+    pub phase: ArchiveProgressPhaseDto,
+    pub destination: Option<String>,
+    pub processed_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, uniffi::Object)]
+pub struct ArchiveProgressMonitor {
+    progress: Mutex<ArchiveProgressDto>,
+}
+
+#[uniffi::export]
+impl ArchiveProgressMonitor {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            progress: Mutex::default(),
+        })
+    }
+
+    pub fn snapshot(&self) -> ArchiveProgressDto {
+        self.progress.lock().unwrap().clone()
+    }
+}
+
+impl ArchiveProgressMonitor {
+    fn record(&self, event: ArchiveProgress<'_>) {
+        let mut progress = self.progress.lock().unwrap();
+        match event {
+            ArchiveProgress::Destination(path) => {
+                progress.destination = Some(path.to_string_lossy().into_owned());
+            }
+            ArchiveProgress::Bytes {
+                phase,
+                processed,
+                total,
+            } => {
+                progress.phase = match phase {
+                    ArchivePhase::Checking => ArchiveProgressPhaseDto::Checking,
+                    ArchivePhase::Working => ArchiveProgressPhaseDto::Working,
+                };
+                progress.processed_bytes = Some(processed);
+                progress.total_bytes = total;
+            }
+            ArchiveProgress::Finishing => progress.phase = ArchiveProgressPhaseDto::Finishing,
+        }
+    }
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -515,6 +575,19 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    pub fn compress_path_with_progress(
+        &self,
+        path: String,
+        format: String,
+        monitor: Arc<ArchiveProgressMonitor>,
+    ) -> Result<String, KiteError> {
+        let format = ArchiveFormat::parse(&format)
+            .ok_or_else(|| KiteError::operation("不支持的压缩格式。当前支持 ZIP 和 TAR.GZ。"))?;
+        archive::compress_with_progress(&PathBuf::from(path), format, |event| monitor.record(event))
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(KiteError::operation)
+    }
+
     pub fn extract_archive(
         &self,
         path: String,
@@ -527,6 +600,25 @@ impl KiteCore {
 
     pub fn extract_archive_here(&self, path: String) -> Result<String, KiteError> {
         archive::extract_here(&PathBuf::from(path))
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(KiteError::operation)
+    }
+
+    pub fn extract_archive_with_progress(
+        &self,
+        path: String,
+        destination_directory: Option<String>,
+        monitor: Arc<ArchiveProgressMonitor>,
+    ) -> Result<String, KiteError> {
+        let path = PathBuf::from(path);
+        let result = if let Some(destination) = destination_directory {
+            archive::extract_with_progress(&path, &PathBuf::from(destination), |event| {
+                monitor.record(event)
+            })
+        } else {
+            archive::extract_here_with_progress(&path, |event| monitor.record(event))
+        };
+        result
             .map(|path| path.to_string_lossy().into_owned())
             .map_err(KiteError::operation)
     }
@@ -697,6 +789,69 @@ fn device_dto(device: &PortableDevice) -> PortableDeviceDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_progress_binding_keeps_destinations_and_work_per_operation() {
+        let root = std::env::temp_dir().join(format!(
+            "kite-ffi-archive-progress-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("notes.txt");
+        std::fs::write(&source, b"hello").unwrap();
+        let core = KiteCore::new();
+        let compression = ArchiveProgressMonitor::new();
+        let archive = core
+            .compress_path_with_progress(
+                source.to_string_lossy().into_owned(),
+                "zip".into(),
+                compression.clone(),
+            )
+            .unwrap();
+        let snapshot = compression.snapshot();
+        assert_eq!(snapshot.phase, ArchiveProgressPhaseDto::Finishing);
+        assert_eq!(snapshot.destination.as_deref(), Some(archive.as_str()));
+        assert_eq!(
+            (snapshot.processed_bytes, snapshot.total_bytes),
+            (Some(5), Some(5))
+        );
+
+        let extraction = ArchiveProgressMonitor::new();
+        assert_eq!(
+            extraction.snapshot().phase,
+            ArchiveProgressPhaseDto::Preparing
+        );
+        assert!(extraction.snapshot().destination.is_none());
+        let extracted_here = core
+            .extract_archive_with_progress(archive.clone(), None, extraction.clone())
+            .unwrap();
+        assert_eq!(PathBuf::from(&extracted_here), root.join("notes"));
+        assert_eq!(
+            extraction.snapshot().destination.as_deref(),
+            Some(extracted_here.as_str())
+        );
+        assert_eq!(extraction.snapshot().processed_bytes, Some(5));
+
+        let selected = root.join("selected").to_string_lossy().into_owned();
+        let extracted_to = core
+            .extract_archive_with_progress(
+                archive,
+                Some(selected.clone()),
+                ArchiveProgressMonitor::new(),
+            )
+            .unwrap();
+        assert_eq!(extracted_to, selected);
+        assert_eq!(
+            std::fs::read(PathBuf::from(extracted_to).join("notes.txt")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(std::fs::read(source).unwrap(), b"hello");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn update_record_round_trips_asset_fields() {

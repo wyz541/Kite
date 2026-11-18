@@ -1723,33 +1723,27 @@ final class KiteModel: ObservableObject {
     }
 
     func compress(_ path: String, format: String) {
-        let core = self.core
-        Task {
-            do {
-                _ = try await Task.detached(priority: .userInitiated) {
-                    try core.compressPath(path: path, format: format)
-                }.value
-                errorMessage = nil
-                refreshVisibleColumns()
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
+        runArchiveOperation(.compress(format: format), source: path)
     }
 
     func extract(_ path: String, to directory: String? = nil) {
+        runArchiveOperation(.extract(directory: directory), source: path)
+    }
+
+    private func runArchiveOperation(_ operation: KiteArchiveOperation, source: String) {
+        let progress = KiteArchiveProgressWindowController.show(operation: operation, source: source)
+        let monitor = progress.monitor
         let core = self.core
         Task {
             do {
-                _ = try await Task.detached(priority: .userInitiated) {
-                    if let directory {
-                        return try core.extractArchive(path: path, destinationDirectory: directory)
-                    }
-                    return try core.extractArchiveHere(path: path)
+                let destination = try await Task.detached(priority: .userInitiated) {
+                    try operation.run(core: core, source: source, monitor: monitor)
                 }.value
+                progress.finish(.success(destination: destination))
                 errorMessage = nil
                 refreshVisibleColumns()
             } catch {
+                progress.finish(.failure(message: error.localizedDescription))
                 errorMessage = error.localizedDescription
             }
         }
