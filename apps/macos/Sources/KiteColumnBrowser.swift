@@ -461,6 +461,11 @@ private struct KiteBrowserColumn: View {
         .shadow(color: .black.opacity(0.08), radius: 12, y: 3)
         .animation(.snappy(duration: 0.22), value: showsDetails)
         .animation(.snappy(duration: 0.18), value: model.activeColumnSearchPath)
+        .onHover { hovered in
+            if hovered {
+                model.markColumnHovered(index: index)
+            }
+        }
         .onChange(of: model.activeColumnSearchPath) { activePath in
             searchFocused = activePath == column.path
         }

@@ -2149,12 +2149,9 @@ mod tests {
             .search(std::slice::from_ref(&root), "wooduan", &cancel)
             .expect("search generated root")
             .expect("covered generated root");
-        assert!(
-            snapshot
-                .entries
-                .iter()
-                .any(|entry| entry.path == root.join("wooduan-explicit.txt"))
-        );
+        let expected = dunce::canonicalize(root.join("wooduan-explicit.txt"))
+            .unwrap_or_else(|_| root.join("wooduan-explicit.txt"));
+        assert!(snapshot.entries.iter().any(|entry| entry.path == expected));
 
         drop(service);
         fs::remove_dir_all(base).expect("clean generated root fixture");
