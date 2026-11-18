@@ -1,6 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -24,7 +23,7 @@ use crate::fs::{
 };
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
-use crate::preview_window::PreviewWindow;
+use crate::preview_window::{PreviewWindow, preview_render_image};
 use crate::settings_window;
 use crate::shell_fs;
 use crate::table::{
@@ -57,6 +56,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
+use kite_core::preview::{PreviewImageData, load_image_preview};
+pub(crate) use kite_core::preview::{read_log_preview, read_text_preview};
 
 const SIDEBAR_WIDTH: f32 = 208.;
 const TOOLBAR_CONTROL_HEIGHT: f32 = 36.;
@@ -68,6 +69,10 @@ const COLUMN_STRIP_PADDING: f32 = 4.;
 const COLUMN_HEADER_HEIGHT: f32 = 32.;
 const COLUMN_SEARCH_HEIGHT: f32 = 32.;
 const PREVIEW_WIDTH: f32 = 300.;
+const PREVIEW_LOAD_DEBOUNCE: Duration = Duration::from_millis(45);
+const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 12;
+const COLUMN_PREVIEW_IMAGE_MAX_WIDTH: u32 = 640;
+const COLUMN_PREVIEW_IMAGE_MAX_HEIGHT: u32 = 960;
 const ISLAND_GAP: f32 = 4.;
 const COMPACT_ISLAND_PADDING: f32 = 6.;
 const STATUS_BAR_HEIGHT: f32 = 28.;
@@ -711,6 +716,56 @@ struct ColumnListScroll {
     handle: UniformListScrollHandle,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewImageCacheKey {
+    path: PathBuf,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+impl PreviewImageCacheKey {
+    fn for_entry(entry: &FileEntry) -> Self {
+        Self {
+            path: entry.path.clone(),
+            size: entry.size,
+            modified: entry.modified,
+        }
+    }
+}
+
+struct PreviewImageCache {
+    entries: VecDeque<(PreviewImageCacheKey, Arc<RenderImage>)>,
+}
+
+impl PreviewImageCache {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &PreviewImageCacheKey) -> Option<Arc<RenderImage>> {
+        let index = self.entries.iter().position(|(cached, _)| cached == key)?;
+        let entry = self.entries.remove(index)?;
+        let image = entry.1.clone();
+        self.entries.push_front(entry);
+        Some(image)
+    }
+
+    fn insert(&mut self, key: PreviewImageCacheKey, image: Arc<RenderImage>) {
+        if let Some(index) = self.entries.iter().position(|(cached, _)| cached == &key) {
+            self.entries.remove(index);
+        }
+        self.entries.push_front((key, image));
+        self.entries.truncate(PREVIEW_IMAGE_CACHE_CAPACITY);
+    }
+}
+
+enum PreviewLoadResult {
+    Text(Result<String, String>),
+    Image(Result<PreviewImageData, String>),
+}
+
 #[derive(Clone)]
 struct ColumnPreviewState {
     path: PathBuf,
@@ -718,6 +773,7 @@ struct ColumnPreviewState {
     lines: Arc<Vec<SharedString>>,
     selection: Option<TextSelectionHandle>,
     markdown_view: Option<Entity<TextViewState>>,
+    image: Option<Arc<RenderImage>>,
     error: Option<SharedString>,
     loading: bool,
     scroll: UniformListScrollHandle,
@@ -811,6 +867,7 @@ pub struct KiteApp {
     column_preview: Option<ColumnPreviewState>,
     pending_file_selection: Option<PathBuf>,
     preview_generation: u64,
+    preview_image_cache: PreviewImageCache,
     _preview_task: Task<()>,
     path_bar_scroll: ScrollHandle,
     path_bar_scroll_pending: bool,
@@ -1073,6 +1130,7 @@ impl KiteApp {
             column_preview: None,
             pending_file_selection: initial_file.clone(),
             preview_generation: 0,
+            preview_image_cache: PreviewImageCache::new(),
             _preview_task: Task::ready(()),
             path_bar_scroll: ScrollHandle::new(),
             path_bar_scroll_pending: false,
@@ -3438,6 +3496,12 @@ impl KiteApp {
         let path = entry.path.clone();
         let load_text = !is_image_preview_entry(&entry) && is_text_preview_entry(&entry);
         let log_preview = is_log_preview_entry(&entry);
+        let image_preview = is_raster_image_preview_entry(&entry);
+        let cache_key = image_preview.then(|| PreviewImageCacheKey::for_entry(&entry));
+        let cached_image = cache_key
+            .as_ref()
+            .and_then(|key| self.preview_image_cache.get(key));
+        let load_image = image_preview && cached_image.is_none();
         let markdown_view = (load_text && is_markdown_preview_entry(&entry)).then(|| {
             cx.new(|cx| {
                 TextViewState::markdown("正在加载预览…", cx)
@@ -3451,22 +3515,30 @@ impl KiteApp {
             lines: Arc::new(Vec::new()),
             selection: None,
             markdown_view,
+            image: cached_image,
             error: None,
-            loading: load_text,
+            loading: load_text || load_image,
             scroll: UniformListScrollHandle::new(),
             markdown_scroll: ScrollHandle::new(),
         });
-        if !load_text {
+        if !load_text && !load_image {
             return;
         }
 
         self._preview_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PREVIEW_LOAD_DEBOUNCE).await;
             let result = cx
                 .background_spawn(async move {
-                    if log_preview {
-                        read_log_preview(&path)
+                    if load_image {
+                        PreviewLoadResult::Image(load_image_preview(
+                            &path,
+                            COLUMN_PREVIEW_IMAGE_MAX_WIDTH,
+                            COLUMN_PREVIEW_IMAGE_MAX_HEIGHT,
+                        ))
+                    } else if log_preview {
+                        PreviewLoadResult::Text(read_log_preview(&path))
                     } else {
-                        read_text_preview(&path)
+                        PreviewLoadResult::Text(read_text_preview(&path))
                     }
                 })
                 .await;
@@ -3474,22 +3546,44 @@ impl KiteApp {
                 if this.preview_generation != generation {
                     return;
                 }
-                let markdown_view = this
-                    .column_preview
-                    .as_ref()
-                    .and_then(|preview| preview.markdown_view.clone());
-                if let Some(preview) = this.column_preview.as_mut() {
-                    preview.loading = false;
-                    match result {
-                        Ok(text) => {
-                            if let Some(markdown_view) = markdown_view {
-                                markdown_view.update(cx, |view, cx| view.set_text(&text, cx));
-                            } else {
-                                preview.lines = Arc::new(preview_text_lines(&text));
-                                preview.selection = Some(TextSelectionHandle::new(text, cx));
+                match result {
+                    PreviewLoadResult::Image(Ok(image_data)) => {
+                        let image = preview_render_image(image_data);
+                        if let Some(key) = cache_key {
+                            this.preview_image_cache.insert(key, image.clone());
+                        }
+                        if let Some(preview) = this.column_preview.as_mut() {
+                            preview.loading = false;
+                            preview.image = Some(image);
+                        }
+                    }
+                    PreviewLoadResult::Image(Err(error)) => {
+                        if let Some(preview) = this.column_preview.as_mut() {
+                            preview.loading = false;
+                            preview.error = Some(error.into());
+                        }
+                    }
+                    PreviewLoadResult::Text(result) => {
+                        let markdown_view = this
+                            .column_preview
+                            .as_ref()
+                            .and_then(|preview| preview.markdown_view.clone());
+                        if let Some(preview) = this.column_preview.as_mut() {
+                            preview.loading = false;
+                            match result {
+                                Ok(text) => {
+                                    if let Some(markdown_view) = markdown_view {
+                                        markdown_view
+                                            .update(cx, |view, cx| view.set_text(&text, cx));
+                                    } else {
+                                        preview.lines = Arc::new(preview_text_lines(&text));
+                                        preview.selection =
+                                            Some(TextSelectionHandle::new(text, cx));
+                                    }
+                                }
+                                Err(error) => preview.error = Some(error.into()),
                             }
                         }
-                        Err(error) => preview.error = Some(error.into()),
                     }
                 }
                 cx.notify();
@@ -5536,7 +5630,64 @@ impl KiteApp {
             .filter(|preview| same_path(&preview.path, &entry.path))
             .cloned();
         let preview_area = if is_image_preview_entry(entry) {
-            let fallback_entry = entry.clone();
+            let raw_image = preview.as_ref().and_then(|preview| preview.image.clone());
+            let image_error = preview.as_ref().and_then(|preview| preview.error.clone());
+            let image_loading = preview.as_ref().is_some_and(|preview| preview.loading);
+            let image_element = if let Some(image) = raw_image {
+                img(image)
+                    .id(SharedString::from(format!(
+                        "column-preview-image-{}",
+                        entry.path.display()
+                    )))
+                    .max_w_full()
+                    .max_h(px(520.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element()
+            } else if let Some(error) = image_error {
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .px_3()
+                    .child(Icon::new(icon_for(entry)).size(px(48.)).text_color(muted))
+                    .child(div().text_xs().text_color(cx.theme().danger).child(error))
+                    .into_any_element()
+            } else if image_loading {
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(Icon::new(icon_for(entry)).size(px(48.)).text_color(muted))
+                    .child(div().text_xs().text_color(muted).child("正在生成预览…"))
+                    .into_any_element()
+            } else {
+                let fallback_entry = entry.clone();
+                img(entry.path.clone())
+                    .id(SharedString::from(format!(
+                        "column-preview-source-image-{}",
+                        entry.path.display()
+                    )))
+                    .max_w_full()
+                    .max_h(px(520.))
+                    .object_fit(ObjectFit::Contain)
+                    .with_fallback(move || {
+                        v_flex()
+                            .size_full()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .child(
+                                Icon::new(icon_for(&fallback_entry))
+                                    .size(px(48.))
+                                    .text_color(muted),
+                            )
+                            .child(div().text_xs().text_color(muted).child("无法加载图片预览"))
+                            .into_any_element()
+                    })
+                    .into_any_element()
+            };
             h_flex()
                 .h(px(440.))
                 .w_full()
@@ -5545,26 +5696,7 @@ impl KiteApp {
                 .overflow_hidden()
                 .rounded_md()
                 .bg(cx.theme().muted.opacity(0.25))
-                .child(
-                    img(entry.path.clone())
-                        .max_w_full()
-                        .max_h(px(520.))
-                        .object_fit(ObjectFit::Contain)
-                        .with_fallback(move || {
-                            v_flex()
-                                .size_full()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .child(
-                                    Icon::new(icon_for(&fallback_entry))
-                                        .size(px(48.))
-                                        .text_color(muted),
-                                )
-                                .child(div().text_xs().text_color(muted).child("无法加载图片预览"))
-                                .into_any_element()
-                        }),
-                )
+                .child(image_element)
                 .into_any_element()
         } else if is_text_preview_entry(entry) {
             let foreground = cx.theme().foreground;
@@ -7282,10 +7414,13 @@ fn preview_text_lines(text: &str) -> Vec<SharedString> {
 }
 
 pub(crate) fn is_image_preview_entry(entry: &FileEntry) -> bool {
-    matches!(
-        entry.extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg"
-    )
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"]
+        .iter()
+        .any(|extension| entry.extension.eq_ignore_ascii_case(extension))
+}
+
+pub(crate) fn is_raster_image_preview_entry(entry: &FileEntry) -> bool {
+    is_image_preview_entry(entry) && !entry.extension.eq_ignore_ascii_case("svg")
 }
 
 pub(crate) fn is_log_preview_entry(entry: &FileEntry) -> bool {
@@ -7293,117 +7428,50 @@ pub(crate) fn is_log_preview_entry(entry: &FileEntry) -> bool {
 }
 
 pub(crate) fn is_markdown_preview_entry(entry: &FileEntry) -> bool {
-    matches!(
-        entry.extension.to_ascii_lowercase().as_str(),
-        "txt" | "md" | "markdown"
-    )
+    entry.extension.eq_ignore_ascii_case("txt")
+        || entry.extension.eq_ignore_ascii_case("md")
+        || entry.extension.eq_ignore_ascii_case("markdown")
 }
 
 pub(crate) fn is_text_preview_entry(entry: &FileEntry) -> bool {
     if entry.size > 512 * 1024 && !is_log_preview_entry(entry) {
         return false;
     }
-    entry.extension.is_empty()
-        || is_log_preview_entry(entry)
-        || matches!(
-            entry.extension.as_str(),
-            "txt"
-                | "md"
-                | "markdown"
-                | "log"
-                | "json"
-                | "toml"
-                | "yaml"
-                | "yml"
-                | "xml"
-                | "ini"
-                | "rs"
-                | "py"
-                | "js"
-                | "ts"
-                | "tsx"
-                | "jsx"
-                | "html"
-                | "css"
-                | "c"
-                | "cpp"
-                | "h"
-                | "cs"
-                | "java"
-                | "go"
-                | "kt"
-                | "sh"
-                | "ps1"
-                | "bat"
-        )
-}
-
-pub(crate) fn read_text_preview(path: &Path) -> Result<String, String> {
-    let file = std::fs::File::open(path).map_err(|error| format!("无法读取预览：{error}"))?;
-    let mut reader = std::io::BufReader::new(file).take(64 * 1024);
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取预览：{error}"))?;
-    if bytes.contains(&0) {
-        return Err("此文件不是文本文件".to_string());
+    if entry.extension.is_empty() {
+        return true;
     }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut excerpt = text.chars().take(6_000).collect::<String>();
-    if text.chars().count() > 6_000 {
-        excerpt.push('…');
-    }
-    if excerpt.trim().is_empty() {
-        Ok("文件没有可显示的文本内容。".to_string())
-    } else {
-        Ok(excerpt)
-    }
-}
-
-pub(crate) fn read_log_preview(path: &Path) -> Result<String, String> {
-    const READ_LIMIT: u64 = 64 * 1024;
-    const CHAR_LIMIT: usize = 6_000;
-
-    let mut file =
-        std::fs::File::open(path).map_err(|error| format!("无法读取日志预览：{error}"))?;
-    let length = file
-        .metadata()
-        .map_err(|error| format!("无法读取日志信息：{error}"))?
-        .len();
-    let truncated = length > READ_LIMIT;
-    if truncated {
-        file.seek(SeekFrom::Start(length - READ_LIMIT))
-            .map_err(|error| format!("无法定位日志末尾：{error}"))?;
-    }
-
-    let mut bytes = Vec::with_capacity(READ_LIMIT as usize);
-    std::io::BufReader::new(file)
-        .take(READ_LIMIT)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取日志预览：{error}"))?;
-    if bytes.contains(&0) {
-        return Err("此日志包含二进制内容，无法显示文本预览".to_string());
-    }
-
-    let text = String::from_utf8_lossy(&bytes);
-    let text = if truncated {
-        text.split_once('\n')
-            .map_or_else(|| text.as_ref(), |(_, rest)| rest)
-    } else {
-        text.as_ref()
-    };
-    let chars = text.chars().collect::<Vec<_>>();
-    let tail_start = chars.len().saturating_sub(CHAR_LIMIT);
-    let excerpt = chars[tail_start..].iter().collect::<String>();
-    if excerpt.trim().is_empty() {
-        return Ok("日志没有可显示的文本内容。".to_string());
-    }
-
-    if truncated || tail_start > 0 {
-        Ok(format!("日志末尾预览：\n{excerpt}"))
-    } else {
-        Ok(excerpt)
-    }
+    let extension = entry.extension.to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "txt"
+            | "md"
+            | "markdown"
+            | "log"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "xml"
+            | "ini"
+            | "rs"
+            | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "html"
+            | "css"
+            | "c"
+            | "cpp"
+            | "h"
+            | "cs"
+            | "java"
+            | "go"
+            | "kt"
+            | "sh"
+            | "ps1"
+            | "bat"
+    )
 }
 
 fn column_chain(root: &Path) -> Vec<PathBuf> {
@@ -8716,9 +8784,10 @@ otes.{extension}"
         assert!(is_markdown_preview_entry(&make_entry("txt")));
         assert!(is_markdown_preview_entry(&make_entry("TXT")));
         assert!(is_markdown_preview_entry(&make_entry("md")));
-        assert!(is_markdown_preview_entry(&make_entry("markdown")));
+        assert!(is_markdown_preview_entry(&make_entry("MARKDOWN")));
         assert!(!is_markdown_preview_entry(&make_entry("log")));
         assert!(is_text_preview_entry(&make_entry("markdown")));
+        assert!(is_text_preview_entry(&make_entry("TXT")));
     }
 
     #[test]
