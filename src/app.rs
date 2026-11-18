@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::actions::*;
 use crate::archive::{self, ArchiveFormat};
+use crate::archive_progress_window;
 use crate::context_menu::{
     ContextMenuCapabilities, ContextMenuTarget, render_context_menu, request_system_menu,
     show_properties,
@@ -2745,7 +2746,9 @@ impl KiteApp {
             ContextMenuCommand::CompressTarGz => {
                 self.compress_path(action.target.clone(), ArchiveFormat::TarGz, window, cx)
             }
-            ContextMenuCommand::ExtractHere => self.extract_here(action.target.clone(), window, cx),
+            ContextMenuCommand::ExtractHere => {
+                self.extract_archive(action.target.clone(), None, window, cx);
+            }
             ContextMenuCommand::ExtractTo => {
                 self.extract_to_directory(action.target.clone(), window, cx)
             }
@@ -3740,34 +3743,21 @@ impl KiteApp {
                 return;
             };
 
-            let copy_source = source.clone();
-            let copy_destination = destination_dir.clone();
-            let uses_shell_operation = shell_fs::is_shell_namespace_path(&copy_source)
-                || shell_fs::is_shell_namespace_path(&copy_destination);
-            let result = cx
-                .background_spawn(async move {
-                    if uses_shell_operation {
-                        shell_fs::transfer_items(
-                            std::slice::from_ref(&copy_source),
-                            &copy_destination,
-                            false,
-                        )
-                        .map(|()| copy_destination.clone())
-                    } else {
-                        transfer_entry(&copy_source, &copy_destination, false)
-                    }
-                })
-                .await;
+            let Ok(owner) = this.update_in(cx, |this, window, cx| {
+                this.notice = Some(format!("正在拷贝到 {}…", destination_dir.display()).into());
+                cx.notify();
+                file_clipboard::window_hwnd(window)
+                    .ok()
+                    .map(|hwnd| hwnd.0 as isize)
+            }) else {
+                return;
+            };
+            let result =
+                shell_fs::copy_item_with_progress(source, destination_dir.clone(), owner).await;
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(copied) => {
+                Ok(()) => {
                     this.error = None;
-                    this.notice = Some(
-                        format!(
-                            "已拷贝到 {}",
-                            copied.parent().unwrap_or(&destination_dir).display()
-                        )
-                        .into(),
-                    );
+                    this.notice = Some(format!("已拷贝到 {}", destination_dir.display()).into());
                     if same_path(&this.current_dir, &destination_dir) {
                         this.refresh(window, cx);
                     } else {
@@ -3799,9 +3789,17 @@ impl KiteApp {
         self.notice = Some(format!("正在创建 {format_name} 文件…").into());
         cx.notify();
 
+        let progress =
+            archive_progress_window::open("压缩", Some(format), &source, source.parent(), cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { archive::compress(&source, format) })
+                .background_spawn(async move {
+                    let result = archive::compress_with_progress(&source, format, |event| {
+                        progress.report(event)
+                    });
+                    progress.finish(&result);
+                    result
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(created) => {
@@ -3834,17 +3832,6 @@ impl KiteApp {
             });
         })
         .detach();
-    }
-
-    fn extract_here(&mut self, source: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match archive::extraction_directory(&source) {
-            Ok(destination) => self.extract_archive_into(source, destination, window, cx),
-            Err(error) => {
-                self.notice = None;
-                self.error = Some(error.into());
-                cx.notify();
-            }
-        }
     }
 
     fn extract_to_directory(
@@ -3885,16 +3872,16 @@ impl KiteApp {
                 return;
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                this.extract_archive_into(source, destination, window, cx);
+                this.extract_archive(source, Some(destination), window, cx);
             });
         })
         .detach();
     }
 
-    fn extract_archive_into(
+    fn extract_archive(
         &mut self,
         source: PathBuf,
-        destination: PathBuf,
+        destination: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3902,16 +3889,38 @@ impl KiteApp {
         self.notice = Some("正在解压文件…".into());
         cx.notify();
 
+        let progress = archive_progress_window::open(
+            "解压",
+            archive::format_for_path(&source),
+            &source,
+            destination.as_deref().or_else(|| source.parent()),
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
-            let extract_destination = destination.clone();
+            let refresh_dir = destination
+                .clone()
+                .or_else(|| source.parent().map(Path::to_path_buf));
             let result = cx
-                .background_spawn(async move { archive::extract(&source, &extract_destination) })
+                .background_spawn(async move {
+                    let result = if let Some(destination) = destination {
+                        archive::extract_with_progress(&source, &destination, |event| {
+                            progress.report(event)
+                        })
+                    } else {
+                        archive::extract_here_with_progress(&source, |event| progress.report(event))
+                    };
+                    progress.finish(&result);
+                    result
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(extracted_to) => {
                     this.error = None;
                     this.notice = Some(format!("已解压到 {}", extracted_to.display()).into());
-                    if same_path(&this.current_dir, &destination) {
+                    if refresh_dir
+                        .as_deref()
+                        .is_some_and(|directory| same_path(&this.current_dir, directory))
+                    {
                         this.refresh(window, cx);
                     } else {
                         cx.notify();

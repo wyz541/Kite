@@ -6,6 +6,8 @@ mod actions;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod archive_progress_window;
+#[cfg(windows)]
 mod context_menu;
 #[cfg(windows)]
 mod explorer_integration;

@@ -1771,7 +1771,7 @@ private struct KiteEntryMenu: View {
         if let path = singleOperationPath, KitePlatform.archiveFormat(path) != nil {
             Menu {
                 Button {
-                    model.extract(path, to: parentDirectory)
+                    model.extract(path)
                 } label: {
                     Label("解压到当前文件夹", systemImage: "arrow.down.doc")
                 }
