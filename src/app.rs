@@ -1858,10 +1858,13 @@ impl KiteApp {
         if let Some(query) = initial_query {
             self.column_search_input.update(cx, |input, cx| {
                 input.set_value(query.clone(), window, cx);
-                input.focus(window, cx);
             });
             self.schedule_column_search(query, window, cx);
         }
+        let search_input = self.column_search_input.clone();
+        window.defer(cx, move |window, cx| {
+            search_input.update(cx, |input, cx| input.focus(window, cx));
+        });
     }
 
     fn handle_global_key(
@@ -1883,9 +1886,11 @@ impl KiteApp {
         {
             return;
         }
-        let Some(character) = event.keystroke.key_char.as_deref() else {
-            return;
-        };
+        let character = event.keystroke.key_char.as_deref().or_else(|| {
+            let key = event.keystroke.key.as_str();
+            (key.chars().count() == 1).then_some(key)
+        });
+        let Some(character) = character else { return };
         if character.is_empty() || character.chars().any(char::is_control) {
             return;
         }
