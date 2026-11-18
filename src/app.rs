@@ -842,6 +842,7 @@ pub struct KiteApp {
     vcs_generation: u64,
     search_cancel: Option<Arc<AtomicBool>>,
     column_search_path: Option<PathBuf>,
+    last_operated_column: Option<PathBuf>,
     column_search_loading: bool,
     column_search_generation: u64,
     column_search_cancel: Option<Arc<AtomicBool>>,
@@ -1105,6 +1106,7 @@ impl KiteApp {
             vcs_generation: 0,
             search_cancel: None,
             column_search_path: None,
+            last_operated_column: None,
             column_search_loading: false,
             column_search_generation: 0,
             column_search_cancel: None,
@@ -1824,6 +1826,74 @@ impl KiteApp {
         }
     }
 
+    fn remember_column(&mut self, path: &Path) {
+        self.last_operated_column = Some(path.to_path_buf());
+    }
+
+    fn start_last_column_search(
+        &mut self,
+        initial_query: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self
+            .last_operated_column
+            .clone()
+            .or_else(|| self.column_panes.last().map(|pane| pane.path.clone()));
+        let Some(path) = path else { return };
+        if !self
+            .column_panes
+            .iter()
+            .any(|pane| same_path(&pane.path, &path))
+        {
+            return;
+        }
+        if !self
+            .column_search_path
+            .as_ref()
+            .is_some_and(|active| same_path(active, &path))
+        {
+            self.toggle_column_search(path, window, cx);
+        }
+        if let Some(query) = initial_query {
+            self.column_search_input.update(cx, |input, cx| {
+                input.set_value(query.clone(), window, cx);
+                input.focus(window, cx);
+            });
+            self.schedule_column_search(query, window, cx);
+        }
+    }
+
+    fn handle_global_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.view_mode != ViewMode::Columns
+            || self.active_search.is_some()
+            || self.column_search_path.is_some()
+            || self.address_editing
+            || self.modal.is_some()
+            || self.available_update.is_some()
+            || event.keystroke.modifiers.control
+            || event.keystroke.modifiers.alt
+            || event.keystroke.modifiers.platform
+            || event.keystroke.modifiers.function
+        {
+            return;
+        }
+        let Some(character) = event.keystroke.key_char.as_deref() else {
+            return;
+        };
+        if character.is_empty() || character.chars().any(char::is_control) {
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+        self.start_last_column_search(Some(character.to_string()), window, cx);
+    }
+
     fn toggle_column_search(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .column_search_path
@@ -2512,6 +2582,10 @@ impl KiteApp {
     }
 
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view_mode == ViewMode::Columns && self.active_search.is_none() {
+            self.start_last_column_search(None, window, cx);
+            return;
+        }
         self.search_visible = true;
         self.search_input.update(cx, |input, cx| {
             input.select_all(window, cx);
@@ -3430,6 +3504,9 @@ impl KiteApp {
         mode: &str,
         cx: &mut Context<Self>,
     ) {
+        if let Some(path) = self.column_panes.get(column).map(|pane| pane.path.clone()) {
+            self.remember_column(&path);
+        }
         let Some(entry) = self
             .column_panes
             .get(column)
@@ -3601,6 +3678,9 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(path) = self.column_panes.get(column).map(|pane| pane.path.clone()) {
+            self.remember_column(&path);
+        }
         let Some(entry) = self
             .column_panes
             .get(column)
@@ -6093,6 +6173,17 @@ impl KiteApp {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
+        let light = !cx.theme().mode.is_dark();
+        let header_background = if active && !light {
+            accent.opacity(0.5)
+        } else {
+            cx.theme().title_bar
+        };
+        let surface_background = if light {
+            cx.theme().background
+        } else {
+            cx.theme().secondary.opacity(0.72)
+        };
         let empty_label = if search_query.is_some() {
             "无搜索结果"
         } else if rules.filter != ColumnFilter::All {
@@ -6140,8 +6231,7 @@ impl KiteApp {
             .items_center()
             .border_b_1()
             .border_color(border)
-            .bg(cx.theme().title_bar)
-            .when(active, |this| this.bg(accent.opacity(0.5)))
+            .bg(header_background)
             .child(
                 h_flex()
                     .flex_1()
@@ -6447,12 +6537,19 @@ impl KiteApp {
 
         let mut column = v_flex()
             .id(("column", index))
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, _cx| {
+                if *hovered {
+                    if let Some(path) = this.column_panes.get(index).map(|pane| pane.path.clone()) {
+                        this.remember_column(&path);
+                    }
+                }
+            }))
             .w(px(column_width))
             .h_full()
             .flex_shrink_0()
             .rounded_lg()
             .overflow_hidden()
-            .bg(cx.theme().secondary.opacity(0.72))
+            .bg(surface_background)
             .border_1()
             .border_color(border)
             .shadow_sm()
@@ -8001,6 +8098,7 @@ impl Render for KiteApp {
             .id("kite-root")
             .key_context("Kite")
             .track_focus(&self.focus_handle)
+            .capture_key_down(cx.listener(Self::handle_global_key))
             .relative()
             .size_full()
             .gap(px(ISLAND_GAP))

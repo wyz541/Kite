@@ -544,6 +544,7 @@ struct BrowserTab: Identifiable {
     let id: UUID
     var columns: [BrowserColumn]
     var address: String
+    var lastOperatedColumnPath: String?
 
     var currentPath: String { columns.last?.path ?? address }
     var title: String {
@@ -937,6 +938,7 @@ final class KiteModel: ObservableObject {
         guard let tabIndex = activeTabIndex, tabs[tabIndex].columns.indices.contains(index) else {
             return
         }
+        tabs[tabIndex].lastOperatedColumnPath = tabs[tabIndex].columns[index].path
         let mode = BrowserSelectionMode(modifiers: modifiers)
         if mode != .replace, index != tabs[tabIndex].columns.count - 1 {
             return
@@ -1027,6 +1029,26 @@ final class KiteModel: ObservableObject {
         persistColumnViewRule(index: index)
     }
 
+    func markColumnHovered(index: Int) {
+        guard let tabIndex = activeTabIndex,
+              tabs[tabIndex].columns.indices.contains(index) else { return }
+        let path = tabs[tabIndex].columns[index].path
+        guard tabs[tabIndex].lastOperatedColumnPath != path else { return }
+        tabs[tabIndex].lastOperatedColumnPath = path
+    }
+
+    func beginColumnSearch(initialText: String = "") {
+        guard let tabIndex = activeTabIndex, !tabs[tabIndex].columns.isEmpty else { return }
+        let path = tabs[tabIndex].lastOperatedColumnPath
+            ?? tabs[tabIndex].columns.last?.path
+        guard let path else { return }
+        if activeColumnSearchPath != path {
+            toggleColumnSearch(path: path)
+        }
+        guard !initialText.isEmpty else { return }
+        setColumnSearchText(initialText)
+    }
+
     func toggleColumnSearch(path: String) {
         if activeColumnSearchPath == path {
             clearColumnSearch(path: path)
@@ -1101,6 +1123,33 @@ final class KiteModel: ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    func handleGlobalKey(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              !(event.window?.firstResponder is NSTextView),
+              !(event.window?.firstResponder is NSTextField),
+              !(event.window?.firstResponder is NSSearchField) else {
+            return false
+        }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) || flags.contains(.control) {
+            guard event.charactersIgnoringModifiers?.lowercased() == "f" else { return false }
+            beginColumnSearch()
+            return true
+        }
+        guard flags.intersection([.option, .control, .command, .function]).isEmpty,
+              let characters = event.characters,
+              !characters.isEmpty,
+              characters.allSatisfy({ character in
+                  !character.isNewline
+                      && !character.isWhitespace
+                      && character.unicodeScalars.allSatisfy { $0.properties.generalCategory != .control }
+              }) else {
+            return false
+        }
+        beginColumnSearch(initialText: characters)
+        return true
     }
 
     func clearColumnSearch(path: String) {
@@ -2293,7 +2342,8 @@ final class KiteModel: ObservableObject {
         return BrowserTab(
             id: id,
             columns: restoredColumns,
-            address: currentListing.path
+            address: currentListing.path,
+            lastOperatedColumnPath: currentListing.path
         )
     }
 
