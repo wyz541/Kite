@@ -441,12 +441,7 @@ private struct KiteBrowserColumn: View {
                     }
                     .scrollIndicators(.hidden)
                     .onChange(of: column.searchQuery) { _ in
-                        guard let firstMatchID = column.displayRows.compactMap({ row in
-                            guard case .entry(let entry) = row else { return nil }
-                            return entry.id
-                        }).first else {
-                            return
-                        }
+                        guard let firstMatchID = firstSearchMatchID else { return }
                         DispatchQueue.main.async {
                             proxy.scrollTo(firstMatchID, anchor: .top)
                         }
@@ -495,6 +490,15 @@ private struct KiteBrowserColumn: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(columnAccessibilityLabel)
+    }
+
+    private var firstSearchMatchID: String? {
+        for row in column.displayRows {
+            if case .entry(let entry) = row {
+                return entry.id
+            }
+        }
+        return nil
     }
 
     private var columnAccessibilityLabel: String {
