@@ -480,11 +480,7 @@ private struct KiteBrowserColumn: View {
         .onAppear {
             searchFocused = model.activeColumnSearchPath == column.path
         }
-        .onHover { hovered in
-            if hovered {
-                model.noteColumnHover(path: column.path)
-            }
-        }
+        .onHover(perform: updateColumnHover)
         .modifier(
             KiteFileDropModifier(
                 destination: column.path,
@@ -507,6 +503,10 @@ private struct KiteBrowserColumn: View {
         return "\(title)，\(count) 个项目"
     }
 
+    private func updateColumnHover(_ hovered: Bool) {
+        guard hovered else { return }
+        model.noteColumnHover(path: column.path)
+    }
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: isActive ? "folder.fill" : "folder")
