@@ -755,6 +755,8 @@ final class KiteModel: ObservableObject {
     private var columnAutoRefreshGeneration: UInt64 = 0
     private var columnAutoRefreshTask: Task<Void, Never>?
     private var contentSearchPowerPolicyTask: Task<Void, Never>?
+    private var columnKeyMonitor: Any?
+    private var lastHoveredColumnPath: String?
     private lazy var columnDirectoryWatcher = DirectoryWatcher { [weak self] in
         self?.directoryContentsDidChange()
     }
@@ -799,12 +801,19 @@ final class KiteModel: ObservableObject {
                 self?.updateContentSearchPowerPolicy()
             }
         }
+        columnKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleColumnKeyDown(event) ? nil : event
+        }
         PerformanceTrace.mark("macos.model_ready")
     }
 
     deinit {
         contentSearchPowerPolicyTask?.cancel()
         globalSearchDebounceTask?.cancel()
+        if let columnKeyMonitor {
+            NSEvent.removeMonitor(columnKeyMonitor)
+        }
     }
 
     var activeTab: BrowserTab? {
@@ -1013,6 +1022,10 @@ final class KiteModel: ObservableObject {
         persistColumnViewRule(index: index)
     }
 
+    func noteColumnHover(path: String) {
+        lastHoveredColumnPath = path
+    }
+
     func resetColumnView(index: Int) {
         guard let tabIndex = activeTabIndex,
               tabs[tabIndex].columns.indices.contains(index) else {
@@ -1028,6 +1041,11 @@ final class KiteModel: ObservableObject {
             return
         }
 
+        openColumnSearch(path: path)
+    }
+
+    private func openColumnSearch(path: String) {
+
         if let previousPath = activeColumnSearchPath {
             clearColumnSearch(path: previousPath)
         }
@@ -1035,6 +1053,33 @@ final class KiteModel: ObservableObject {
         resetColumnSearchRequest()
         activeColumnSearchPath = path
         columnSearchText = columnQuery(for: path) ?? ""
+    }
+
+    private func handleColumnKeyDown(_ event: NSEvent) -> Bool {
+        let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option, .function]
+        guard event.window?.isMainWindow == true,
+              event.modifierFlags.intersection(blockedModifiers).isEmpty,
+              let characters = event.characters,
+              !characters.isEmpty,
+              !characters.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }),
+              let path = lastHoveredColumnPath,
+              columns.contains(where: { $0.path == path }) else {
+            return false
+        }
+
+        if let responder = event.window?.firstResponder,
+           responder is NSTextField || responder is NSTextView {
+            return false
+        }
+
+        if activeColumnSearchPath != path {
+            openColumnSearch(path: path)
+            columnSearchText = ""
+        }
+        setColumnSearchText(columnSearchText + characters)
+        return true
     }
 
     func setColumnSearchText(_ text: String) {
@@ -1717,12 +1762,15 @@ final class KiteModel: ObservableObject {
         }
     }
 
-    func extract(_ path: String, to directory: String) {
+    func extract(_ path: String, to directory: String? = nil) {
         let core = self.core
         Task {
             do {
                 _ = try await Task.detached(priority: .userInitiated) {
-                    try core.extractArchive(path: path, destinationDirectory: directory)
+                    if let directory {
+                        return try core.extractArchive(path: path, destinationDirectory: directory)
+                    }
+                    return try core.extractArchiveHere(path: path)
                 }.value
                 errorMessage = nil
                 refreshVisibleColumns()

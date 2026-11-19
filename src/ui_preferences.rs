@@ -12,8 +12,28 @@ const UI_PREFERENCES_SCHEMA_VERSION: u32 = 1;
 const MAX_UI_PREFERENCES_BYTES: u64 = 64 * 1024;
 const MAX_COLUMN_RULES: usize = 512;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreference {
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultViewPreference {
+    #[default]
+    Columns,
+    List,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiPreferences {
+    pub theme_mode: ThemePreference,
+    pub default_view: DefaultViewPreference,
+    pub path_bar_visible: bool,
+    pub preview_visible: bool,
     pub column_details_visible: bool,
     pub date_column_visible: bool,
     pub kind_column_visible: bool,
@@ -26,6 +46,10 @@ pub struct UiPreferences {
 impl Default for UiPreferences {
     fn default() -> Self {
         Self {
+            theme_mode: ThemePreference::Dark,
+            default_view: DefaultViewPreference::Columns,
+            path_bar_visible: true,
+            preview_visible: true,
             column_details_visible: false,
             date_column_visible: true,
             kind_column_visible: true,
@@ -73,6 +97,14 @@ impl UiPreferences {
 #[derive(Serialize, Deserialize)]
 struct UiPreferencesFile {
     schema_version: u32,
+    #[serde(default)]
+    theme_mode: ThemePreference,
+    #[serde(default)]
+    default_view: DefaultViewPreference,
+    #[serde(default = "default_true")]
+    path_bar_visible: bool,
+    #[serde(default = "default_true")]
+    preview_visible: bool,
     #[serde(default)]
     column_details_visible: bool,
     #[serde(default = "default_true")]
@@ -133,7 +165,7 @@ fn save_default_column_sort_at(path: &Path, sort: SortSpec) -> Result<(), String
     save_ui_preferences_at(path, preferences)
 }
 
-fn ui_preferences_path() -> Option<PathBuf> {
+pub fn ui_preferences_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("KITE_UI_PREFERENCES_PATH") {
         return Some(PathBuf::from(path));
     }
@@ -167,6 +199,10 @@ fn load_ui_preferences_at(path: &Path) -> Option<UiPreferences> {
     let mut column_rules = file.column_rules;
     prune_column_rules(&mut column_rules);
     Some(UiPreferences {
+        theme_mode: file.theme_mode,
+        default_view: file.default_view,
+        path_bar_visible: file.path_bar_visible,
+        preview_visible: file.preview_visible,
         column_details_visible: file.column_details_visible,
         date_column_visible: file.date_column_visible,
         kind_column_visible: file.kind_column_visible,
@@ -179,6 +215,10 @@ fn load_ui_preferences_at(path: &Path) -> Option<UiPreferences> {
 
 fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(), String> {
     let UiPreferences {
+        theme_mode,
+        default_view,
+        path_bar_visible,
+        preview_visible,
         column_details_visible,
         date_column_visible,
         kind_column_visible,
@@ -190,6 +230,10 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
     prune_column_rules(&mut column_rules);
     let file = UiPreferencesFile {
         schema_version: UI_PREFERENCES_SCHEMA_VERSION,
+        theme_mode,
+        default_view,
+        path_bar_visible,
+        preview_visible,
         column_details_visible,
         date_column_visible,
         kind_column_visible,

@@ -7,15 +7,15 @@
   "build_profile": "release",
   "host": {
     "os": "windows",
-    "os_version": "Windows Server 2025 Datacenter",
+    "os_version": "unknown",
     "architecture": "x86_64",
-    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
-    "logical_cores": 4,
-    "memory_bytes": 17174360064,
+    "cpu_model": "Generic x64 CPU",
+    "logical_cores": 0,
+    "memory_bytes": 0,
     "fixture_filesystem": "NTFS",
     "fixture_disk_kind": "SSD",
-    "fixture_disk_total_bytes": 160939618304,
-    "fixture_disk_available_bytes": 29723181056
+    "fixture_disk_total_bytes": 0,
+    "fixture_disk_available_bytes": 0
   },
   "method": {
     "timer": "std::time::Instant (monotonic)",

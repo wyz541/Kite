@@ -7,15 +7,15 @@
   "build_profile": "release",
   "host": {
     "os": "macos",
-    "os_version": "macOS 27.0.1",
+    "os_version": "macOS",
     "architecture": "aarch64",
-    "cpu_model": "Apple M1 Max",
-    "logical_cores": 10,
-    "memory_bytes": 68719476736,
+    "cpu_model": "Generic Apple Silicon",
+    "logical_cores": 0,
+    "memory_bytes": 0,
     "fixture_filesystem": "apfs",
     "fixture_disk_kind": "SSD",
-    "fixture_disk_total_bytes": 994662584320,
-    "fixture_disk_available_bytes": 482029007218
+    "fixture_disk_total_bytes": 0,
+    "fixture_disk_available_bytes": 0
   },
   "method": {
     "timer": "std::time::Instant (monotonic)",

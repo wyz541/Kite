@@ -13,7 +13,7 @@
 方法：
 
 - 平台：macOS arm64。
-- 设备：Apple M1 Max，64 GiB。
+- 设备：Generic Apple Silicon，not recorded。
 - 配置：`standard`。
 - 每场景交互样本：30。
 - 每场景冷样本：10。

@@ -6,6 +6,8 @@ mod actions;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod archive_progress_window;
+#[cfg(windows)]
 mod context_menu;
 #[cfg(windows)]
 mod explorer_integration;
@@ -17,6 +19,8 @@ mod global_search_window;
 mod preview_window;
 #[cfg(windows)]
 mod shell_fs;
+#[cfg(windows)]
+mod single_instance;
 #[cfg(windows)]
 mod table;
 #[cfg(windows)]
@@ -34,17 +38,40 @@ pub use kite_core::{
     ui_preferences, updater, vcs,
 };
 #[cfg(windows)]
+use single_instance::{InstanceStart, SingleInstance};
+#[cfg(windows)]
 use tabs::KiteWindow;
 
 #[cfg(windows)]
 fn main() {
     kite_core::perf_trace::start();
     file_clipboard::trace_drag("Kite process started");
+    let launch_path = KiteApp::launch_path_override();
+    let single_instance = match SingleInstance::start() {
+        Ok(InstanceStart::Primary(instance)) => Some(instance),
+        Ok(InstanceStart::Secondary) => {
+            if let Err(error) = SingleInstance::forward(launch_path.as_deref()) {
+                eprintln!("{error}");
+            } else {
+                return;
+            }
+            None
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            None
+        }
+    };
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
+            let preferences = kite_core::ui_preferences::load_ui_preferences();
+            let theme_mode = match preferences.theme_mode {
+                kite_core::ui_preferences::ThemePreference::Dark => ThemeMode::Dark,
+                kite_core::ui_preferences::ThemePreference::Light => ThemeMode::Light,
+            };
+            Theme::change(theme_mode, None, cx);
             KiteApp::bind_keys(cx);
             KiteApp::install_menus(cx);
 
@@ -58,7 +85,7 @@ fn main() {
             };
 
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| KiteWindow::new(window, cx))
+                cx.new(|cx| KiteWindow::new(single_instance, window, cx))
             })
             .expect("failed to open Kite window");
             cx.activate(true);

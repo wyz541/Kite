@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crate::content_search::{
     self, CONTENT_SEARCH_MAX_FILES, ContentFileMatch, ContentSearchSnapshot,
 };
 use crate::fs::{FileEntry, format_size};
-use crate::table::icon_for;
+use crate::table::{icon_for, icon_for_path};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -960,7 +960,7 @@ impl GlobalSearchWindow {
                 }
             }))
             .child(
-                Icon::new(content_file_icon(&file.path))
+                Icon::new(icon_for_path(&file.path))
                     .size_4()
                     .text_color(cx.theme().muted_foreground),
             )
@@ -1284,24 +1284,6 @@ fn content_highlight_range(
         .map(|(index, _)| index)
         .unwrap_or(text.len());
     Some(start..end)
-}
-
-fn content_file_icon(path: &Path) -> IconName {
-    let extension = path
-        .extension()
-        .map(|value| value.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    match extension.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => IconName::FileImage,
-        "mp3" | "wav" | "flac" | "aac" | "ogg" => IconName::FileMusic,
-        "mp4" | "mkv" | "mov" | "avi" | "webm" => IconName::FileVideoCamera,
-        "zip" | "7z" | "rar" | "tar" | "gz" => IconName::FileArchive,
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "css" | "c" | "cpp" | "h" | "cs"
-        | "java" | "go" | "kt" => IconName::FileCode,
-        "txt" | "md" | "log" | "ini" | "toml" | "yaml" | "yml" | "json" | "pdf" | "doc"
-        | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => IconName::FileText,
-        _ => IconName::File,
-    }
 }
 
 fn compose_scope_menu_label(label: &str, detail: &str, disabled_reason: Option<&str>) -> String {

@@ -6,10 +6,10 @@
   "platform_machine": "arm64",
   "host": {
     "os": "darwin",
-    "os_version": "27.0.1",
+    "os_version": "unknown",
     "architecture": "arm64",
-    "cpu_model": "Apple M1 Max",
-    "memory_bytes": 68719476736
+    "cpu_model": "Generic Apple Silicon",
+    "memory_bytes": 0
   },
   "app_name": "Kite.app",
   "app_versions": [

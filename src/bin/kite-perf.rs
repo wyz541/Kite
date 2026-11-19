@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use image::{Rgba, RgbaImage};
 use kite_core::archive::{self, ArchiveFormat};
 use kite_core::devices;
 use kite_core::fs as kite_fs;
+use kite_core::preview::{load_image_preview, read_log_preview, read_text_preview};
 use kite_core::session::{
     SESSION_SCHEMA_VERSION, SessionStateDto, SessionTabDto, load_session_for_performance,
     save_session_for_performance,
@@ -665,6 +667,27 @@ fn create_text_file(path: &Path, size: u64) -> Result<u64, String> {
         .flush()
         .map_err(|error| format!("cannot flush text file: {error}"))?;
     Ok(written)
+}
+
+fn create_preview_image_fixture(path: &Path, width: u32, height: u32) -> Result<u64, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create preview-image directory: {error}"))?;
+    }
+    let image = RgbaImage::from_fn(width, height, |x, y| {
+        Rgba([
+            (x.wrapping_mul(13) & 0xff) as u8,
+            (y.wrapping_mul(7) & 0xff) as u8,
+            ((x + y).wrapping_mul(3) & 0xff) as u8,
+            255,
+        ])
+    });
+    image
+        .save(path)
+        .map_err(|error| format!("cannot write preview-image fixture: {error}"))?;
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("cannot inspect preview-image fixture: {error}"))
 }
 
 fn create_git_fixture(directory: &Path, count: usize) -> Result<(), String> {
@@ -1442,11 +1465,87 @@ fn measure_preview_and_editor(
         );
     }
 
+    if let Some(path) = fixtures.text_files.get(&100).cloned() {
+        let preview_path = path.clone();
+        measure_scenario(
+            results,
+            "Preview and editor",
+            "text_preview_100mib_prefix",
+            "core",
+            config.cold_samples.max(1),
+            1,
+            vec![
+                "Measures the bounded text-preview read, binary check, UTF-8 decoding, and excerpt construction."
+                    .to_string(),
+                "Only the first 64 KiB is read even when the source file is 100 MiB.".to_string(),
+            ],
+            |_| {
+                let preview = read_text_preview(&preview_path)?;
+                Ok(WorkAmount::items(preview.chars().count() as u64).with_details(json!({
+                    "source_bytes": 100_u64 * 1024 * 1024,
+                    "preview_chars": preview.chars().count(),
+                })))
+            },
+        );
+
+        let log_path = path;
+        measure_scenario(
+            results,
+            "Preview and editor",
+            "log_preview_100mib_tail",
+            "core",
+            config.cold_samples.max(1),
+            1,
+            vec![
+                "Measures seeking to the log tail and constructing a bounded final excerpt."
+                    .to_string(),
+                "Only the final 64 KiB is read.".to_string(),
+            ],
+            |_| {
+                let preview = read_log_preview(&log_path)?;
+                Ok(
+                    WorkAmount::items(preview.chars().count() as u64).with_details(json!({
+                        "source_bytes": 100_u64 * 1024 * 1024,
+                        "preview_chars": preview.chars().count(),
+                    })),
+                )
+            },
+        );
+    }
+
+    let preview_root = fixtures.root.join("preview");
+    let image_path = preview_root.join("image-3200x2000.png");
+    let image_bytes = create_preview_image_fixture(&image_path, 3_200, 2_000)?;
+    measure_scenario(
+        results,
+        "Preview and editor",
+        "image_preview_3200x2000_thumbnail",
+        "core",
+        config.cold_samples.max(1),
+        1,
+        vec![
+            "Measures first-frame decode, bounded resize, and BGRA conversion for the preview pane."
+                .to_string(),
+            "Animated images intentionally keep only the first frame.".to_string(),
+        ],
+        |_| {
+            let preview = load_image_preview(&image_path, 640, 960)?;
+            Ok(WorkAmount::items(1).with_details(json!({
+                "source_bytes": image_bytes,
+                "source_width": 3_200,
+                "source_height": 2_000,
+                "preview_width": preview.width,
+                "preview_height": preview.height,
+                "preview_bytes": preview.bgra.len(),
+            })))
+        },
+    );
+
     record_gap(
         results,
         "Preview and editor",
         "windows_runtime",
-        "GPUI image, Markdown, code, and log rendering plus scroll-stall measurement",
+        "GPUI image validation, layout, paint, and scroll-stall measurement",
     );
     record_gap(
         results,

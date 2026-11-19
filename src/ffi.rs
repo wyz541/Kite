@@ -463,6 +463,12 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    pub fn extract_archive_here(&self, path: String) -> Result<String, KiteError> {
+        archive::extract_here(&PathBuf::from(path))
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(KiteError::operation)
+    }
+
     pub fn save_text_document(
         &self,
         path: String,

@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -35,23 +35,160 @@ impl ArchiveFormat {
 }
 
 pub fn format_for_path(path: &Path) -> Option<ArchiveFormat> {
-    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
-    if name.ends_with(".zip") {
-        Some(ArchiveFormat::Zip)
-    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        Some(ArchiveFormat::TarGz)
-    } else {
-        None
-    }
+    archive_name_and_format(&path.file_name()?.to_string_lossy()).map(|(_, format)| format)
+}
+
+fn archive_name_and_format(name: &str) -> Option<(&str, ArchiveFormat)> {
+    [
+        (".zip", ArchiveFormat::Zip),
+        (".tar.gz", ArchiveFormat::TarGz),
+        (".tgz", ArchiveFormat::TarGz),
+    ]
+    .into_iter()
+    .find_map(|(suffix, format)| {
+        let stem_end = name.len().checked_sub(suffix.len())?;
+        let (stem, extension) = name.split_at_checked(stem_end)?;
+        extension
+            .eq_ignore_ascii_case(suffix)
+            .then_some((stem, format))
+    })
 }
 
 pub fn is_supported_archive(path: &Path) -> bool {
     format_for_path(path).is_some()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchivePhase {
+    Checking,
+    Working,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchiveProgress<'a> {
+    Destination(&'a Path),
+    Bytes {
+        phase: ArchivePhase,
+        processed: u64,
+        total: Option<u64>,
+    },
+    Finishing,
+}
+
+#[derive(Default)]
+struct ProgressReporter<'a> {
+    callback: Option<&'a mut dyn FnMut(ArchiveProgress<'_>)>,
+    last_update: Option<Instant>,
+}
+
+impl<'a> ProgressReporter<'a> {
+    fn new(callback: &'a mut dyn FnMut(ArchiveProgress<'_>)) -> Self {
+        Self {
+            callback: Some(callback),
+            last_update: None,
+        }
+    }
+
+    fn emit(&mut self, event: ArchiveProgress<'_>, force: bool) {
+        if let Some(callback) = self.callback.as_mut()
+            && (force
+                || self
+                    .last_update
+                    .is_none_or(|last| last.elapsed() >= Duration::from_millis(100)))
+        {
+            self.last_update = Some(Instant::now());
+            callback(event);
+        }
+    }
+
+    fn bytes(&mut self, phase: ArchivePhase, processed: u64, total: Option<u64>, force: bool) {
+        self.emit(
+            ArchiveProgress::Bytes {
+                phase,
+                processed,
+                total,
+            },
+            force,
+        );
+    }
+
+    fn meter<T>(
+        &mut self,
+        stream: T,
+        phase: ArchivePhase,
+        processed: u64,
+        total: Option<u64>,
+    ) -> Meter<'_, 'a, T> {
+        Meter {
+            stream,
+            report: self,
+            phase,
+            processed,
+            total,
+        }
+    }
+}
+
+struct Meter<'r, 'a, T> {
+    stream: T,
+    report: &'r mut ProgressReporter<'a>,
+    phase: ArchivePhase,
+    processed: u64,
+    total: Option<u64>,
+}
+
+impl<T> Meter<'_, '_, T> {
+    fn advance(&mut self, bytes: usize) {
+        self.processed = self.processed.saturating_add(bytes as u64);
+        self.report
+            .bytes(self.phase, self.processed, self.total, false);
+    }
+
+    fn finish(self) -> T {
+        self.report
+            .bytes(self.phase, self.processed, self.total, true);
+        self.stream
+    }
+}
+
+impl<T: Read> Read for Meter<'_, '_, T> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.stream.read(buffer)?;
+        self.advance(read);
+        Ok(read)
+    }
+}
+
+impl<T: Write> Write for Meter<'_, '_, T> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let written = self.stream.write(buffer)?;
+        self.advance(written);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
 pub fn compress(source: &Path, format: ArchiveFormat) -> Result<PathBuf, String> {
+    compress_impl(source, format, &mut ProgressReporter::default())
+}
+
+pub fn compress_with_progress(
+    source: &Path,
+    format: ArchiveFormat,
+    mut progress: impl FnMut(ArchiveProgress<'_>),
+) -> Result<PathBuf, String> {
+    compress_impl(source, format, &mut ProgressReporter::new(&mut progress))
+}
+
+fn compress_impl(
+    source: &Path,
+    format: ArchiveFormat,
+    report: &mut ProgressReporter<'_>,
+) -> Result<PathBuf, String> {
     let metadata = fs::metadata(source).map_err(|error| format!("无法读取待压缩项目：{error}"))?;
-    validate_compressible_source(source)?;
     let parent = source
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -64,12 +201,17 @@ pub fn compress(source: &Path, format: ArchiveFormat) -> Result<PathBuf, String>
     } else {
         source.file_stem().unwrap_or(original_name)
     };
+    let total = validate_compressible_source(
+        source,
+        format == ArchiveFormat::Zip && report.callback.is_some(),
+    )?;
     let destination = unique_archive_path(parent, source_name, format);
     let temporary = temporary_archive_path(parent, source_name, format);
+    report.emit(ArchiveProgress::Destination(&destination), true);
 
     let result = match format {
-        ArchiveFormat::Zip => write_zip(source, &temporary),
-        ArchiveFormat::TarGz => write_tar_gz(source, &temporary),
+        ArchiveFormat::Zip => write_zip(source, &temporary, total, report),
+        ArchiveFormat::TarGz => write_tar_gz(source, &temporary, metadata.is_dir(), report),
     };
     if let Err(error) = result {
         let _ = fs::remove_file(&temporary);
@@ -83,42 +225,133 @@ pub fn compress(source: &Path, format: ArchiveFormat) -> Result<PathBuf, String>
     Ok(destination)
 }
 
-pub fn extraction_directory(source: &Path) -> Result<PathBuf, String> {
-    source
+pub fn extract_here(source: &Path) -> Result<PathBuf, String> {
+    extract_here_impl(source, &mut ProgressReporter::default())
+}
+
+pub fn extract_here_with_progress(
+    source: &Path,
+    mut progress: impl FnMut(ArchiveProgress<'_>),
+) -> Result<PathBuf, String> {
+    extract_here_impl(source, &mut ProgressReporter::new(&mut progress))
+}
+
+fn extract_here_impl(source: &Path, report: &mut ProgressReporter<'_>) -> Result<PathBuf, String> {
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "无法确定压缩文件名称".to_string())?
+        .to_string_lossy();
+    let (name, format) = archive_name_and_format(&file_name)
+        .ok_or_else(|| "不支持此压缩格式。当前支持 ZIP 和 TAR.GZ。".to_string())?;
+    let parent = source
         .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "无法确定解压目标文件夹".to_string())
+        .ok_or_else(|| "无法确定解压目标文件夹".to_string())?;
+    let name = if cfg!(windows) {
+        // Windows normalizes trailing dots and spaces in directory names.
+        name.trim_end_matches(['.', ' '])
+    } else {
+        name
+    };
+    let name = match Path::new(name).components().next() {
+        Some(Component::Normal(_)) => name,
+        _ => "解压文件",
+    };
+
+    let mut index = 0;
+    let destination = loop {
+        let path = if index == 0 {
+            parent.join(name)
+        } else {
+            parent.join(format!("{name} ({index})"))
+        };
+        match fs::create_dir(&path) {
+            Ok(()) => break path,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => index += 1,
+            Err(error) => return Err(format!("无法创建解压目标文件夹：{error}")),
+        }
+    };
+
+    if let Err(error) = extract_contents(source, &destination, format, report) {
+        let _ = fs::remove_dir(&destination);
+        return Err(error);
+    }
+    Ok(destination)
 }
 
 pub fn extract(source: &Path, destination: &Path) -> Result<PathBuf, String> {
+    extract_impl(source, destination, &mut ProgressReporter::default())
+}
+
+pub fn extract_with_progress(
+    source: &Path,
+    destination: &Path,
+    mut progress: impl FnMut(ArchiveProgress<'_>),
+) -> Result<PathBuf, String> {
+    extract_impl(
+        source,
+        destination,
+        &mut ProgressReporter::new(&mut progress),
+    )
+}
+
+fn extract_impl(
+    source: &Path,
+    destination: &Path,
+    report: &mut ProgressReporter<'_>,
+) -> Result<PathBuf, String> {
     let format = format_for_path(source)
         .ok_or_else(|| "不支持此压缩格式。当前支持 ZIP 和 TAR.GZ。".to_string())?;
     fs::create_dir_all(destination).map_err(|error| format!("无法创建解压目标文件夹：{error}"))?;
 
-    match format {
-        ArchiveFormat::Zip => extract_zip(source, destination)?,
-        ArchiveFormat::TarGz => extract_tar_gz(source, destination)?,
-    }
+    extract_contents(source, destination, format, report)?;
     Ok(destination.to_path_buf())
 }
 
-fn validate_compressible_source(source: &Path) -> Result<(), String> {
+fn extract_contents(
+    source: &Path,
+    destination: &Path,
+    format: ArchiveFormat,
+    report: &mut ProgressReporter<'_>,
+) -> Result<(), String> {
+    report.emit(ArchiveProgress::Destination(destination), true);
+    match format {
+        ArchiveFormat::Zip => extract_zip(source, destination, report),
+        ArchiveFormat::TarGz => extract_tar_gz(source, destination, report),
+    }
+}
+
+fn validate_compressible_source(source: &Path, measure: bool) -> Result<Option<u64>, String> {
+    let mut total = measure.then_some(0u64);
     for item in WalkDir::new(source).follow_links(false) {
         let entry = item.map_err(|error| format!("读取待压缩项目失败：{error}"))?;
         if entry.path_is_symlink() {
             return Err(format!("暂不支持压缩符号链接：{}", entry.path().display()));
         }
+        if let Some(bytes) = total.as_mut()
+            && entry.file_type().is_file()
+        {
+            let metadata = entry
+                .metadata()
+                .map_err(|error| format!("读取待压缩项目属性失败：{error}"))?;
+            *bytes = bytes.saturating_add(metadata.len());
+        }
     }
-    Ok(())
+    Ok(total)
 }
 
-fn write_zip(source: &Path, destination: &Path) -> Result<(), String> {
+fn write_zip(
+    source: &Path,
+    destination: &Path,
+    total: Option<u64>,
+    report: &mut ProgressReporter<'_>,
+) -> Result<(), String> {
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)
         .map_err(|error| format!("无法创建 ZIP 文件：{error}"))?;
-    let mut writer = ZipWriter::new(file);
+    report.bytes(ArchivePhase::Working, 0, total, true);
+    let mut writer = report.meter(ZipWriter::new(file), ArchivePhase::Working, 0, total);
     let parent = source
         .parent()
         .ok_or_else(|| "不能压缩根目录".to_string())?;
@@ -144,10 +377,12 @@ fn write_zip(source: &Path, destination: &Path) -> Result<(), String> {
             .map_err(|error| format!("读取待压缩项目属性失败：{error}"))?;
         if metadata.is_dir() {
             writer
+                .stream
                 .add_directory_from_path(Path::new(&name), options)
                 .map_err(|error| format!("写入 ZIP 文件夹失败：{error}"))?;
         } else if metadata.is_file() {
             writer
+                .stream
                 .start_file_from_path(
                     Path::new(&name),
                     options.large_file(metadata.len() >= u32::MAX as u64),
@@ -162,20 +397,29 @@ fn write_zip(source: &Path, destination: &Path) -> Result<(), String> {
         }
     }
 
+    let writer = writer.finish();
+    report.emit(ArchiveProgress::Finishing, true);
     writer
         .finish()
         .map_err(|error| format!("完成 ZIP 文件失败：{error}"))?;
     Ok(())
 }
 
-fn write_tar_gz(source: &Path, destination: &Path) -> Result<(), String> {
+fn write_tar_gz(
+    source: &Path,
+    destination: &Path,
+    directory: bool,
+    report: &mut ProgressReporter<'_>,
+) -> Result<(), String> {
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)
         .map_err(|error| format!("无法创建 TAR.GZ 文件：{error}"))?;
     let encoder = GzEncoder::new(file, Compression::default());
-    let mut builder = tar::Builder::new(encoder);
+    report.bytes(ArchivePhase::Working, 0, None, true);
+    let mut meter = report.meter(encoder, ArchivePhase::Working, 0, None);
+    let mut builder = tar::Builder::new(&mut meter);
     let parent = source
         .parent()
         .ok_or_else(|| "不能压缩根目录".to_string())?;
@@ -183,25 +427,35 @@ fn write_tar_gz(source: &Path, destination: &Path) -> Result<(), String> {
         .strip_prefix(parent)
         .map_err(|_| "无法生成压缩文件内部路径".to_string())?;
     builder.follow_symlinks(false);
+    if directory {
+        builder.append_dir_all(relative, source)
+    } else {
+        builder.append_path_with_name(source, relative)
+    }
+    .map_err(|error| format!("写入 TAR.GZ 文件失败：{error}"))?;
     builder
-        .append_dir_all(relative, source)
-        .map_err(|error| format!("写入 TAR.GZ 文件失败：{error}"))?;
-    let encoder = builder
         .into_inner()
         .map_err(|error| format!("完成 TAR.GZ 文件失败：{error}"))?;
+    let encoder = meter.finish();
+    report.emit(ArchiveProgress::Finishing, true);
     encoder
         .finish()
         .map_err(|error| format!("完成 TAR.GZ 压缩失败：{error}"))?;
     Ok(())
 }
 
-fn extract_zip(source: &Path, destination: &Path) -> Result<(), String> {
+fn extract_zip(
+    source: &Path,
+    destination: &Path,
+    report: &mut ProgressReporter<'_>,
+) -> Result<(), String> {
     let file = File::open(source).map_err(|error| format!("无法打开 ZIP 文件：{error}"))?;
     let mut archive =
         ZipArchive::new(file).map_err(|error| format!("无法读取 ZIP 文件：{error}"))?;
     let mut directories = Vec::new();
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut total = 0u64;
 
     for index in 0..archive.len() {
         let entry = archive
@@ -228,10 +482,14 @@ fn extract_zip(source: &Path, destination: &Path) -> Result<(), String> {
             directories.push(target);
         } else {
             ensure_available(&target)?;
+            total = total.saturating_add(entry.size());
             files.push((index, target));
         }
     }
 
+    let total = Some(total);
+    let mut processed = 0;
+    report.bytes(ArchivePhase::Working, processed, total, true);
     for directory in directories {
         fs::create_dir_all(&directory).map_err(|error| format!("创建 ZIP 文件夹失败：{error}"))?;
     }
@@ -242,20 +500,35 @@ fn extract_zip(source: &Path, destination: &Path) -> Result<(), String> {
         let mut input = archive
             .by_index(index)
             .map_err(|error| format!("无法读取 ZIP 文件项：{error}"))?;
-        let mut output = OpenOptions::new()
+        let output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&target)
             .map_err(|error| format!("无法创建解压文件 {}：{error}", target.display()))?;
-        io::copy(&mut input, &mut output).map_err(|error| format!("写入解压文件失败：{error}"))?;
+        let mut meter = report.meter(output, ArchivePhase::Working, processed, total);
+        io::copy(&mut input, &mut meter).map_err(|error| format!("写入解压文件失败：{error}"))?;
+        processed = meter.processed;
     }
+    report.bytes(ArchivePhase::Working, processed, total, true);
     Ok(())
 }
 
-fn extract_tar_gz(source: &Path, destination: &Path) -> Result<(), String> {
-    validate_tar_gz(source, destination)?;
+fn extract_tar_gz(
+    source: &Path,
+    destination: &Path,
+    report: &mut ProgressReporter<'_>,
+) -> Result<(), String> {
     let file = File::open(source).map_err(|error| format!("无法打开 TAR.GZ 文件：{error}"))?;
-    let decoder = GzDecoder::new(file);
+    let total = file.metadata().ok().map(|metadata| metadata.len());
+    report.bytes(ArchivePhase::Checking, 0, total, true);
+    let mut meter = report.meter(file, ArchivePhase::Checking, 0, total);
+    validate_tar_gz(GzDecoder::new(&mut meter), destination)?;
+    meter.finish();
+
+    let file = File::open(source).map_err(|error| format!("无法打开 TAR.GZ 文件：{error}"))?;
+    report.bytes(ArchivePhase::Working, 0, total, true);
+    let mut meter = report.meter(file, ArchivePhase::Working, 0, total);
+    let decoder = GzDecoder::new(&mut meter);
     let mut archive = tar::Archive::new(decoder);
     for item in archive
         .entries()
@@ -269,12 +542,11 @@ fn extract_tar_gz(source: &Path, destination: &Path) -> Result<(), String> {
             return Err("TAR.GZ 文件包含不安全路径".to_string());
         }
     }
+    meter.finish();
     Ok(())
 }
 
-fn validate_tar_gz(source: &Path, destination: &Path) -> Result<(), String> {
-    let file = File::open(source).map_err(|error| format!("无法打开 TAR.GZ 文件：{error}"))?;
-    let decoder = GzDecoder::new(file);
+fn validate_tar_gz(decoder: impl Read, destination: &Path) -> Result<(), String> {
     let mut archive = tar::Archive::new(decoder);
     let mut seen = BTreeSet::new();
 
@@ -434,6 +706,138 @@ mod tests {
             archive.file_name().and_then(|name| name.to_str()),
             Some("hello.zip")
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn extract_here_puts_loose_files_in_a_named_folder() {
+        let (root, source) = fixture("extract-here-zip");
+        let archive = compress(&source.join("hello.txt"), ArchiveFormat::Zip).expect("compress");
+        let archive_path = root.join("report v1.ZIP");
+        fs::rename(archive, &archive_path).expect("rename archive");
+
+        let extracted = extract_here(&archive_path).expect("extract here");
+
+        assert_eq!(extracted, root.join("report v1"));
+        assert_eq!(
+            fs::read(extracted.join("hello.txt")).expect("read"),
+            b"hello"
+        );
+        assert!(!root.join("hello.txt").exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn extract_here_uses_a_new_folder_for_tar_gz_and_tgz() {
+        let (root, source) = fixture("extract-here-tar");
+        let archive = compress(&source, ArchiveFormat::TarGz).expect("compress");
+        let (tar_gz, tgz) = (root.join("report.TAR.GZ"), root.join("report.tgz"));
+        fs::rename(source, root.join("input")).expect("relocate original contents");
+        fs::rename(archive, &tar_gz).expect("rename archive");
+        fs::copy(&tar_gz, &tgz).expect("copy archive");
+        let existing = root.join("report");
+        fs::create_dir(&existing).expect("create existing folder");
+        fs::write(existing.join("original.txt"), b"original").expect("seed existing folder");
+
+        for (source, index) in [(&tar_gz, 1), (&tgz, 2)] {
+            let extracted = extract_here(source).expect("extract here");
+            assert_eq!(extracted, root.join(format!("report ({index})")));
+            assert_eq!(
+                fs::read(extracted.join("sample/nested/data.txt")).expect("read nested file"),
+                b"data"
+            );
+        }
+        assert_eq!(
+            fs::read(existing.join("original.txt")).expect("read"),
+            b"original"
+        );
+        assert!(!existing.join("sample").exists());
+        assert!(!root.join("sample").exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn zip_progress_reports_destination_and_payload_in_both_directions() {
+        let (root, source) = fixture("zip-progress");
+        let expected_archive = root.join("sample.zip");
+        let mut samples = Vec::new();
+        let archive = compress_with_progress(&source, ArchiveFormat::Zip, |event| match event {
+            ArchiveProgress::Destination(path) => assert_eq!(path, expected_archive),
+            ArchiveProgress::Bytes {
+                phase: ArchivePhase::Working,
+                processed,
+                total,
+            } => {
+                samples.push((processed, total));
+            }
+            _ => {}
+        })
+        .expect("compress with progress");
+        assert_eq!(samples.first(), Some(&(0, Some(9))));
+        assert_eq!(samples.last(), Some(&(9, Some(9))));
+
+        samples.clear();
+        let expected_folder = root.join("sample (1)");
+        let extracted = extract_here_with_progress(&archive, |event| match event {
+            ArchiveProgress::Destination(path) => assert_eq!(path, expected_folder),
+            ArchiveProgress::Bytes {
+                phase: ArchivePhase::Working,
+                processed,
+                total,
+            } => {
+                samples.push((processed, total));
+            }
+            _ => {}
+        })
+        .expect("extract here with progress");
+        assert_eq!(extracted, expected_folder);
+        assert_eq!(samples.first(), Some(&(0, Some(9))));
+        assert_eq!(samples.last(), Some(&(9, Some(9))));
+        assert_eq!(
+            fs::read(extracted.join("sample/hello.txt")).unwrap(),
+            b"hello"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn tar_gz_progress_covers_single_file_compression_and_both_read_phases() {
+        let (root, source) = fixture("tar-gz-progress");
+        let source = source.join("hello.txt");
+        let mut tar_bytes = 0;
+        let archive = compress_with_progress(&source, ArchiveFormat::TarGz, |event| {
+            if let ArchiveProgress::Bytes {
+                phase: ArchivePhase::Working,
+                processed,
+                total,
+            } = event
+            {
+                assert!(total.is_none());
+                tar_bytes = processed;
+            }
+        })
+        .expect("compress a single file");
+        assert!(tar_bytes > 5);
+
+        let length = fs::metadata(&archive).unwrap().len();
+        let mut phases = Vec::new();
+        let destination = root.join("extracted");
+        extract_with_progress(&archive, &destination, |event| {
+            if let ArchiveProgress::Bytes {
+                phase,
+                processed,
+                total,
+            } = event
+            {
+                assert_eq!(total, Some(length));
+                if processed == 0 || phases.last() != Some(&phase) {
+                    phases.push(phase);
+                }
+            }
+        })
+        .expect("extract to a chosen directory");
+        assert_eq!(phases, [ArchivePhase::Checking, ArchivePhase::Working]);
+        assert_eq!(fs::read(destination.join("hello.txt")).unwrap(), b"hello");
         fs::remove_dir_all(root).expect("cleanup");
     }
 

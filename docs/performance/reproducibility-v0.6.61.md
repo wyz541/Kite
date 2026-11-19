@@ -10,9 +10,9 @@
 | Commit | `ae82ed2f682f861a2f50704bf1f62e91be437274` |
 | 配置 | `standard` |
 | 构建 | release |
-| 设备 | Apple M1 Max |
-| 内存 | 64 GiB |
-| 系统 | macOS 27.0.1 |
+| 设备 | Generic Apple Silicon |
+| 内存 | not recorded |
+| 系统 | macOS |
 | 文件系统 | APFS |
 | 交互样本 | 30 |
 | 冷样本 | 10 |

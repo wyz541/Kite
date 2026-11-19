@@ -60,11 +60,11 @@ macOS 13 到 15 自动使用标准材质。
 上级目录继续可见，当前路径和选择关系保持清晰。
 窗口变窄时，栏目进入横向滚动区域，不丢失已加载的层级。
 
-### 每个平台都使用原生界面
+### 每个平台都保留熟悉的操作方式
 
-Windows 使用 Rust、GPUI 和 Windows Shell。
-macOS 使用 SwiftUI、AppKit、Quick Look 和 Finder 集成。
-两端共享 Rust Core，但各自保留平台原生交互。
+Windows 和 macOS 都提供符合系统习惯的窗口、菜单和快捷操作。
+文件复制、粘贴、预览和打开方式直接使用系统能力。
+常用操作逻辑一致，切换平台时也能快速上手。
 
 ### 文件和操作放在一起
 
@@ -93,7 +93,7 @@ macOS 可与 Finder 共享文件剪贴板。
 - 支持文件类型筛选、分组和显示规则重置。
 - macOS 和 Windows 支持分栏递归搜索。
 - 两端通过独立全局搜索窗口搜索文件名或文件内容。
-- 全局名称和内容搜索由 Kite 启动的 Kensaku daemon 提供。
+- 全局名称和内容搜索在本地完成，不上传文件。
 - 名称和内容模式支持当前文件夹、收藏文件夹和本地磁盘。
 - macOS 使用系统根卷名称作为范围名称，并搜索 `/`；Windows 提供“网络卷”范围。
 - 多磁盘范围只在按 Enter 或点击搜索后执行，避免输入时重复扫描。
@@ -117,15 +117,15 @@ macOS 可与 Finder 共享文件剪贴板。
 - 与系统文件剪贴板互通。
 - 复制冲突自动生成唯一名称，不静默覆盖。
 - 拒绝将文件夹复制到自身内部。
-- Windows 提供 Shell 原生右键菜单和第三方扩展入口。
+- Windows 提供系统原生右键菜单和第三方扩展入口。
 - Windows 支持 WPD/MTP 设备内的复制、新建、重命名和删除。
 - macOS 支持已挂载便携卷的文件系统操作。
 
 ### 预览与编辑
 
 - 图片、文本、TXT、Markdown 和代码预览。
-- Windows 提供独立预览窗口和 GPUI 文本编辑器。
-- macOS 使用 Quick Look、原生预览卡和 `NSTextView` 编辑器。
+- Windows 提供独立预览窗口和内置文本编辑器。
+- macOS 提供系统快速预览、原生预览卡和系统文本编辑器。
 - 预览信息支持选择和复制。
 - 文本编辑器支持未保存状态保护和外部修改冲突检测。
 
@@ -135,12 +135,12 @@ macOS 可与 Finder 共享文件剪贴板。
 - 文件夹显示子项目中优先级最高的状态。
 - 右键菜单支持 Git 和 SVN 常用操作。
 - Windows 可调用 TortoiseGit、TortoiseSVN 和 Shell 扩展。
-- Windows 搜索和文件读取在后台执行，界面线程不等待磁盘响应。
+- Windows 搜索和文件读取在后台执行，界面不会等待磁盘响应。
 
 ### 原生平台集成
 
-- Windows：Explorer 文件剪贴板、回收站、Shell 菜单和默认文件夹打开方式。
-- macOS：Finder 文件剪贴板、Quick Look、分享菜单、LaunchServices 和文件查看器配置。
+- Windows：Explorer 文件剪贴板、回收站、系统右键菜单和默认文件夹打开方式。
+- macOS：Finder 文件剪贴板、系统快速预览、分享菜单、默认应用关联和文件查看器配置。
 - 浅色与深色主题。
 - 收藏配置跨启动保留。
 - 更新包使用 SHA-256 校验；更新失败时恢复旧版本。
@@ -149,7 +149,7 @@ macOS 可与 Finder 共享文件剪贴板。
 
 | 能力 | Windows | macOS |
 | --- | --- | --- |
-| 原生界面 | Rust + GPUI | SwiftUI + AppKit |
+| 界面体验 | 符合 Windows 习惯 | 符合 macOS 习惯 |
 | 分栏导航 | 已支持 | 已支持 |
 | 页签与会话恢复 | 已支持 | 已支持 |
 | 详细信息列 | 已支持 | 已支持 |
@@ -164,8 +164,8 @@ macOS 可与 Finder 共享文件剪贴板。
 | ZIP、TAR.GZ 压缩与解压 | 已支持 | 已支持 |
 | 自定义详细信息列 | 已支持 | 已支持 |
 | 列宽预设与布局恢复 | 已支持 | 已支持 |
-| 文件预览 | GPUI 预览 | Quick Look |
-| 文本编辑器 | GPUI 编辑器 | 原生 AppKit 编辑器 |
+| 文件预览 | 内置预览 | 系统快速预览 |
+| 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |
 | 默认文件夹打开方式 | 已支持 | 受 macOS 版本限制 |
@@ -181,13 +181,13 @@ Kite 仍处于 `0.6.x` 活跃开发阶段。
 - 分栏视图支持批量选择。列表视图仍只保留一个当前行。
 - 文件名搜索最多显示 1000 个结果。
 - 内容搜索最多显示 50 个文件。
-- Kensaku daemon 首次使用会在后台建立本地索引。
-- Kensaku sidecar 必须随发布包安装；源代码构建运行 `python scripts/kensaku/build_sidecars.py`。
-- Kensaku CLI 路径见 [Kensaku 搜索后端](docs/search/kensaku-backend.md)。
-- Kensaku 内容覆盖范围取决于已安装的 extractor、OCR pack 和 Kensaku 配置。
+- 首次使用内容搜索时，Kite 会在后台建立本地索引。
+- 从源码构建时，搜索组件必须随应用一起构建。
+- 搜索组件安装说明见 [本地搜索后端](docs/search/kensaku-backend.md)。
+- 内容搜索覆盖范围取决于已安装的提取器和文字识别组件。
 - WPD/MTP 删除操作不会进入回收站。
 - Windows 禁止重命名或删除 WPD/MTP 设备根目录。
-- WPD/MTP 写入速度取决于设备和 Windows Shell。
+- WPD/MTP 写入速度取决于设备和系统连接。
 - WPD/MTP 项目复制使用 Kite 内部剪贴板。
 - Windows WPD/MTP 设备内递归搜索尚未支持。
 - macOS 便携设备必须挂载为可写卷。

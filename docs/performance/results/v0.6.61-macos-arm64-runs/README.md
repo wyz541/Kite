@@ -14,9 +14,9 @@
 运行环境：
 
 - Commit：`d2ee7335cc7ecf78a4419a31d6cfe058025a3aea`
-- 设备：Apple M1 Max
-- 内存：64 GiB
-- 系统：macOS 27.0.1
+- 设备：Generic Apple Silicon
+- 内存：not recorded
+- 系统：macOS
 - 文件系统：APFS
 - 每场景交互样本：30
 - 每场景冷样本：10

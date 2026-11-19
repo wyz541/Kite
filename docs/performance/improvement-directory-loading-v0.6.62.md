@@ -18,8 +18,8 @@
 | 字段 | 内容 |
 | --- | --- |
 | 平台 | macOS arm64 |
-| 设备 | Apple M1 Max |
-| 内存 | 64 GiB |
+| 设备 | Generic Apple Silicon |
+| 内存 | not recorded |
 | 文件系统 | APFS |
 | 配置 | `standard` |
 | 构建 | release |
@@ -89,6 +89,6 @@
 ## 9. 边界
 
 - 测试未清理操作系统缓存。
-- 数据来自一台 Apple M1 Max 和 APFS。
+- 数据来自一台 Generic Apple Silicon 和 APFS。
 - Windows 性能提升仍需独立基准数据。
 - 本报告只证明目录读取优化，不证明整个产品性能提升。

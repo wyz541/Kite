@@ -7,15 +7,15 @@
   "build_profile": "release",
   "host": {
     "os": "macos",
-    "os_version": "macOS 26.6.2 Tahoe",
+    "os_version": "macOS",
     "architecture": "aarch64",
-    "cpu_model": "Apple M1 (Virtual)",
-    "logical_cores": 3,
-    "memory_bytes": 7516192768,
+    "cpu_model": "Generic Apple Silicon",
+    "logical_cores": 0,
+    "memory_bytes": 0,
     "fixture_filesystem": "apfs",
     "fixture_disk_kind": "SSD",
-    "fixture_disk_total_bytes": 343073095680,
-    "fixture_disk_available_bytes": 100914735022
+    "fixture_disk_total_bytes": 0,
+    "fixture_disk_available_bytes": 0
   },
   "method": {
     "timer": "std::time::Instant (monotonic)",

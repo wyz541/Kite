@@ -1,6 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -10,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::actions::*;
 use crate::archive::{self, ArchiveFormat};
+use crate::archive_progress_window;
 use crate::context_menu::{
     ContextMenuCapabilities, ContextMenuTarget, render_context_menu, request_system_menu,
     show_properties,
@@ -24,9 +24,11 @@ use crate::fs::{
 };
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
-use crate::preview_window::PreviewWindow;
+use crate::preview_window::{PreviewWindow, preview_render_image};
 use crate::shell_fs;
-use crate::table::{FileTableDelegate, icon_color, icon_for, vcs_icon_badge};
+use crate::table::{
+    FileIconKind, FileTableDelegate, folder_icon_color, icon_color, icon_for, vcs_icon_badge,
+};
 use crate::text_editor;
 use crate::ui_preferences::{self, ColumnGroupPreference as ColumnGroup, ColumnViewRule};
 use crate::vcs::{
@@ -35,7 +37,7 @@ use crate::vcs::{
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{SelectableText, TextSelectionHandle};
-use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -51,11 +53,26 @@ use gpui_kit::component::{
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
+use kite_core::preview::{PreviewImageData, load_image_preview};
+pub(crate) use kite_core::preview::{read_log_preview, read_text_preview};
 
-const SIDEBAR_WIDTH: f32 = 218.;
-const TOOLBAR_CONTROL_HEIGHT: f32 = 40.;
-const STORAGE_SIDEBAR_ROW_HEIGHT: f32 = 52.;
-const COLUMN_WIDTH: f32 = 274.;
+const SIDEBAR_WIDTH: f32 = 208.;
+const TOOLBAR_CONTROL_HEIGHT: f32 = 36.;
+const TOOLBAR_VERTICAL_PADDING: f32 = 4.;
+const STORAGE_SIDEBAR_ROW_HEIGHT: f32 = 48.;
+const COLUMN_WIDTH: f32 = 252.;
+const COLUMN_STRIP_GAP: f32 = 4.;
+const COLUMN_STRIP_PADDING: f32 = 4.;
+const COLUMN_HEADER_HEIGHT: f32 = 32.;
+const COLUMN_SEARCH_HEIGHT: f32 = 32.;
+const PREVIEW_WIDTH: f32 = 300.;
+const PREVIEW_LOAD_DEBOUNCE: Duration = Duration::from_millis(45);
+const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 12;
+const COLUMN_PREVIEW_IMAGE_MAX_WIDTH: u32 = 640;
+const COLUMN_PREVIEW_IMAGE_MAX_HEIGHT: u32 = 960;
+const ISLAND_GAP: f32 = 4.;
+const COMPACT_ISLAND_PADDING: f32 = 6.;
+const STATUS_BAR_HEIGHT: f32 = 28.;
 const DETAILED_COLUMN_MIN_WIDTH: f32 = 250.;
 const DETAILED_COLUMN_MAX_WIDTH: f32 = 640.;
 const DETAILED_COLUMN_NAME_OVERHEAD: f32 = 150.;
@@ -488,6 +505,14 @@ impl ColumnPane {
         self.refresh_view();
     }
 
+    fn first_search_row_index(&self) -> Option<usize> {
+        let first_match = self.entries.first()?.path.as_path();
+        self.display_rows().iter().position(|row| match row {
+            ColumnDisplayRow::Entry(entry) => same_path(&entry.path, first_match),
+            ColumnDisplayRow::Group { .. } => false,
+        })
+    }
+
     fn display_rows(&self) -> Vec<ColumnDisplayRow> {
         if self.group == ColumnGroup::None {
             return self
@@ -679,6 +704,56 @@ struct ColumnListScroll {
     handle: UniformListScrollHandle,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewImageCacheKey {
+    path: PathBuf,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+impl PreviewImageCacheKey {
+    fn for_entry(entry: &FileEntry) -> Self {
+        Self {
+            path: entry.path.clone(),
+            size: entry.size,
+            modified: entry.modified,
+        }
+    }
+}
+
+struct PreviewImageCache {
+    entries: VecDeque<(PreviewImageCacheKey, Arc<RenderImage>)>,
+}
+
+impl PreviewImageCache {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &PreviewImageCacheKey) -> Option<Arc<RenderImage>> {
+        let index = self.entries.iter().position(|(cached, _)| cached == key)?;
+        let entry = self.entries.remove(index)?;
+        let image = entry.1.clone();
+        self.entries.push_front(entry);
+        Some(image)
+    }
+
+    fn insert(&mut self, key: PreviewImageCacheKey, image: Arc<RenderImage>) {
+        if let Some(index) = self.entries.iter().position(|(cached, _)| cached == &key) {
+            self.entries.remove(index);
+        }
+        self.entries.push_front((key, image));
+        self.entries.truncate(PREVIEW_IMAGE_CACHE_CAPACITY);
+    }
+}
+
+enum PreviewLoadResult {
+    Text(Result<String, String>),
+    Image(Result<PreviewImageData, String>),
+}
+
 #[derive(Clone)]
 struct ColumnPreviewState {
     path: PathBuf,
@@ -686,6 +761,7 @@ struct ColumnPreviewState {
     lines: Arc<Vec<SharedString>>,
     selection: Option<TextSelectionHandle>,
     markdown_view: Option<Entity<TextViewState>>,
+    image: Option<Arc<RenderImage>>,
     error: Option<SharedString>,
     loading: bool,
     scroll: UniformListScrollHandle,
@@ -704,7 +780,7 @@ pub(crate) struct AppLaunchTarget {
 }
 
 impl AppLaunchTarget {
-    fn from_existing_path(path: PathBuf) -> Option<Self> {
+    pub(crate) fn from_existing_path(path: PathBuf) -> Option<Self> {
         let path = absolute_path(path);
         let metadata = std::fs::metadata(&path).ok()?;
         if metadata.is_dir() {
@@ -723,6 +799,63 @@ impl AppLaunchTarget {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsSection {
+    General,
+    Appearance,
+    Columns,
+    Integration,
+    Updates,
+    About,
+}
+
+impl SettingsSection {
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Appearance,
+        Self::Columns,
+        Self::Integration,
+        Self::Updates,
+        Self::About,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "常规",
+            Self::Appearance => "外观",
+            Self::Columns => "分栏与列表",
+            Self::Integration => "文件管理器",
+            Self::Updates => "更新",
+            Self::About => "关于",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsBoolField {
+    PathBar,
+    Preview,
+    ColumnDetails,
+    DateColumn,
+    KindColumn,
+    SizeColumn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsIntegrationAction {
+    SetDefault,
+    RestoreDefault,
+    CreateShortcut,
+    CheckUpdates,
+}
+
+struct SettingsState {
+    section: SettingsSection,
+    preferences: ui_preferences::UiPreferences,
+    status: Option<SharedString>,
+    error: Option<SharedString>,
+}
+
 pub struct KiteApp {
     current_dir: PathBuf,
     history: Vec<PathBuf>,
@@ -735,6 +868,8 @@ pub struct KiteApp {
     address_input: Entity<InputState>,
     search_input: Entity<InputState>,
     column_search_input: Entity<InputState>,
+    search_input_focused: bool,
+    column_search_input_focused: bool,
     table: Entity<TableState<FileTableDelegate>>,
     focus_handle: FocusHandle,
     active_search: Option<SearchState>,
@@ -743,6 +878,7 @@ pub struct KiteApp {
     skipped: usize,
     error: Option<SharedString>,
     notice: Option<SharedString>,
+    settings: Option<SettingsState>,
     update_in_progress: bool,
     update_download_progress: Option<crate::updater::UpdateDownloadProgress>,
     modal: Option<ModalState>,
@@ -752,6 +888,8 @@ pub struct KiteApp {
     vcs_generation: u64,
     search_cancel: Option<Arc<AtomicBool>>,
     column_search_path: Option<PathBuf>,
+    last_column_path: Option<PathBuf>,
+    column_search_scroll_target: Option<(PathBuf, usize)>,
     column_search_loading: bool,
     column_search_generation: u64,
     column_search_cancel: Option<Arc<AtomicBool>>,
@@ -777,6 +915,7 @@ pub struct KiteApp {
     column_preview: Option<ColumnPreviewState>,
     pending_file_selection: Option<PathBuf>,
     preview_generation: u64,
+    preview_image_cache: PreviewImageCache,
     _preview_task: Task<()>,
     path_bar_scroll: ScrollHandle,
     path_bar_scroll_pending: bool,
@@ -791,11 +930,16 @@ pub struct KiteApp {
 }
 
 impl KiteApp {
-    pub(crate) fn launch_target_override() -> Option<AppLaunchTarget> {
+    pub(crate) fn launch_path_override() -> Option<PathBuf> {
         std::env::args_os()
             .nth(1)
             .map(PathBuf::from)
-            .and_then(AppLaunchTarget::from_existing_path)
+            .map(absolute_path)
+            .filter(|path| std::fs::metadata(path).is_ok())
+    }
+
+    pub(crate) fn launch_target_override() -> Option<AppLaunchTarget> {
+        Self::launch_path_override().and_then(AppLaunchTarget::from_existing_path)
     }
 
     pub(crate) fn launch_directory_override() -> Option<PathBuf> {
@@ -815,7 +959,20 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_at_with_state(home, None, ViewMode::Columns, true, clipboard, window, cx)
+        let preferences = ui_preferences::load_ui_preferences();
+        let view_mode = match preferences.default_view {
+            ui_preferences::DefaultViewPreference::Columns => ViewMode::Columns,
+            ui_preferences::DefaultViewPreference::List => ViewMode::List,
+        };
+        Self::new_at_with_state(
+            home,
+            None,
+            view_mode,
+            preferences.path_bar_visible,
+            clipboard,
+            window,
+            cx,
+        )
     }
 
     pub(crate) fn new_launch_target(
@@ -824,11 +981,16 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let preferences = ui_preferences::load_ui_preferences();
+        let view_mode = match preferences.default_view {
+            ui_preferences::DefaultViewPreference::Columns => ViewMode::Columns,
+            ui_preferences::DefaultViewPreference::List => ViewMode::List,
+        };
         Self::new_at_with_state(
             target.directory,
             target.file,
-            ViewMode::Columns,
-            true,
+            view_mode,
+            preferences.path_bar_visible,
             clipboard,
             window,
             cx,
@@ -950,9 +1112,11 @@ impl KiteApp {
                 }
                 InputEvent::Focus => {
                     this.search_visible = true;
+                    this.search_input_focused = true;
                     cx.notify();
                 }
                 InputEvent::Blur => {
+                    this.search_input_focused = false;
                     if this.active_search.is_none() && this.search_input.read(cx).value().is_empty()
                     {
                         this.search_visible = false;
@@ -978,7 +1142,12 @@ impl KiteApp {
                         this.schedule_column_search(value, window, cx);
                     }
                 }
-                _ => {}
+                InputEvent::Focus => {
+                    this.column_search_input_focused = true;
+                }
+                InputEvent::Blur => {
+                    this.column_search_input_focused = false;
+                }
             },
         );
         let table_subscription = cx.subscribe_in(&table, window, Self::on_table_event);
@@ -995,6 +1164,8 @@ impl KiteApp {
             address_input,
             search_input,
             column_search_input,
+            search_input_focused: false,
+            column_search_input_focused: false,
             table,
             focus_handle: cx.focus_handle(),
             active_search: None,
@@ -1003,6 +1174,7 @@ impl KiteApp {
             skipped: 0,
             error: None,
             notice: None,
+            settings: None,
             update_in_progress: false,
             update_download_progress: None,
             modal: None,
@@ -1012,6 +1184,8 @@ impl KiteApp {
             vcs_generation: 0,
             search_cancel: None,
             column_search_path: None,
+            last_column_path: None,
+            column_search_scroll_target: None,
             column_search_loading: false,
             column_search_generation: 0,
             column_search_cancel: None,
@@ -1023,7 +1197,7 @@ impl KiteApp {
             show_path_bar,
             address_editing: false,
             search_visible: false,
-            show_preview: true,
+            show_preview: ui_preferences.preview_visible,
             show_column_details: ui_preferences.column_details_visible,
             show_date_column: ui_preferences.date_column_visible,
             show_kind_column: ui_preferences.kind_column_visible,
@@ -1037,6 +1211,7 @@ impl KiteApp {
             column_preview: None,
             pending_file_selection: initial_file.clone(),
             preview_generation: 0,
+            preview_image_cache: PreviewImageCache::new(),
             _preview_task: Task::ready(()),
             path_bar_scroll: ScrollHandle::new(),
             path_bar_scroll_pending: false,
@@ -1071,12 +1246,19 @@ impl KiteApp {
         &self.current_dir
     }
 
+    pub(crate) fn settings_visible(&self) -> bool {
+        self.settings.is_some()
+    }
+
     pub(crate) fn preview_visible(&self) -> bool {
         self.show_preview
     }
 
     pub(crate) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
         self.show_preview = !self.show_preview;
+        if let Err(error) = self.save_layout_preferences() {
+            self.notice = Some(error.into());
+        }
         if self.show_preview {
             if let Some(entry) = self.selected_last_column_file() {
                 self.start_column_preview(entry, cx);
@@ -1130,6 +1312,12 @@ impl KiteApp {
 
     fn save_layout_preferences(&self) -> Result<(), String> {
         let mut preferences = ui_preferences::load_ui_preferences();
+        preferences.default_view = match self.view_mode {
+            ViewMode::Columns => ui_preferences::DefaultViewPreference::Columns,
+            ViewMode::List => ui_preferences::DefaultViewPreference::List,
+        };
+        preferences.path_bar_visible = self.show_path_bar;
+        preferences.preview_visible = self.show_preview;
         preferences.column_details_visible = self.show_column_details;
         preferences.date_column_visible = self.show_date_column;
         preferences.kind_column_visible = self.show_kind_column;
@@ -1353,6 +1541,7 @@ impl KiteApp {
             KeyBinding::new("delete", RecycleSelection, Some("Kite")),
             KeyBinding::new("enter", OpenSelection, Some("Kite")),
             KeyBinding::new("escape", ClearSearchOverlay, Some("Kite")),
+            KeyBinding::new("secondary-comma", OpenSettings, Some("Kite")),
             KeyBinding::new("secondary-s", SaveEditor, Some("KiteEditor")),
         ]);
     }
@@ -1377,6 +1566,8 @@ impl KiteApp {
                 MenuItem::action("显示或隐藏路径栏", TogglePathBar),
             ]),
             Menu::new("Kite").items([
+                MenuItem::action("设置…", OpenSettings),
+                MenuItem::separator(),
                 MenuItem::action("检查更新…", CheckForUpdates),
                 MenuItem::separator(),
                 MenuItem::action("设为默认资源管理器…", SetDefaultExplorer),
@@ -1739,6 +1930,7 @@ impl KiteApp {
 
         self.cancel_column_search_task();
         self.column_search_path = Some(path);
+        self.column_search_scroll_target = None;
         for pane in &mut self.column_panes {
             pane.clear_search_results();
         }
@@ -1747,6 +1939,53 @@ impl KiteApp {
             input.focus(window, cx);
         });
         cx.notify();
+    }
+
+    fn handle_column_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.view_mode != ViewMode::Columns
+            || self.settings.is_some()
+            || self.modal.is_some()
+            || self.address_editing
+            || self.search_input_focused
+            || self.column_search_input_focused
+        {
+            return;
+        }
+
+        let Some(text) = typed_column_search_text(event) else {
+            return;
+        };
+        let Some(path) = self.last_column_path.clone().filter(|path| {
+            self.column_panes
+                .iter()
+                .any(|pane| same_path(&pane.path, path))
+        }) else {
+            return;
+        };
+
+        let value = if self
+            .column_search_path
+            .as_ref()
+            .is_some_and(|active| same_path(active, &path))
+        {
+            let mut value = self.column_search_input.read(cx).value().to_string();
+            value.push_str(&text);
+            value
+        } else {
+            self.toggle_column_search(path, window, cx);
+            text
+        };
+
+        self.column_search_input.update(cx, |input, cx| {
+            input.set_value(value.clone(), window, cx);
+            input.focus(window, cx);
+        });
+        self.schedule_column_search(value, window, cx);
     }
 
     fn submit_column_search(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1777,6 +2016,7 @@ impl KiteApp {
         let Some(root) = self.column_search_path.clone() else {
             return;
         };
+        self.column_search_scroll_target = None;
         let sort = self
             .column_panes
             .iter()
@@ -1823,6 +2063,9 @@ impl KiteApp {
                                 snapshot.entries,
                                 snapshot.truncated,
                             );
+                            this.column_search_scroll_target = pane
+                                .first_search_row_index()
+                                .map(|row| (snapshot.root.clone(), row));
                         }
                         this.clear_hidden_column_selection();
                         this.column_scroll_pending = true;
@@ -1853,6 +2096,7 @@ impl KiteApp {
 
     fn clear_column_search_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_column_search_task();
+        self.column_search_scroll_target = None;
         for pane in &mut self.column_panes {
             pane.clear_search_results();
         }
@@ -1866,6 +2110,7 @@ impl KiteApp {
     fn close_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_column_search_results(window, cx);
         self.column_search_path = None;
+        self.column_search_input_focused = false;
         cx.notify();
     }
 
@@ -2264,6 +2509,9 @@ impl KiteApp {
         }
         self.view_mode = ViewMode::List;
         self.column_selected_path = None;
+        if let Err(error) = self.save_layout_preferences() {
+            self.notice = Some(error.into());
+        }
         self.invalidate_columns();
         self.sync_directory_watchers();
         if self.active_search.is_none() {
@@ -2274,6 +2522,9 @@ impl KiteApp {
 
     fn show_columns_view(&mut self, _: &ShowColumnsView, _: &mut Window, cx: &mut Context<Self>) {
         self.view_mode = ViewMode::Columns;
+        if let Err(error) = self.save_layout_preferences() {
+            self.notice = Some(error.into());
+        }
         self.column_selected_path = None;
         if self.active_search.is_none() {
             self.load_columns(self.current_dir.clone(), cx);
@@ -2284,6 +2535,9 @@ impl KiteApp {
     fn toggle_path_bar(&mut self, _: &TogglePathBar, _: &mut Window, cx: &mut Context<Self>) {
         self.show_path_bar = !self.show_path_bar;
         self.path_bar_scroll_pending = self.show_path_bar;
+        if let Err(error) = self.save_layout_preferences() {
+            self.notice = Some(error.into());
+        }
         cx.notify();
     }
     fn start_search(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -2649,7 +2903,9 @@ impl KiteApp {
             ContextMenuCommand::CompressTarGz => {
                 self.compress_path(action.target.clone(), ArchiveFormat::TarGz, window, cx)
             }
-            ContextMenuCommand::ExtractHere => self.extract_here(action.target.clone(), window, cx),
+            ContextMenuCommand::ExtractHere => {
+                self.extract_archive(action.target.clone(), None, window, cx);
+            }
             ContextMenuCommand::ExtractTo => {
                 self.extract_to_directory(action.target.clone(), window, cx)
             }
@@ -3393,6 +3649,12 @@ impl KiteApp {
         let path = entry.path.clone();
         let load_text = !is_image_preview_entry(&entry) && is_text_preview_entry(&entry);
         let log_preview = is_log_preview_entry(&entry);
+        let image_preview = is_raster_image_preview_entry(&entry);
+        let cache_key = image_preview.then(|| PreviewImageCacheKey::for_entry(&entry));
+        let cached_image = cache_key
+            .as_ref()
+            .and_then(|key| self.preview_image_cache.get(key));
+        let load_image = image_preview && cached_image.is_none();
         let markdown_view = (load_text && is_markdown_preview_entry(&entry)).then(|| {
             cx.new(|cx| {
                 TextViewState::markdown("正在加载预览…", cx)
@@ -3406,22 +3668,30 @@ impl KiteApp {
             lines: Arc::new(Vec::new()),
             selection: None,
             markdown_view,
+            image: cached_image,
             error: None,
-            loading: load_text,
+            loading: load_text || load_image,
             scroll: UniformListScrollHandle::new(),
             markdown_scroll: ScrollHandle::new(),
         });
-        if !load_text {
+        if !load_text && !load_image {
             return;
         }
 
         self._preview_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PREVIEW_LOAD_DEBOUNCE).await;
             let result = cx
                 .background_spawn(async move {
-                    if log_preview {
-                        read_log_preview(&path)
+                    if load_image {
+                        PreviewLoadResult::Image(load_image_preview(
+                            &path,
+                            COLUMN_PREVIEW_IMAGE_MAX_WIDTH,
+                            COLUMN_PREVIEW_IMAGE_MAX_HEIGHT,
+                        ))
+                    } else if log_preview {
+                        PreviewLoadResult::Text(read_log_preview(&path))
                     } else {
-                        read_text_preview(&path)
+                        PreviewLoadResult::Text(read_text_preview(&path))
                     }
                 })
                 .await;
@@ -3429,22 +3699,44 @@ impl KiteApp {
                 if this.preview_generation != generation {
                     return;
                 }
-                let markdown_view = this
-                    .column_preview
-                    .as_ref()
-                    .and_then(|preview| preview.markdown_view.clone());
-                if let Some(preview) = this.column_preview.as_mut() {
-                    preview.loading = false;
-                    match result {
-                        Ok(text) => {
-                            if let Some(markdown_view) = markdown_view {
-                                markdown_view.update(cx, |view, cx| view.set_text(&text, cx));
-                            } else {
-                                preview.lines = Arc::new(preview_text_lines(&text));
-                                preview.selection = Some(TextSelectionHandle::new(text, cx));
+                match result {
+                    PreviewLoadResult::Image(Ok(image_data)) => {
+                        let image = preview_render_image(image_data);
+                        if let Some(key) = cache_key {
+                            this.preview_image_cache.insert(key, image.clone());
+                        }
+                        if let Some(preview) = this.column_preview.as_mut() {
+                            preview.loading = false;
+                            preview.image = Some(image);
+                        }
+                    }
+                    PreviewLoadResult::Image(Err(error)) => {
+                        if let Some(preview) = this.column_preview.as_mut() {
+                            preview.loading = false;
+                            preview.error = Some(error.into());
+                        }
+                    }
+                    PreviewLoadResult::Text(result) => {
+                        let markdown_view = this
+                            .column_preview
+                            .as_ref()
+                            .and_then(|preview| preview.markdown_view.clone());
+                        if let Some(preview) = this.column_preview.as_mut() {
+                            preview.loading = false;
+                            match result {
+                                Ok(text) => {
+                                    if let Some(markdown_view) = markdown_view {
+                                        markdown_view
+                                            .update(cx, |view, cx| view.set_text(&text, cx));
+                                    } else {
+                                        preview.lines = Arc::new(preview_text_lines(&text));
+                                        preview.selection =
+                                            Some(TextSelectionHandle::new(text, cx));
+                                    }
+                                }
+                                Err(error) => preview.error = Some(error.into()),
                             }
                         }
-                        Err(error) => preview.error = Some(error.into()),
                     }
                 }
                 cx.notify();
@@ -3601,34 +3893,21 @@ impl KiteApp {
                 return;
             };
 
-            let copy_source = source.clone();
-            let copy_destination = destination_dir.clone();
-            let uses_shell_operation = shell_fs::is_shell_namespace_path(&copy_source)
-                || shell_fs::is_shell_namespace_path(&copy_destination);
-            let result = cx
-                .background_spawn(async move {
-                    if uses_shell_operation {
-                        shell_fs::transfer_items(
-                            std::slice::from_ref(&copy_source),
-                            &copy_destination,
-                            false,
-                        )
-                        .map(|()| copy_destination.clone())
-                    } else {
-                        transfer_entry(&copy_source, &copy_destination, false)
-                    }
-                })
-                .await;
+            let Ok(owner) = this.update_in(cx, |this, window, cx| {
+                this.notice = Some(format!("正在拷贝到 {}…", destination_dir.display()).into());
+                cx.notify();
+                file_clipboard::window_hwnd(window)
+                    .ok()
+                    .map(|hwnd| hwnd.0 as isize)
+            }) else {
+                return;
+            };
+            let result =
+                shell_fs::copy_item_with_progress(source, destination_dir.clone(), owner).await;
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(copied) => {
+                Ok(()) => {
                     this.error = None;
-                    this.notice = Some(
-                        format!(
-                            "已拷贝到 {}",
-                            copied.parent().unwrap_or(&destination_dir).display()
-                        )
-                        .into(),
-                    );
+                    this.notice = Some(format!("已拷贝到 {}", destination_dir.display()).into());
                     if same_path(&this.current_dir, &destination_dir) {
                         this.refresh(window, cx);
                     } else {
@@ -3660,9 +3939,17 @@ impl KiteApp {
         self.notice = Some(format!("正在创建 {format_name} 文件…").into());
         cx.notify();
 
+        let progress =
+            archive_progress_window::open("压缩", Some(format), &source, source.parent(), cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { archive::compress(&source, format) })
+                .background_spawn(async move {
+                    let result = archive::compress_with_progress(&source, format, |event| {
+                        progress.report(event)
+                    });
+                    progress.finish(&result);
+                    result
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(created) => {
@@ -3695,17 +3982,6 @@ impl KiteApp {
             });
         })
         .detach();
-    }
-
-    fn extract_here(&mut self, source: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match archive::extraction_directory(&source) {
-            Ok(destination) => self.extract_archive_into(source, destination, window, cx),
-            Err(error) => {
-                self.notice = None;
-                self.error = Some(error.into());
-                cx.notify();
-            }
-        }
     }
 
     fn extract_to_directory(
@@ -3746,16 +4022,16 @@ impl KiteApp {
                 return;
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                this.extract_archive_into(source, destination, window, cx);
+                this.extract_archive(source, Some(destination), window, cx);
             });
         })
         .detach();
     }
 
-    fn extract_archive_into(
+    fn extract_archive(
         &mut self,
         source: PathBuf,
-        destination: PathBuf,
+        destination: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3763,16 +4039,38 @@ impl KiteApp {
         self.notice = Some("正在解压文件…".into());
         cx.notify();
 
+        let progress = archive_progress_window::open(
+            "解压",
+            archive::format_for_path(&source),
+            &source,
+            destination.as_deref().or_else(|| source.parent()),
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
-            let extract_destination = destination.clone();
+            let refresh_dir = destination
+                .clone()
+                .or_else(|| source.parent().map(Path::to_path_buf));
             let result = cx
-                .background_spawn(async move { archive::extract(&source, &extract_destination) })
+                .background_spawn(async move {
+                    let result = if let Some(destination) = destination {
+                        archive::extract_with_progress(&source, &destination, |event| {
+                            progress.report(event)
+                        })
+                    } else {
+                        archive::extract_here_with_progress(&source, |event| progress.report(event))
+                    };
+                    progress.finish(&result);
+                    result
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(extracted_to) => {
                     this.error = None;
                     this.notice = Some(format!("已解压到 {}", extracted_to.display()).into());
-                    if same_path(&this.current_dir, &destination) {
+                    if refresh_dir
+                        .as_deref()
+                        .is_some_and(|directory| same_path(&this.current_dir, directory))
+                    {
                         this.refresh(window, cx);
                     } else {
                         cx.notify();
@@ -4450,6 +4748,10 @@ impl KiteApp {
     }
 
     fn clear_search_or_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            self.close_settings(window, cx);
+            return;
+        }
         if self.address_editing {
             self.address_editing = false;
             self.address_input.update(cx, |input, cx| {
@@ -4671,7 +4973,7 @@ impl KiteApp {
             .w_full()
             .flex_shrink_0()
             .gap_1()
-            .py(px(6.))
+            .py(px(TOOLBAR_VERTICAL_PADDING))
             .rounded_lg()
             .bg(cx.theme().title_bar)
             .border_1()
@@ -4680,7 +4982,7 @@ impl KiteApp {
                 h_flex()
                     .h(px(TOOLBAR_CONTROL_HEIGHT))
                     .w_full()
-                    .gap_2()
+                    .gap(px(ISLAND_GAP))
                     .items_center()
                     .child(navigation_slot)
                     .child(address_control)
@@ -4748,6 +5050,712 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = Some(SettingsState {
+            section: SettingsSection::General,
+            preferences: ui_preferences::load_ui_preferences(),
+            status: None,
+            error: None,
+        });
+        window.set_window_title("Kite 设置");
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
+        window.set_window_title(&format!("Kite — {}", self.current_dir.display()));
+        cx.notify();
+    }
+
+    fn select_settings_section(
+        &mut self,
+        section: SettingsSection,
+        _: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.section = section;
+            cx.notify();
+        }
+    }
+
+    fn save_settings_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preferences) = self
+            .settings
+            .as_ref()
+            .map(|settings| settings.preferences.clone())
+        else {
+            return;
+        };
+        let result = ui_preferences::save_ui_preferences(preferences.clone());
+        if let Some(settings) = self.settings.as_mut() {
+            match result {
+                Ok(()) => {
+                    settings.status = Some("设置已保存".into());
+                    settings.error = None;
+                }
+                Err(error) => {
+                    settings.status = None;
+                    settings.error = Some(error.into());
+                }
+            }
+        }
+        self.apply_settings_preferences(&preferences, window, cx);
+        cx.notify();
+    }
+
+    fn apply_settings_preferences(
+        &mut self,
+        preferences: &ui_preferences::UiPreferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match preferences.default_view {
+            ui_preferences::DefaultViewPreference::Columns => {
+                self.show_columns_view(&ShowColumnsView, window, cx)
+            }
+            ui_preferences::DefaultViewPreference::List => {
+                self.show_list_view(&ShowListView, window, cx)
+            }
+        }
+        self.show_path_bar = preferences.path_bar_visible;
+        self.show_preview = preferences.preview_visible;
+        self.show_column_details = preferences.column_details_visible;
+        self.show_date_column = preferences.date_column_visible;
+        self.show_kind_column = preferences.kind_column_visible;
+        self.show_size_column = preferences.size_column_visible;
+        self.preferred_column_width = preferences.column_width;
+        if !self.show_preview {
+            self.clear_column_preview();
+        }
+        self.column_scroll_pending = true;
+        self.path_bar_scroll_pending = self.show_path_bar;
+        cx.notify();
+    }
+
+    fn set_settings_default_view(
+        &mut self,
+        view: ui_preferences::DefaultViewPreference,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.preferences.default_view = view;
+        }
+        self.save_settings_preferences(window, cx);
+    }
+
+    fn set_settings_theme(
+        &mut self,
+        theme: ui_preferences::ThemePreference,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.preferences.theme_mode = theme;
+        }
+        let mode = match theme {
+            ui_preferences::ThemePreference::Dark => ThemeMode::Dark,
+            ui_preferences::ThemePreference::Light => ThemeMode::Light,
+        };
+        Theme::change(mode, Some(window), cx);
+        self.save_settings_preferences(window, cx);
+    }
+
+    fn set_settings_bool(
+        &mut self,
+        field: SettingsBoolField,
+        enabled: bool,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self.settings.as_mut() {
+            match field {
+                SettingsBoolField::PathBar => settings.preferences.path_bar_visible = enabled,
+                SettingsBoolField::Preview => settings.preferences.preview_visible = enabled,
+                SettingsBoolField::ColumnDetails => {
+                    settings.preferences.column_details_visible = enabled
+                }
+                SettingsBoolField::DateColumn => settings.preferences.date_column_visible = enabled,
+                SettingsBoolField::KindColumn => settings.preferences.kind_column_visible = enabled,
+                SettingsBoolField::SizeColumn => settings.preferences.size_column_visible = enabled,
+            }
+        }
+        self.save_settings_preferences(window, cx);
+    }
+
+    fn set_settings_column_width(
+        &mut self,
+        width: u16,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.preferences.column_width = width;
+        }
+        self.save_settings_preferences(window, cx);
+    }
+
+    fn reset_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let preferences = ui_preferences::UiPreferences::default();
+        if let Some(settings) = self.settings.as_mut() {
+            settings.preferences = preferences.clone();
+            settings.error = None;
+        }
+        Theme::change(ThemeMode::Dark, Some(window), cx);
+        self.save_settings_preferences(window, cx);
+        if let Some(settings) = self.settings.as_mut() {
+            settings.status = Some("已恢复默认设置".into());
+        }
+    }
+
+    fn open_settings_integration(
+        &mut self,
+        action: SettingsIntegrationAction,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_settings(window, cx);
+        match action {
+            SettingsIntegrationAction::SetDefault => {
+                self.set_default_explorer(&SetDefaultExplorer, window, cx)
+            }
+            SettingsIntegrationAction::RestoreDefault => {
+                self.restore_default_explorer(&RestoreDefaultExplorer, window, cx)
+            }
+            SettingsIntegrationAction::CreateShortcut => {
+                self.create_start_menu_shortcut(&CreateStartMenuShortcut, window, cx)
+            }
+            SettingsIntegrationAction::CheckUpdates => {
+                self.check_for_updates(&CheckForUpdates, window, cx)
+            }
+        }
+    }
+    fn render_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some((section, preferences, settings_status, settings_error)) =
+            self.settings.as_ref().map(|settings| {
+                (
+                    settings.section,
+                    settings.preferences.clone(),
+                    settings.status.clone(),
+                    settings.error.clone(),
+                )
+            })
+        else {
+            return div().into_any_element();
+        };
+
+        let navigation = SettingsSection::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                Button::new(format!("settings-nav-{index}"))
+                    .ghost()
+                    .compact()
+                    .w_full()
+                    .label(item.label())
+                    .toggled(item == section)
+                    .on_click(cx.listener(move |this, event, window, cx| {
+                        this.select_settings_section(item, event, window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        let content = match section {
+            SettingsSection::General => self.render_settings_general(&preferences, cx),
+            SettingsSection::Appearance => self.render_settings_appearance(&preferences, cx),
+            SettingsSection::Columns => self.render_settings_columns(&preferences, cx),
+            SettingsSection::Integration => self.render_settings_integration(cx),
+            SettingsSection::Updates => self.render_settings_updates(cx),
+            SettingsSection::About => self.render_settings_about(cx),
+        };
+
+        let status = settings_error
+            .or_else(|| self.error.clone())
+            .map(|message| (message, true))
+            .or_else(|| {
+                settings_status
+                    .or_else(|| self.notice.clone())
+                    .map(|message| (message, false))
+            });
+
+        v_flex()
+            .id("kite-settings")
+            .key_context("Kite")
+            .size_full()
+            .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &ClearSearchOverlay, window, cx| {
+                this.clear_search_or_modal(window, cx)
+            }))
+            .gap(px(ISLAND_GAP))
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(
+                h_flex()
+                    .h(px(52.))
+                    .w_full()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .rounded_lg()
+                    .bg(cx.theme().title_bar)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_lg().font_semibold().child("Kite 设置"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("配置外观、浏览方式、文件关联和更新"),
+                            ),
+                    )
+                    .child(
+                        Button::new("settings-close")
+                            .ghost()
+                            .compact()
+                            .label("返回文件浏览")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_settings(window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .items_stretch()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .w(px(180.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .gap_1()
+                            .p(px(COMPACT_ISLAND_PADDING))
+                            .rounded_lg()
+                            .bg(cx.theme().sidebar)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .children(navigation),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_y_scrollbar()
+                            .child(content),
+                    ),
+            )
+            .when_some(status, |this, (message, is_error)| {
+                this.child(
+                    h_flex()
+                        .min_h(px(30.))
+                        .w_full()
+                        .items_center()
+                        .px_2()
+                        .rounded_lg()
+                        .bg(cx.theme().status_bar)
+                        .border_1()
+                        .border_color(cx.theme().status_bar_border)
+                        .text_xs()
+                        .when(is_error, |this| this.text_color(cx.theme().danger))
+                        .child(message),
+                )
+            })
+            .child(self.render_modal(cx))
+            .into_any_element()
+    }
+
+    fn render_settings_general(
+        &mut self,
+        preferences: &ui_preferences::UiPreferences,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let list_selected = preferences.default_view == ui_preferences::DefaultViewPreference::List;
+        let columns_selected =
+            preferences.default_view == ui_preferences::DefaultViewPreference::Columns;
+        let path_bar_visible = preferences.path_bar_visible;
+        let path_bar = Button::new("settings-path-bar")
+            .compact()
+            .label(if preferences.path_bar_visible {
+                "已显示"
+            } else {
+                "已隐藏"
+            })
+            .toggled(preferences.path_bar_visible)
+            .on_click(cx.listener(move |this, event, window, cx| {
+                this.set_settings_bool(
+                    SettingsBoolField::PathBar,
+                    !path_bar_visible,
+                    event,
+                    window,
+                    cx,
+                )
+            }));
+        let preview_visible = preferences.preview_visible;
+        let preview = Button::new("settings-preview")
+            .compact()
+            .label(if preferences.preview_visible {
+                "已显示"
+            } else {
+                "已隐藏"
+            })
+            .toggled(preferences.preview_visible)
+            .on_click(cx.listener(move |this, event, window, cx| {
+                this.set_settings_bool(
+                    SettingsBoolField::Preview,
+                    !preview_visible,
+                    event,
+                    window,
+                    cx,
+                )
+            }));
+        let content = v_flex()
+            .gap_1()
+            .child(settings_row(
+                "默认视图",
+                "新页签使用的浏览视图",
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("settings-view-list")
+                            .compact()
+                            .label("列表")
+                            .toggled(list_selected)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                this.set_settings_default_view(
+                                    ui_preferences::DefaultViewPreference::List,
+                                    event,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-view-columns")
+                            .compact()
+                            .label("分栏")
+                            .toggled(columns_selected)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                this.set_settings_default_view(
+                                    ui_preferences::DefaultViewPreference::Columns,
+                                    event,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .into_any_element(),
+                cx,
+            ))
+            .child(settings_row(
+                "路径栏",
+                "在文件视图顶部显示当前路径",
+                path_bar.into_any_element(),
+                cx,
+            ))
+            .child(settings_row(
+                "预览窗格",
+                "在分栏视图右侧显示文件预览",
+                preview.into_any_element(),
+                cx,
+            ))
+            .child(settings_row(
+                "恢复默认设置",
+                "恢复主题、视图、列和预览设置",
+                Button::new("settings-reset")
+                    .compact()
+                    .label("恢复默认")
+                    .on_click(cx.listener(Self::reset_settings)),
+                cx,
+            ))
+            .into_any_element();
+        settings_panel("常规", "控制 Kite 打开新页签时的默认行为。", content, cx)
+    }
+
+    fn render_settings_appearance(
+        &mut self,
+        preferences: &ui_preferences::UiPreferences,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dark = preferences.theme_mode == ui_preferences::ThemePreference::Dark;
+        let light = preferences.theme_mode == ui_preferences::ThemePreference::Light;
+        let content = v_flex()
+            .gap_1()
+            .child(settings_row(
+                "主题",
+                "主题切换会立即应用到所有 Kite 窗口",
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("settings-theme-dark")
+                            .compact()
+                            .icon(IconName::Moon)
+                            .label("深色")
+                            .toggled(dark)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                this.set_settings_theme(
+                                    ui_preferences::ThemePreference::Dark,
+                                    event,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-theme-light")
+                            .compact()
+                            .icon(IconName::Sun)
+                            .label("浅色")
+                            .toggled(light)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                this.set_settings_theme(
+                                    ui_preferences::ThemePreference::Light,
+                                    event,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .into_any_element(),
+                cx,
+            ))
+            .into_any_element();
+        settings_panel("外观", "选择 Kite 的颜色主题。", content, cx)
+    }
+
+    fn render_settings_columns(
+        &mut self,
+        preferences: &ui_preferences::UiPreferences,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let content = v_flex()
+            .gap_1()
+            .child(settings_row(
+                "详细信息",
+                "在列表视图显示详细的文件信息",
+                settings_bool_button(
+                    "settings-column-details",
+                    preferences.column_details_visible,
+                    SettingsBoolField::ColumnDetails,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(settings_row(
+                "日期列",
+                "显示修改日期",
+                settings_bool_button(
+                    "settings-date-column",
+                    preferences.date_column_visible,
+                    SettingsBoolField::DateColumn,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(settings_row(
+                "类型列",
+                "显示文件类型",
+                settings_bool_button(
+                    "settings-kind-column",
+                    preferences.kind_column_visible,
+                    SettingsBoolField::KindColumn,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(settings_row(
+                "大小列",
+                "显示文件大小",
+                settings_bool_button(
+                    "settings-size-column",
+                    preferences.size_column_visible,
+                    SettingsBoolField::SizeColumn,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(settings_row(
+                "分栏宽度",
+                "设置分栏视图的默认宽度",
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("settings-width-compact")
+                            .compact()
+                            .label("紧凑")
+                            .toggled(preferences.column_width == 250)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                this.set_settings_column_width(250, event, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-width-standard")
+                            .compact()
+                            .label("标准")
+                            .toggled(preferences.column_width == 320)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                this.set_settings_column_width(320, event, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-width-wide")
+                            .compact()
+                            .label("宽")
+                            .toggled(preferences.column_width == 420)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                this.set_settings_column_width(420, event, window, cx)
+                            })),
+                    )
+                    .into_any_element(),
+                cx,
+            ))
+            .into_any_element();
+        settings_panel("分栏与列表", "控制视图中显示的文件信息。", content, cx)
+    }
+
+    fn render_settings_integration(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let content = v_flex()
+            .gap_1()
+            .child(settings_row(
+                "默认文件管理器",
+                "让 Windows Shell 使用 Kite 打开文件夹",
+                Button::new("settings-set-default")
+                    .compact()
+                    .label("设为默认")
+                    .on_click(cx.listener(|this, event, window, cx| {
+                        this.open_settings_integration(
+                            SettingsIntegrationAction::SetDefault,
+                            event,
+                            window,
+                            cx,
+                        )
+                    })),
+                cx,
+            ))
+            .child(settings_row(
+                "恢复之前的设置",
+                "恢复设置前的文件夹打开命令",
+                Button::new("settings-restore-default")
+                    .compact()
+                    .label("恢复")
+                    .on_click(cx.listener(|this, event, window, cx| {
+                        this.open_settings_integration(
+                            SettingsIntegrationAction::RestoreDefault,
+                            event,
+                            window,
+                            cx,
+                        )
+                    })),
+                cx,
+            ))
+            .child(settings_row(
+                "开始菜单快捷方式",
+                "允许 Windows Search 和 PowerToys Run 搜索 Kite",
+                Button::new("settings-create-shortcut")
+                    .compact()
+                    .label("创建")
+                    .on_click(cx.listener(|this, event, window, cx| {
+                        this.open_settings_integration(
+                            SettingsIntegrationAction::CreateShortcut,
+                            event,
+                            window,
+                            cx,
+                        )
+                    })),
+                cx,
+            ))
+            .into_any_element();
+        settings_panel(
+            "文件管理器",
+            "配置 Kite 与 Windows Shell 的集成。",
+            content,
+            cx,
+        )
+    }
+
+    fn render_settings_updates(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let content = v_flex()
+            .gap_1()
+            .child(settings_row(
+                "当前版本",
+                "当前运行的 Kite 版本",
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .child(env!("CARGO_PKG_VERSION"))
+                    .into_any_element(),
+                cx,
+            ))
+            .child(settings_row(
+                "检查更新",
+                "从 Kite 的 GitHub Release 检查稳定版本",
+                Button::new("settings-check-updates")
+                    .compact()
+                    .label("检查更新")
+                    .disabled(self.update_in_progress)
+                    .on_click(cx.listener(|this, event, window, cx| {
+                        this.open_settings_integration(
+                            SettingsIntegrationAction::CheckUpdates,
+                            event,
+                            window,
+                            cx,
+                        )
+                    })),
+                cx,
+            ))
+            .into_any_element();
+        settings_panel(
+            "更新",
+            "使用已校验的 GitHub Release 更新 Kite。",
+            content,
+            cx,
+        )
+    }
+
+    fn render_settings_about(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let preferences_path = ui_preferences::ui_preferences_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "无法确定设置路径".to_string());
+        let content = v_flex()
+            .gap_1()
+            .child(settings_row(
+                "Kite",
+                "快速、原生的文件管理器",
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .into_any_element(),
+                cx,
+            ))
+            .child(settings_row(
+                "设置文件",
+                "Kite 将界面设置保存在当前用户目录",
+                div()
+                    .max_w(px(460.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(preferences_path)
+                    .into_any_element(),
+                cx,
+            ))
+            .into_any_element();
+        settings_panel("关于", "查看版本和配置文件位置。", content, cx)
+    }
     fn toggle_theme(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mode = if cx.theme().mode.is_dark() {
             ThemeMode::Light
@@ -4755,6 +5763,15 @@ impl KiteApp {
             ThemeMode::Dark
         };
         Theme::change(mode, Some(window), cx);
+        let mut preferences = ui_preferences::load_ui_preferences();
+        preferences.theme_mode = if mode.is_dark() {
+            ui_preferences::ThemePreference::Dark
+        } else {
+            ui_preferences::ThemePreference::Light
+        };
+        if let Err(error) = ui_preferences::save_ui_preferences(preferences) {
+            self.error = Some(error.into());
+        }
     }
     fn sidebar_item(&self, item: SidebarItem, cx: &mut Context<Self>) -> AnyElement {
         let SidebarItem {
@@ -5091,7 +6108,7 @@ impl KiteApp {
         let mut content = v_flex().gap_0p5();
         content = content.child(
             div()
-                .px_2()
+                .px(px(COMPACT_ISLAND_PADDING))
                 .pt_1()
                 .pb_1()
                 .text_xs()
@@ -5118,8 +6135,8 @@ impl KiteApp {
         }
         content = content.child(
             div()
-                .px_2()
-                .pt_4()
+                .px(px(COMPACT_ISLAND_PADDING))
+                .pt_3()
                 .pb_1()
                 .text_xs()
                 .font_medium()
@@ -5129,7 +6146,7 @@ impl KiteApp {
         if self.favorites.is_empty() {
             content = content.child(
                 div()
-                    .px_2()
+                    .px(px(COMPACT_ISLAND_PADDING))
                     .pb_2()
                     .text_xs()
                     .text_color(section_color)
@@ -5145,8 +6162,8 @@ impl KiteApp {
         if !self.connected_devices.is_empty() || !self.portable_devices.is_empty() {
             content = content.child(
                 div()
-                    .px_2()
-                    .pt_4()
+                    .px(px(COMPACT_ISLAND_PADDING))
+                    .pt_3()
                     .pb_1()
                     .text_xs()
                     .font_medium()
@@ -5176,8 +6193,8 @@ impl KiteApp {
         }
         content = content.child(
             div()
-                .px_2()
-                .pt_4()
+                .px(px(COMPACT_ISLAND_PADDING))
+                .pt_3()
                 .pb_1()
                 .text_xs()
                 .font_medium()
@@ -5202,28 +6219,15 @@ impl KiteApp {
             ));
         }
 
-        let settings = DropdownButton::new("sidebar-settings")
-            .with_size(Size::Small)
-            .menu_accessibility_label("Kite 设置")
-            .button(
-                Button::new("sidebar-settings-action")
-                    .ghost()
-                    .compact()
-                    .label("设置")
-                    .tooltip("Kite 设置"),
-            )
-            .dropdown_menu(|menu, _, _| {
-                menu.menu("检查更新…", Box::new(CheckForUpdates))
-                    .separator()
-                    .menu("设为默认资源管理器…", Box::new(SetDefaultExplorer))
-                    .separator()
-                    .menu(
-                        "恢复之前的文件夹打开方式…",
-                        Box::new(RestoreDefaultExplorer),
-                    )
-                    .separator()
-                    .menu("创建开始菜单快捷方式…", Box::new(CreateStartMenuShortcut))
-            });
+        let settings = Button::new("sidebar-settings-action")
+            .ghost()
+            .compact()
+            .label("设置")
+            .tooltip("Kite 设置")
+            .on_click(
+                cx.listener(|this, _, window, cx| this.open_settings(&OpenSettings, window, cx)),
+            );
+
         let theme_icon = if cx.theme().mode.is_dark() {
             IconName::Sun
         } else {
@@ -5240,7 +6244,7 @@ impl KiteApp {
             .h_full()
             .flex_shrink_0()
             .gap_1()
-            .p_2()
+            .p(px(COMPACT_ISLAND_PADDING))
             .rounded_lg()
             .bg(cx.theme().sidebar)
             .border_1()
@@ -5254,7 +6258,7 @@ impl KiteApp {
             )
             .child(
                 h_flex()
-                    .h(px(38.))
+                    .h(px(34.))
                     .w_full()
                     .px_1()
                     .gap_1()
@@ -5317,8 +6321,9 @@ impl KiteApp {
             .id("column-strip")
             .size_full()
             .items_stretch()
-            .gap_2()
-            .p_2()
+            .gap(px(COLUMN_STRIP_GAP))
+            .p(px(COLUMN_STRIP_PADDING))
+            .bg(cx.theme().background)
             .overflow_hidden()
             .track_scroll(&scroll_handle);
         if self.column_panes.is_empty() {
@@ -5406,7 +6411,64 @@ impl KiteApp {
             .filter(|preview| same_path(&preview.path, &entry.path))
             .cloned();
         let preview_area = if is_image_preview_entry(entry) {
-            let fallback_entry = entry.clone();
+            let raw_image = preview.as_ref().and_then(|preview| preview.image.clone());
+            let image_error = preview.as_ref().and_then(|preview| preview.error.clone());
+            let image_loading = preview.as_ref().is_some_and(|preview| preview.loading);
+            let image_element = if let Some(image) = raw_image {
+                img(image)
+                    .id(SharedString::from(format!(
+                        "column-preview-image-{}",
+                        entry.path.display()
+                    )))
+                    .max_w_full()
+                    .max_h(px(520.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element()
+            } else if let Some(error) = image_error {
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .px_3()
+                    .child(Icon::new(icon_for(entry)).size(px(48.)).text_color(muted))
+                    .child(div().text_xs().text_color(cx.theme().danger).child(error))
+                    .into_any_element()
+            } else if image_loading {
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(Icon::new(icon_for(entry)).size(px(48.)).text_color(muted))
+                    .child(div().text_xs().text_color(muted).child("正在生成预览…"))
+                    .into_any_element()
+            } else {
+                let fallback_entry = entry.clone();
+                img(entry.path.clone())
+                    .id(SharedString::from(format!(
+                        "column-preview-source-image-{}",
+                        entry.path.display()
+                    )))
+                    .max_w_full()
+                    .max_h(px(520.))
+                    .object_fit(ObjectFit::Contain)
+                    .with_fallback(move || {
+                        v_flex()
+                            .size_full()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .child(
+                                Icon::new(icon_for(&fallback_entry))
+                                    .size(px(48.))
+                                    .text_color(muted),
+                            )
+                            .child(div().text_xs().text_color(muted).child("无法加载图片预览"))
+                            .into_any_element()
+                    })
+                    .into_any_element()
+            };
             h_flex()
                 .h(px(440.))
                 .w_full()
@@ -5415,26 +6477,7 @@ impl KiteApp {
                 .overflow_hidden()
                 .rounded_md()
                 .bg(cx.theme().muted.opacity(0.25))
-                .child(
-                    img(entry.path.clone())
-                        .max_w_full()
-                        .max_h(px(520.))
-                        .object_fit(ObjectFit::Contain)
-                        .with_fallback(move || {
-                            v_flex()
-                                .size_full()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .child(
-                                    Icon::new(icon_for(&fallback_entry))
-                                        .size(px(48.))
-                                        .text_color(muted),
-                                )
-                                .child(div().text_xs().text_color(muted).child("无法加载图片预览"))
-                                .into_any_element()
-                        }),
-                )
+                .child(image_element)
                 .into_any_element()
         } else if is_text_preview_entry(entry) {
             let foreground = cx.theme().foreground;
@@ -5618,7 +6661,7 @@ impl KiteApp {
                 .into_any_element()
         };
 
-        let mut properties = v_flex().w_full().gap_3();
+        let mut properties = v_flex().w_full().gap_2();
         properties = properties
             .child(preview_property("名称", entry.name.clone(), cx))
             .child(preview_property("类型", entry.type_label(), cx))
@@ -5637,7 +6680,7 @@ impl KiteApp {
         }
 
         v_flex()
-            .w(px(316.))
+            .w(px(PREVIEW_WIDTH))
             .h_full()
             .flex_shrink_0()
             .rounded_lg()
@@ -5647,7 +6690,7 @@ impl KiteApp {
             .border_color(border)
             .child(
                 h_flex()
-                    .h(px(34.))
+                    .h(px(COLUMN_HEADER_HEIGHT))
                     .w_full()
                     .px_2()
                     .gap_1()
@@ -5729,8 +6772,8 @@ impl KiteApp {
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
-                    .p_3()
-                    .gap_4()
+                    .p(px(COMPACT_ISLAND_PADDING))
+                    .gap_2()
                     .child(preview_area)
                     .child(properties),
             )
@@ -5783,6 +6826,15 @@ impl KiteApp {
             .get(index)
             .map(|state| state.handle.clone())
             .unwrap_or_default();
+        if self
+            .column_search_scroll_target
+            .as_ref()
+            .is_some_and(|(target, _)| same_path(target, &path))
+        {
+            if let Some((_, row)) = self.column_search_scroll_target.take() {
+                vertical_scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
+            }
+        }
         let search_open = self
             .column_search_path
             .as_ref()
@@ -5819,6 +6871,7 @@ impl KiteApp {
         let menu_path = path.clone();
         let search_path = path.clone();
         let close_search_path = path.clone();
+        let hover_path = path.clone();
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
@@ -5862,28 +6915,36 @@ impl KiteApp {
             .into_any_element()
         };
         let mut header = h_flex()
-            .h(px(36.))
+            .h(px(COLUMN_HEADER_HEIGHT))
             .w_full()
             .px_2()
             .gap_2()
             .items_center()
             .border_b_1()
             .border_color(border)
+            .bg(cx.theme().title_bar)
             .when(active, |this| this.bg(accent.opacity(0.5)))
-            .child(Icon::new(IconName::Folder).size_4().text_color(if active {
-                accent
-            } else {
-                muted
-            }))
             .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .font_medium()
-                    .text_color(if active { cx.theme().foreground } else { muted })
-                    .child(title),
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        Icon::new(FileIconKind::Folder)
+                            .size_4()
+                            .text_color(folder_icon_color(cx)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(if active { cx.theme().foreground } else { muted })
+                            .child(title),
+                    ),
             )
             .when(search_loading, |this| {
                 this.child(div().text_xs().text_color(muted).child("搜索中…"))
@@ -6134,7 +7195,7 @@ impl KiteApp {
 
         let search_bar = search_open.then(|| {
             h_flex()
-                .h(px(34.))
+                .h(px(COLUMN_SEARCH_HEIGHT))
                 .w_full()
                 .px_2()
                 .gap_1()
@@ -6173,9 +7234,10 @@ impl KiteApp {
             .flex_shrink_0()
             .rounded_lg()
             .overflow_hidden()
-            .bg(cx.theme().title_bar)
+            .bg(cx.theme().secondary.opacity(0.72))
             .border_1()
             .border_color(border)
+            .shadow_sm()
             .child(header);
         if let Some(details_header) = details_header {
             column = column.child(details_header);
@@ -6222,6 +7284,11 @@ impl KiteApp {
                     window,
                     cx,
                 );
+            }))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, _| {
+                if *hovered {
+                    this.last_column_path = Some(hover_path.clone());
+                }
             }))
             .context_menu(move |menu, window, cx| {
                 render_context_menu(
@@ -6308,6 +7375,7 @@ impl KiteApp {
         };
         let display_rows = pane.display_rows();
         let column_path = pane.path.clone();
+        let search_query = pane.search_query.clone();
         let loading = pane.loading;
         let can_paste = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let git_available = pane.git_available;
@@ -6379,7 +7447,7 @@ impl KiteApp {
                 .h(px(30.))
                 .w_full()
                 .px_2()
-                .gap_2()
+                .gap_1p5()
                 .items_center()
                 .cursor_pointer()
                 .text_sm()
@@ -6390,25 +7458,49 @@ impl KiteApp {
                 .child(
                     div()
                         .relative()
-                        .size_4()
+                        .size(px(18.))
                         .child(
                             Icon::new(icon_for(&entry))
-                                .size_4()
+                                .size(px(18.))
                                 .text_color(icon_color(&entry, cx)),
                         )
                         .when_some(icon_status, |this, status| {
                             this.child(vcs_icon_badge(status, icon_status_is_svn, cx))
                         }),
                 )
-                .child(
+                .child({
+                    let mut name = StyledText::new(entry.name.clone());
+                    if let Some(query) = search_query.as_deref() {
+                        let highlight = HighlightStyle {
+                            color: Some(if selected {
+                                accent_foreground
+                            } else {
+                                cx.theme().accent_foreground
+                            }),
+                            font_weight: Some(FontWeight::SEMIBOLD),
+                            background_color: Some(cx.theme().accent.opacity(0.22)),
+                            ..Default::default()
+                        };
+                        name = name.with_highlights(
+                            search_name_highlight_ranges(&entry.name, query)
+                                .into_iter()
+                                .map(|range| (range, highlight)),
+                        );
+                    }
                     div()
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis_middle()
-                        .child(entry.name.clone()),
-                );
+                        .font_medium()
+                        .text_color(if selected {
+                            accent_foreground
+                        } else {
+                            cx.theme().foreground
+                        })
+                        .child(name)
+                });
             if entry.is_dir() {
                 row = row.child(
                     Icon::new(IconName::ChevronRight)
@@ -6965,6 +8057,58 @@ fn detailed_column_width_for_name_width(
         .clamp(DETAILED_COLUMN_MIN_WIDTH, DETAILED_COLUMN_MAX_WIDTH)
 }
 
+fn typed_column_search_text(event: &KeyDownEvent) -> Option<String> {
+    let keystroke = event.keystroke.clone().with_simulated_ime();
+    let modifiers = keystroke.modifiers;
+    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+        return None;
+    }
+
+    let text = keystroke.key_char?;
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return None;
+    }
+    Some(text)
+}
+
+fn search_name_highlight_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut normalized = String::new();
+    let mut normalized_ranges = Vec::new();
+    for (start, character) in text.char_indices() {
+        let end = start + character.len_utf8();
+        for lowered in character.to_lowercase() {
+            normalized.push(lowered);
+            normalized_ranges.push((start, end));
+        }
+    }
+
+    let mut ranges = Vec::new();
+    let mut search_start = 0;
+    while search_start < normalized.len() {
+        let Some(relative_start) = normalized[search_start..].find(&query) else {
+            break;
+        };
+        let start = search_start + relative_start;
+        let end = start + query.len();
+        let start_char = normalized[..start].chars().count();
+        let end_char = normalized[..end].chars().count();
+        let Some(&(original_start, _)) = normalized_ranges.get(start_char) else {
+            break;
+        };
+        let Some(&(_, original_end)) = normalized_ranges.get(end_char.saturating_sub(1)) else {
+            break;
+        };
+        ranges.push(original_start..original_end);
+        search_start = end;
+    }
+    ranges
+}
+
 fn default_column_header_sort_ascending(key: SortKey) -> bool {
     !matches!(key, SortKey::Modified | SortKey::Size)
 }
@@ -7133,10 +8277,13 @@ fn preview_text_lines(text: &str) -> Vec<SharedString> {
 }
 
 pub(crate) fn is_image_preview_entry(entry: &FileEntry) -> bool {
-    matches!(
-        entry.extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg"
-    )
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"]
+        .iter()
+        .any(|extension| entry.extension.eq_ignore_ascii_case(extension))
+}
+
+pub(crate) fn is_raster_image_preview_entry(entry: &FileEntry) -> bool {
+    is_image_preview_entry(entry) && !entry.extension.eq_ignore_ascii_case("svg")
 }
 
 pub(crate) fn is_log_preview_entry(entry: &FileEntry) -> bool {
@@ -7144,117 +8291,50 @@ pub(crate) fn is_log_preview_entry(entry: &FileEntry) -> bool {
 }
 
 pub(crate) fn is_markdown_preview_entry(entry: &FileEntry) -> bool {
-    matches!(
-        entry.extension.to_ascii_lowercase().as_str(),
-        "txt" | "md" | "markdown"
-    )
+    entry.extension.eq_ignore_ascii_case("txt")
+        || entry.extension.eq_ignore_ascii_case("md")
+        || entry.extension.eq_ignore_ascii_case("markdown")
 }
 
 pub(crate) fn is_text_preview_entry(entry: &FileEntry) -> bool {
     if entry.size > 512 * 1024 && !is_log_preview_entry(entry) {
         return false;
     }
-    entry.extension.is_empty()
-        || is_log_preview_entry(entry)
-        || matches!(
-            entry.extension.as_str(),
-            "txt"
-                | "md"
-                | "markdown"
-                | "log"
-                | "json"
-                | "toml"
-                | "yaml"
-                | "yml"
-                | "xml"
-                | "ini"
-                | "rs"
-                | "py"
-                | "js"
-                | "ts"
-                | "tsx"
-                | "jsx"
-                | "html"
-                | "css"
-                | "c"
-                | "cpp"
-                | "h"
-                | "cs"
-                | "java"
-                | "go"
-                | "kt"
-                | "sh"
-                | "ps1"
-                | "bat"
-        )
-}
-
-pub(crate) fn read_text_preview(path: &Path) -> Result<String, String> {
-    let file = std::fs::File::open(path).map_err(|error| format!("无法读取预览：{error}"))?;
-    let mut reader = std::io::BufReader::new(file).take(64 * 1024);
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取预览：{error}"))?;
-    if bytes.contains(&0) {
-        return Err("此文件不是文本文件".to_string());
+    if entry.extension.is_empty() {
+        return true;
     }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut excerpt = text.chars().take(6_000).collect::<String>();
-    if text.chars().count() > 6_000 {
-        excerpt.push('…');
-    }
-    if excerpt.trim().is_empty() {
-        Ok("文件没有可显示的文本内容。".to_string())
-    } else {
-        Ok(excerpt)
-    }
-}
-
-pub(crate) fn read_log_preview(path: &Path) -> Result<String, String> {
-    const READ_LIMIT: u64 = 64 * 1024;
-    const CHAR_LIMIT: usize = 6_000;
-
-    let mut file =
-        std::fs::File::open(path).map_err(|error| format!("无法读取日志预览：{error}"))?;
-    let length = file
-        .metadata()
-        .map_err(|error| format!("无法读取日志信息：{error}"))?
-        .len();
-    let truncated = length > READ_LIMIT;
-    if truncated {
-        file.seek(SeekFrom::Start(length - READ_LIMIT))
-            .map_err(|error| format!("无法定位日志末尾：{error}"))?;
-    }
-
-    let mut bytes = Vec::with_capacity(READ_LIMIT as usize);
-    std::io::BufReader::new(file)
-        .take(READ_LIMIT)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取日志预览：{error}"))?;
-    if bytes.contains(&0) {
-        return Err("此日志包含二进制内容，无法显示文本预览".to_string());
-    }
-
-    let text = String::from_utf8_lossy(&bytes);
-    let text = if truncated {
-        text.split_once('\n')
-            .map_or_else(|| text.as_ref(), |(_, rest)| rest)
-    } else {
-        text.as_ref()
-    };
-    let chars = text.chars().collect::<Vec<_>>();
-    let tail_start = chars.len().saturating_sub(CHAR_LIMIT);
-    let excerpt = chars[tail_start..].iter().collect::<String>();
-    if excerpt.trim().is_empty() {
-        return Ok("日志没有可显示的文本内容。".to_string());
-    }
-
-    if truncated || tail_start > 0 {
-        Ok(format!("日志末尾预览：\n{excerpt}"))
-    } else {
-        Ok(excerpt)
-    }
+    let extension = entry.extension.to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "txt"
+            | "md"
+            | "markdown"
+            | "log"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "xml"
+            | "ini"
+            | "rs"
+            | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "html"
+            | "css"
+            | "c"
+            | "cpp"
+            | "h"
+            | "cs"
+            | "java"
+            | "go"
+            | "kt"
+            | "sh"
+            | "ps1"
+            | "bat"
+    )
 }
 
 fn column_chain(root: &Path) -> Vec<PathBuf> {
@@ -7571,6 +8651,80 @@ fn column_context_menu_target(pane: &ColumnPane, can_paste: bool) -> ContextMenu
     )
 }
 
+fn settings_panel(
+    title: &'static str,
+    description: &'static str,
+    content: AnyElement,
+    cx: &App,
+) -> AnyElement {
+    v_flex()
+        .gap_2()
+        .p_4()
+        .rounded_lg()
+        .bg(cx.theme().sidebar)
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(
+            v_flex()
+                .gap_1()
+                .child(div().text_base().font_semibold().child(title))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(description),
+                ),
+        )
+        .child(div().h(px(1.)).w_full().bg(cx.theme().border))
+        .child(content)
+        .into_any_element()
+}
+
+fn settings_row(
+    title: &'static str,
+    description: &'static str,
+    control: impl IntoElement,
+    cx: &App,
+) -> AnyElement {
+    h_flex()
+        .w_full()
+        .min_h(px(52.))
+        .gap_4()
+        .items_center()
+        .justify_between()
+        .py_2()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().font_medium().child(title))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(description),
+                ),
+        )
+        .child(control)
+        .into_any_element()
+}
+
+fn settings_bool_button(
+    id: &'static str,
+    enabled: bool,
+    field: SettingsBoolField,
+    cx: &mut Context<KiteApp>,
+) -> AnyElement {
+    Button::new(id)
+        .compact()
+        .label(if enabled { "已开启" } else { "已关闭" })
+        .toggled(enabled)
+        .on_click(cx.listener(move |this, event, window, cx| {
+            this.set_settings_bool(field, !enabled, event, window, cx)
+        }))
+        .into_any_element()
+}
 fn path_segments(path: &Path, final_is_file: bool) -> Vec<PathSegment> {
     if shell_fs::is_shell_namespace_path(path) {
         return vec![PathSegment {
@@ -7622,6 +8776,9 @@ impl EventEmitter<TabRequest> for KiteApp {}
 
 impl Render for KiteApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.settings.is_some() {
+            return self.render_settings(window, cx).into_any_element();
+        }
         if !self.loading {
             kite_core::perf_trace::mark_once("windows.first_content_render");
         }
@@ -7776,9 +8933,12 @@ impl Render for KiteApp {
             .track_focus(&self.focus_handle)
             .relative()
             .size_full()
-            .gap_2()
+            .gap(px(ISLAND_GAP))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.handle_column_key_down(event, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &NavigateBack, window, cx| this.navigate_back(window, cx)),
             )
@@ -7838,6 +8998,7 @@ impl Render for KiteApp {
             .on_action(cx.listener(|this, _: &PreviousTab, _, cx| {
                 this.request_tab(TabRequest::Previous, cx)
             }))
+            .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::set_default_explorer))
             .on_action(cx.listener(Self::restore_default_explorer))
@@ -7880,7 +9041,7 @@ impl Render for KiteApp {
                     .min_h_0()
                     .w_full()
                     .items_stretch()
-                    .gap_2()
+                    .gap(px(ISLAND_GAP))
                     .child(sidebar)
                     .child(
                         v_flex()
@@ -7912,11 +9073,11 @@ impl Render for KiteApp {
             )
             .child(
                 h_flex()
-                    .h(px(30.))
+                    .h(px(STATUS_BAR_HEIGHT))
                     .w_full()
                     .flex_shrink_0()
-                    .px_3()
-                    .gap_3()
+                    .px_2()
+                    .gap_2()
                     .items_center()
                     .justify_between()
                     .rounded_lg()
@@ -7957,6 +9118,7 @@ impl Render for KiteApp {
                     ),
             )
             .child(self.render_modal(cx))
+            .into_any_element()
     }
 }
 
@@ -8178,6 +9340,7 @@ mod path_bar_tests {
         ColumnDisplayRow, ColumnFilter, ColumnPane, column_chain, column_context_menu_target,
         column_count_after_file_selection, common_column_prefix, loaded_column_index,
         path_after_recycle, path_after_recycle_paths, path_after_rename,
+        search_name_highlight_ranges, typed_column_search_text,
     };
     use crate::fs::{EntryKind, FileEntry, SortKey, SortSpec};
     use crate::ui_preferences::{ColumnGroupPreference as ColumnGroup, ColumnViewRule};
@@ -8433,12 +9596,12 @@ mod path_bar_tests {
         let panes = [
             pane(r"C:\", false),
             pane(r"C:\Users", false),
-            pane(r"C:\Users\fengqy", true),
+            pane(r"C:\Users\Example", true),
         ];
 
         assert_eq!(loaded_column_index(&panes, Path::new(r"C:\Users")), Some(1));
         assert_eq!(
-            loaded_column_index(&panes, Path::new(r"C:\Users\fengqy")),
+            loaded_column_index(&panes, Path::new(r"C:\Users\Example")),
             None
         );
         assert_eq!(loaded_column_index(&panes, Path::new(r"C:\Windows")), None);
@@ -8449,13 +9612,13 @@ mod path_bar_tests {
         let panes = [
             pane(r"C:\", false),
             pane(r"C:\Users", false),
-            pane(r"C:\Users\fengqy", true),
+            pane(r"C:\Users\Example", true),
         ];
         let chain = [
             PathBuf::from(r"C:\"),
             PathBuf::from(r"C:\Users"),
-            PathBuf::from(r"C:\Users\fengqy"),
-            PathBuf::from(r"C:\Users\fengqy\Documents"),
+            PathBuf::from(r"C:\Users\Example"),
+            PathBuf::from(r"C:\Users\Example\Documents"),
         ];
 
         assert_eq!(common_column_prefix(&panes, &chain), 2);
@@ -8470,7 +9633,7 @@ mod path_bar_tests {
 
     #[test]
     fn column_context_menu_targets_that_directory() {
-        let mut column = pane(r"C:\Users\fengqy\Documents", false);
+        let mut column = pane(r"C:\Users\Example\Documents", false);
         column.git_available = true;
 
         let target = column_context_menu_target(&column, true);
@@ -8565,9 +9728,10 @@ otes.{extension}"
         assert!(is_markdown_preview_entry(&make_entry("txt")));
         assert!(is_markdown_preview_entry(&make_entry("TXT")));
         assert!(is_markdown_preview_entry(&make_entry("md")));
-        assert!(is_markdown_preview_entry(&make_entry("markdown")));
+        assert!(is_markdown_preview_entry(&make_entry("MARKDOWN")));
         assert!(!is_markdown_preview_entry(&make_entry("log")));
         assert!(is_text_preview_entry(&make_entry("markdown")));
+        assert!(is_text_preview_entry(&make_entry("TXT")));
     }
 
     #[test]
@@ -8763,5 +9927,84 @@ mod scroll_routing_tests {
     #[test]
     fn non_scrollable_directory_stays_at_start() {
         assert_eq!(directory_scroll_offset(-90.0, 0.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod column_search_tests {
+    use super::{ColumnPane, search_name_highlight_ranges, typed_column_search_text};
+    use crate::fs::{EntryKind, FileEntry};
+    use crate::ui_preferences::ColumnViewRule;
+    use gpui_kit::{KeyDownEvent, Keystroke};
+    use std::path::PathBuf;
+
+    fn entry(path: &str) -> FileEntry {
+        let path = PathBuf::from(path);
+        FileEntry {
+            extension: path
+                .extension()
+                .map(|value| value.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
+            name: path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path,
+            kind: EntryKind::File,
+            size: 0,
+            modified: None,
+            git_status: None,
+            svn_status: None,
+        }
+    }
+
+    #[test]
+    fn highlights_every_case_insensitive_match() {
+        let text = "Target target TARGET";
+        let ranges = search_name_highlight_ranges(text, "target");
+        let matches = ranges
+            .into_iter()
+            .map(|range| text[range].to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(matches, vec!["Target", "target", "TARGET"]);
+    }
+
+    #[test]
+    fn printable_key_text_is_extracted_but_shortcuts_are_ignored() {
+        let typed = KeyDownEvent {
+            keystroke: Keystroke::parse("a").expect("letter keystroke"),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert_eq!(typed_column_search_text(&typed).as_deref(), Some("a"));
+
+        let shortcut = KeyDownEvent {
+            keystroke: Keystroke::parse("ctrl-a").expect("shortcut keystroke"),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert_eq!(typed_column_search_text(&shortcut), None);
+    }
+
+    #[test]
+    fn first_search_match_skips_group_header() {
+        let root = PathBuf::from(r"C:\repo");
+        let mut column = ColumnPane::new(
+            root.clone(),
+            vec![entry(r"C:\repo\notes.txt")],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_search_results(
+            "target".to_string(),
+            vec![entry(r"C:\repo\target.txt")],
+            false,
+        );
+        column.group = crate::ui_preferences::ColumnGroupPreference::Extension;
+        column.refresh_view();
+        assert_eq!(column.first_search_row_index(), Some(1));
     }
 }

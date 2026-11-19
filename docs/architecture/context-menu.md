@@ -143,6 +143,8 @@ command: ContextMenuCommand
 
 - “压缩”二级菜单提供 ZIP 和 TAR.GZ。
 - “解压”二级菜单提供“解压到当前文件夹”和“解压到…”。
+- “解压到当前文件夹”在压缩包旁创建同名子文件夹。名称冲突时追加编号，不合并到已有文件夹。
+- Windows 压缩和解压时显示独立的进度窗口，列出源项目、目标、数据量和操作结果。
 
 `ArchiveMenuProvider` 只在本地文件目标启用压缩。
 `ArchiveMenuProvider` 只在 ZIP、TAR.GZ 和 TGZ 文件目标启用解压。

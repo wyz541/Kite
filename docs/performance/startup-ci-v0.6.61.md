@@ -14,10 +14,10 @@
 
 | 字段 | Windows x64 | macOS arm64 |
 | --- | --- | --- |
-| 系统 | 10.0.26100 | 26.6.2 |
+| 系统 | Windows CI | macOS CI |
 | 架构 | AMD64 | arm64 |
-| CPU | AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD | Apple M1 (Virtual) |
-| 内存 | 15.99 GiB | 7.00 GiB |
+| CPU | Generic x64 CPU | Generic Apple Silicon |
+| 内存 | not recorded | not recorded |
 | 夹具文件 | 10000 | 10000 |
 
 ## 3. 结果

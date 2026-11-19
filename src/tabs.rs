@@ -5,11 +5,18 @@ use std::rc::Rc;
 use crate::actions::{CloseTab, NewTab, NextTab, PreviousTab};
 use crate::app::{AppLaunchTarget, KiteApp, SharedClipboard, TabRequest};
 use crate::session::{self, SessionStateDto, SessionTabDto};
+use crate::single_instance::{InstanceRequest, SingleInstance};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+const WINDOW_SHELL_PADDING: f32 = 4.;
+const WINDOW_SHELL_GAP: f32 = 4.;
+const TAB_BAR_HEIGHT: f32 = 34.;
+const TAB_HEIGHT: f32 = 26.;
+const TAB_WIDTH: f32 = 168.;
 
 struct TabEntry {
     view: Entity<KiteApp>,
@@ -24,11 +31,20 @@ pub struct KiteWindow {
     tab_scroll: ScrollHandle,
     focus_handle: FocusHandle,
     last_persisted_session: Option<SessionStateDto>,
+    _single_instance: Option<SingleInstance>,
+    _instance_task: Task<()>,
 }
 
 impl KiteWindow {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        mut single_instance: Option<SingleInstance>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let clipboard = Rc::new(RefCell::new(None));
+        let instance_receiver = single_instance
+            .as_mut()
+            .and_then(SingleInstance::take_receiver);
         let mut this = Self {
             tabs: Vec::new(),
             active_index: 0,
@@ -36,6 +52,8 @@ impl KiteWindow {
             tab_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             last_persisted_session: None,
+            _single_instance: single_instance,
+            _instance_task: Task::ready(()),
         };
 
         let launch_target = KiteApp::launch_target_override();
@@ -51,6 +69,22 @@ impl KiteWindow {
                 None => Self::create_tab(KiteApp::default_directory(), clipboard, window, cx),
             };
             this.attach_tab(view, window, cx);
+        }
+
+        if let Some(mut receiver) = instance_receiver {
+            this._instance_task = cx.spawn(async move |this, cx| {
+                while let Ok(request) = receiver.recv().await {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if let InstanceRequest::OpenPath(path) = request
+                            && let Some(target) =
+                                AppLaunchTarget::from_existing_path(PathBuf::from(path))
+                        {
+                            this.open_launch_target(target, window, cx);
+                        }
+                        window.activate_window();
+                    });
+                }
+            });
         }
 
         this.active_index = this.active_index.min(this.tabs.len().saturating_sub(1));
@@ -207,7 +241,12 @@ impl KiteWindow {
         let Some(entry) = self.tabs.get(self.active_index) else {
             return;
         };
-        let path = entry.view.read(cx).current_dir().display().to_string();
+        let view = entry.view.read(cx);
+        if view.settings_visible() {
+            window.set_window_title("Kite 设置");
+            return;
+        }
+        let path = view.current_dir().display().to_string();
         window.set_window_title(&format!("Kite — {path}"));
     }
 
@@ -239,6 +278,17 @@ impl KiteWindow {
         self.focus_active(window, cx);
         self.persist_session(cx);
         cx.notify();
+    }
+
+    fn open_launch_target(
+        &mut self,
+        target: AppLaunchTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = Self::create_launch_tab(target, self.clipboard.clone(), window, cx);
+        self.attach_tab(view, window, cx);
+        self.activate_tab(self.tabs.len() - 1, window, cx);
     }
 
     fn open_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -337,10 +387,10 @@ impl KiteWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .gap_2()
+                    .gap_1p5()
                     .items_center()
-                    .pl_3()
-                    .pr(if can_close { px(4.) } else { px(12.) })
+                    .pl_2()
+                    .pr(if can_close { px(2.) } else { px(10.) })
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover_color))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -383,8 +433,8 @@ impl KiteWindow {
                 h_flex()
                     .id(format!("kite-tab-{index}"))
                     .relative()
-                    .w(px(174.))
-                    .h(px(28.))
+                    .w(px(TAB_WIDTH))
+                    .h(px(TAB_HEIGHT))
                     .flex_shrink_0()
                     .items_center()
                     .rounded_lg()
@@ -406,11 +456,11 @@ impl KiteWindow {
             .collect::<Vec<_>>();
 
         h_flex()
-            .h(px(38.))
+            .h(px(TAB_BAR_HEIGHT))
             .w_full()
             .flex_shrink_0()
-            .px_2()
-            .gap_2()
+            .px(px(WINDOW_SHELL_PADDING))
+            .gap(px(WINDOW_SHELL_GAP))
             .items_center()
             .rounded_lg()
             .bg(cx.theme().title_bar)
@@ -422,7 +472,7 @@ impl KiteWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .gap_1()
+                    .gap(px(WINDOW_SHELL_GAP))
                     .items_center()
                     .overflow_x_scroll()
                     .track_scroll(&self.tab_scroll)
@@ -434,14 +484,14 @@ impl KiteWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(28.))
+                    .size(px(26.))
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover_color))
                     .on_click(cx.listener(Self::new_tab_clicked))
                     .child(Icon::new(IconName::Plus).size_4()),
             )
-            .child(div().h(px(18.)).w(px(0.5)).bg(cx.theme().border))
+            .child(div().h(px(16.)).w(px(0.5)).bg(cx.theme().border))
             .child(
                 Button::new("toggle-preview")
                     .ghost()
@@ -509,8 +559,8 @@ impl Render for KiteWindow {
             .track_focus(&self.focus_handle)
             .relative()
             .size_full()
-            .p_2()
-            .gap_2()
+            .p(px(WINDOW_SHELL_PADDING))
+            .gap(px(WINDOW_SHELL_GAP))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_new_tab))

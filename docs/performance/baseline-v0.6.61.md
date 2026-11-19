@@ -15,14 +15,14 @@
 
 | Field | Value |
 | --- | --- |
-| OS | macOS 27.0.1 |
+| OS | macOS |
 | Architecture | aarch64 |
-| CPU | Apple M1 Max |
-| Logical cores | 10 |
-| Memory | 64.00 GiB |
+| CPU | Generic Apple Silicon |
+| Logical cores | not recorded |
+| Memory | not recorded |
 | Filesystem | apfs |
 | Disk kind | SSD |
-| Disk free at start | 419.12 GiB |
+| Disk free at start | not recorded |
 
 ## Coverage
 

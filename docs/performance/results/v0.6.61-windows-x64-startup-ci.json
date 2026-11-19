@@ -6,10 +6,10 @@
   "platform_machine": "AMD64",
   "host": {
     "os": "win32",
-    "os_version": "10.0.26100",
+    "os_version": "unknown",
     "architecture": "AMD64",
-    "cpu_model": "AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD",
-    "memory_bytes": 17174360064
+    "cpu_model": "Generic x64 CPU",
+    "memory_bytes": 0
   },
   "app_name": "kite-explorer.exe",
   "app_versions": [

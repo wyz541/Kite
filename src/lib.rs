@@ -12,6 +12,7 @@ pub mod global_name_search;
 pub mod kensaku_search;
 pub mod perf_trace;
 pub mod platform;
+pub mod preview;
 #[cfg(windows)]
 pub mod recycle_bin;
 pub mod search_filters;

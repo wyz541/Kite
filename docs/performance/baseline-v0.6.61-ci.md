@@ -15,11 +15,11 @@
 
 | 字段 | Windows x64 | macOS arm64 |
 | --- | --- | --- |
-| 系统 | Windows Server 2025 Datacenter | macOS 26.6.2 Tahoe |
+| 系统 | Windows CI | macOS |
 | 架构 | x86_64 | aarch64 |
-| CPU | AMD EPYC 9V74 80-Core Processor | Apple M1 (Virtual) |
-| 逻辑核心 | 4 | 3 |
-| 内存 | 15.99 GiB | 7.00 GiB |
+| CPU | Generic x64 CPU | Generic Apple Silicon |
+| 逻辑核心 | not recorded | not recorded |
+| 内存 | not recorded | not recorded |
 | 文件系统 | NTFS | apfs |
 | 已测场景 | 34 | 33 |
 | 错误 | 0 | 0 |

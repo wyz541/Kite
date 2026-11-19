@@ -429,16 +429,29 @@ private struct KiteBrowserColumn: View {
             if column.entries.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(column.displayRows) { row in
-                            columnRow(row)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(column.displayRows) { row in
+                                columnRow(row)
+                            }
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 5)
+                    }
+                    .scrollIndicators(.hidden)
+                    .onChange(of: column.searchQuery) { _ in
+                        guard let firstMatchID = column.displayRows.compactMap({ row in
+                            guard case .entry(let entry) = row else { return nil }
+                            return entry.id
+                        }).first else {
+                            return
+                        }
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(firstMatchID, anchor: .top)
                         }
                     }
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 5)
                 }
-                .scrollIndicators(.hidden)
             }
         }
         .frame(width: columnWidth)
@@ -466,6 +479,11 @@ private struct KiteBrowserColumn: View {
         }
         .onAppear {
             searchFocused = model.activeColumnSearchPath == column.path
+        }
+        .onHover { hovered in
+            if hovered {
+                model.noteColumnHover(path: column.path)
+            }
         }
         .modifier(
             KiteFileDropModifier(
@@ -663,6 +681,7 @@ private struct KiteBrowserColumn: View {
                 entry: entry,
                 columnIndex: index,
                 isSelected: column.selectedPaths.contains(entry.path),
+                searchQuery: column.searchQuery,
                 showsDetails: showsDetails,
                 showsDateColumn: showsDateColumn,
                 showsKindColumn: showsKindColumn,
@@ -943,6 +962,7 @@ private struct KiteBrowserRow: View {
     let entry: BrowserEntry
     let columnIndex: Int
     let isSelected: Bool
+    let searchQuery: String?
     let showsDetails: Bool
     let showsDateColumn: Bool
     let showsKindColumn: Bool
@@ -1063,7 +1083,7 @@ private struct KiteBrowserRow: View {
             .frame(width: 22, height: 22)
             .accessibilityHidden(true)
 
-            Text(entry.name)
+            highlightedName
                 .font(.system(size: 12.5, weight: isSelected ? .medium : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -1090,6 +1110,31 @@ private struct KiteBrowserRow: View {
         guard let modifiedUnixMs = entry.modifiedUnixMs else { return "—" }
         let date = Date(timeIntervalSince1970: TimeInterval(modifiedUnixMs) / 1_000)
         return date.formatted(date: .numeric, time: .omitted)
+    }
+
+    private var highlightedName: Text {
+        guard let query = searchQuery?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return Text(entry.name)
+        }
+
+        var result = Text("")
+        var cursor = entry.name.startIndex
+        while let range = entry.name.range(
+            of: query,
+            options: [.caseInsensitive],
+            range: cursor..<entry.name.endIndex
+        ) {
+            result = result + Text(String(entry.name[cursor..<range.lowerBound]))
+            result = result + Text(String(entry.name[range]))
+                .foregroundColor(Color.accentColor)
+                .bold()
+            cursor = range.upperBound
+            if cursor == entry.name.endIndex {
+                break
+            }
+        }
+        return result + Text(String(entry.name[cursor...]))
     }
 
     private var metadataKind: String {
@@ -1771,7 +1816,7 @@ private struct KiteEntryMenu: View {
         if let path = singleOperationPath, KitePlatform.archiveFormat(path) != nil {
             Menu {
                 Button {
-                    model.extract(path, to: parentDirectory)
+                    model.extract(path)
                 } label: {
                     Label("解压到当前文件夹", systemImage: "arrow.down.doc")
                 }

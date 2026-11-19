@@ -88,7 +88,7 @@ cargo run --locked --release --features performance --bin kite-perf -- \
 | 分栏搜索 | 递归名称搜索 | 搜索框反馈和丢帧 |
 | 全局名称搜索 | Kensaku sidecar 查询转换与过滤 | sidecar 打包后需增加冷建、热查询和增量更新基准 |
 | 全局内容搜索 | Kensaku sidecar 查询转换 | sidecar 打包后需增加内容索引和 OCR 基准 |
-| 预览和编辑 | 1 MiB、8 MiB 文本读取；100 MiB 拒绝 | 图片、Markdown、代码、滚动和大日志 |
+| 预览和编辑 | 1 MiB、8 MiB 文本读取；100 MiB 拒绝；100 MiB 文本前缀与大日志尾部；3200×2000 图片缩略图 | 原生布局、绘制、Markdown 交互和滚动丢帧 |
 | 文件操作 | 创建、重命名、复制、移动、大文件复制 | 回收站、剪贴板、进度和丢帧 |
 | 压缩 | ZIP 和 TAR.GZ 压缩、解压 | 原生进度和丢帧 |
 | VCS 与菜单 | Git 状态和状态应用 | SVN 环境、Windows Shell 菜单 |

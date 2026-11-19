@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::actions::SaveEditor;
 use crate::app::{
-    is_image_preview_entry, is_text_preview_entry, read_log_preview, read_text_preview,
+    is_image_preview_entry, is_raster_image_preview_entry, is_text_preview_entry, read_log_preview,
+    read_text_preview,
 };
 use crate::fs::FileEntry;
 use crate::shell_fs;
@@ -18,6 +20,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kite_core::preview::{PreviewImageData, is_raster_image_preview_path, load_image_preview};
+
+const PREVIEW_WINDOW_IMAGE_MAX_WIDTH: u32 = 1_920;
+const PREVIEW_WINDOW_IMAGE_MAX_HEIGHT: u32 = 1_440;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreviewKind {
@@ -39,6 +45,7 @@ pub(crate) struct PreviewWindow {
     document: Option<TextDocument>,
     editor: Option<Entity<EditorState>>,
     text_view: Option<Entity<TextViewState>>,
+    image: Option<Arc<RenderImage>>,
     scroll: ScrollHandle,
     message: Option<SharedString>,
     word_wrap: bool,
@@ -79,18 +86,20 @@ impl PreviewWindow {
                     .scrollable(false)
             })
         });
+        let raster_image = kind == PreviewKind::Image && is_raster_image_preview_entry(&entry);
         let mut this = Self {
             path: entry.path.clone(),
             name: entry.name.into(),
             path_label: entry.path.display().to_string().into(),
             kind,
-            loading: editor.is_some() || text_view.is_some(),
+            loading: editor.is_some() || text_view.is_some() || raster_image,
             saving: false,
             dirty: false,
             allow_close: false,
             document: None,
             editor,
             text_view,
+            image: None,
             scroll: ScrollHandle::new(),
             message: None,
             word_wrap: false,
@@ -125,7 +134,8 @@ impl PreviewWindow {
         match self.kind {
             PreviewKind::Editor => self.start_editor_load(path, cx),
             PreviewKind::ReadOnlyText => self.start_text_preview(path, cx),
-            PreviewKind::Image | PreviewKind::Other => {}
+            PreviewKind::Image => self.start_image_load(path, cx),
+            PreviewKind::Other => {}
         }
     }
 
@@ -189,6 +199,34 @@ impl PreviewWindow {
                     Err(error) => format!("**无法预览文件**\n\n{error}"),
                 };
                 text_view.update(cx, |view, cx| view.set_text(&source, cx));
+                cx.notify();
+            });
+        });
+    }
+
+    fn start_image_load(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !is_raster_image_preview_path(&path) {
+            return;
+        }
+        self._load_task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    load_image_preview(
+                        &path,
+                        PREVIEW_WINDOW_IMAGE_MAX_WIDTH,
+                        PREVIEW_WINDOW_IMAGE_MAX_HEIGHT,
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.loading = false;
+                match result {
+                    Ok(image) => {
+                        this.image = Some(preview_render_image(image));
+                        this.message = None;
+                    }
+                    Err(error) => this.message = Some(error.into()),
+                }
                 cx.notify();
             });
         });
@@ -601,21 +639,47 @@ impl Render for PreviewWindow {
         let body = match self.kind {
             PreviewKind::Editor => self.render_editor_body(cx),
             PreviewKind::ReadOnlyText => self.render_read_only_text_body(cx),
-            PreviewKind::Image => h_flex()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .items_center()
-                .justify_center()
-                .overflow_hidden()
-                .p_6()
-                .child(
-                    img(self.path.clone())
-                        .max_w_full()
-                        .max_h_full()
-                        .object_fit(ObjectFit::Contain),
-                )
-                .into_any_element(),
+            PreviewKind::Image => {
+                if let Some(image) = self.image.clone() {
+                    h_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
+                        .p_6()
+                        .child(
+                            img(image)
+                                .id("preview-window-image")
+                                .max_w_full()
+                                .max_h_full()
+                                .object_fit(ObjectFit::Contain),
+                        )
+                        .into_any_element()
+                } else if self.loading {
+                    centered_message("正在生成图片预览…", cx)
+                } else if let Some(message) = self.message.clone() {
+                    centered_message(&message, cx)
+                } else {
+                    h_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
+                        .p_6()
+                        .child(
+                            img(self.path.clone())
+                                .id("preview-window-source-image")
+                                .max_w_full()
+                                .max_h_full()
+                                .object_fit(ObjectFit::Contain),
+                        )
+                        .into_any_element()
+                }
+            }
             PreviewKind::Other => v_flex()
                 .flex_1()
                 .min_h_0()
@@ -686,6 +750,12 @@ impl Render for PreviewWindow {
             .child(body)
             .child(self.render_status_bar(cx))
     }
+}
+
+pub(crate) fn preview_render_image(data: PreviewImageData) -> Arc<RenderImage> {
+    let buffer = image::RgbaImage::from_raw(data.width, data.height, data.bgra)
+        .expect("preview image dimensions must match its BGRA buffer");
+    Arc::new(RenderImage::new([image::Frame::new(buffer)]))
 }
 
 fn centered_message(message: &str, cx: &App) -> AnyElement {
