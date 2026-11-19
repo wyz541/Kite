@@ -18,9 +18,9 @@ mod global_search_window;
 #[cfg(windows)]
 mod preview_window;
 #[cfg(windows)]
-mod settings_window;
-#[cfg(windows)]
 mod shell_fs;
+#[cfg(windows)]
+mod single_instance;
 #[cfg(windows)]
 mod table;
 #[cfg(windows)]
@@ -35,8 +35,10 @@ use gpui_kit::*;
 #[cfg(windows)]
 pub use kite_core::{
     archive, content_search, devices, favorites, fs, platform, session, text_editor,
-    ui_preferences, update_notes, updater, vcs,
+    ui_preferences, updater, vcs,
 };
+#[cfg(windows)]
+use single_instance::{InstanceStart, SingleInstance};
 #[cfg(windows)]
 use tabs::KiteWindow;
 
@@ -44,17 +46,32 @@ use tabs::KiteWindow;
 fn main() {
     kite_core::perf_trace::start();
     file_clipboard::trace_drag("Kite process started");
+    let launch_path = KiteApp::launch_path_override();
+    let single_instance = match SingleInstance::start() {
+        Ok(InstanceStart::Primary(instance)) => Some(instance),
+        Ok(InstanceStart::Secondary) => {
+            if let Err(error) = SingleInstance::forward(launch_path.as_deref()) {
+                eprintln!("{error}");
+            } else {
+                return;
+            }
+            None
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            None
+        }
+    };
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            let preferences = ui_preferences::load_ui_preferences();
-            let mode = match preferences.appearance {
-                ui_preferences::AppearancePreference::Light => ThemeMode::Light,
-                ui_preferences::AppearancePreference::Dark => ThemeMode::Dark,
-                ui_preferences::AppearancePreference::System => ThemeMode::Light,
+            let preferences = kite_core::ui_preferences::load_ui_preferences();
+            let theme_mode = match preferences.theme_mode {
+                kite_core::ui_preferences::ThemePreference::Dark => ThemeMode::Dark,
+                kite_core::ui_preferences::ThemePreference::Light => ThemeMode::Light,
             };
-            Theme::change(mode, None, cx);
+            Theme::change(theme_mode, None, cx);
             KiteApp::bind_keys(cx);
             KiteApp::install_menus(cx);
 
@@ -68,7 +85,7 @@ fn main() {
             };
 
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| KiteWindow::new(window, cx))
+                cx.new(|cx| KiteWindow::new(single_instance, window, cx))
             })
             .expect("failed to open Kite window");
             cx.activate(true);

@@ -121,12 +121,10 @@ final class KiteAppDelegate: NSObject, NSApplicationDelegate {
 struct KiteMacApp: App {
     @StateObject private var model = KiteModel()
     @NSApplicationDelegateAdaptor(KiteAppDelegate.self) private var appDelegate
-    @AppStorage(KiteModel.appearanceDefaultsKey) private var appearance = KiteAppearance.system.rawValue
 
     var body: some Scene {
         WindowGroup {
             ContentView(model: model)
-                .preferredColorScheme(preferredColorScheme)
                 .onAppear {
                     model.openExternalFolders(KiteOpenRequestRouter.shared.drainFolders())
                     model.revealExternalItems(KiteOpenRequestRouter.shared.drainRevealItems())
@@ -249,14 +247,5 @@ struct KiteMacApp: App {
                 }
             }
         }
-
-        Settings {
-            KiteSettingsView(model: model)
-                .preferredColorScheme(preferredColorScheme)
-        }
-    }
-
-    private var preferredColorScheme: ColorScheme? {
-        KiteAppearance(rawValue: appearance)?.colorScheme
     }
 }

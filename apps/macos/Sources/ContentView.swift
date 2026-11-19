@@ -36,12 +36,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 1000, minHeight: 660)
         .ignoresSafeArea(.container, edges: .top)
-        .background {
-            KiteWindowConfigurator()
-            KiteGlobalKeyboardMonitor { event in
-                model.handleGlobalKey(event)
-            }
-        }
+        .background(KiteWindowConfigurator())
         .onAppear {
             PerformanceTrace.markOnce("macos.content_view_appeared")
         }

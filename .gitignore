@@ -5,13 +5,9 @@
 /apps/macos/build/
 cargo-check.log
 *.png
-*.jpg
-*.jpeg
-*.webp
-*.bmp
 !assets/kite-icon-master.png
 !assets/kite-icon-preview.png
-!docs/images/kite-product-preview-sidebar.png
 /docs/screenshots/
 
+/vendor/kensaku/
 __pycache__/

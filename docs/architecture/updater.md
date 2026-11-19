@@ -19,7 +19,7 @@ Windows 与 macOS 不共享安装脚本。
 - 比较语义化版本。
 - 只接受 Kite 仓库的更新资产。
 - 强制校验 SHA-256。
-- 支持 Windows EXE 更新。
+- 支持 Windows 完整包更新。
 - 支持 macOS 应用包更新。
 - 更新失败时恢复旧版本。
 - 不把 GitHub Token 写入客户端。
@@ -44,7 +44,7 @@ Windows 与 macOS 不共享安装脚本。
 比较当前版本与最新版本
         |
         v
-选择 Windows EXE 或 macOS ZIP
+选择 Windows ZIP 或 macOS ZIP
         |
         v
 下载到本地更新目录
@@ -89,9 +89,10 @@ Release 标签允许带 `v` 前缀。
 
 ### Windows x64
 
-Windows 使用独立资产 `Kite.exe`。
-独立 EXE 不依赖 ZIP 解压。
-Windows 更新目标为当前运行 EXE。
+Windows 使用 `Kite-vX.Y.Z-windows-x64.zip`。
+ZIP 包含 `Kite.exe`、`kensaku-cli.exe` 和 `kensaku-daemon.exe`。
+Windows 更新目标为当前运行 EXE 所在目录。
+独立 `Kite.exe` 只用于旧版更新器兼容迁移。
 
 ### macOS arm64
 
@@ -111,26 +112,9 @@ https://github.com/wyz541/kite/releases/download/
 ```
 
 下载先写入 `.part` 文件。
-Kite 在下载结束后流式计算 SHA-256。
-中断的下载通过 HTTP Range 从现有 `.part` 文件继续。
+Kite 在写入过程中计算 SHA-256。
 大小或摘要不匹配时，Kite 删除临时文件。
 Kite 只在完整校验后把临时文件改名。
-
-## 网络与代理
-
-更新检查与资产下载依次尝试环境代理、Windows 系统代理和直连。
-环境代理读取 `ALL_PROXY`、`HTTPS_PROXY` 和 `HTTP_PROXY`。
-Windows 系统代理读取当前用户 Internet Settings 中的 HTTP、HTTPS 或 SOCKS5 设置。
-HTTP 与 SOCKS5 代理均受支持。
-代理只改变传输路径，不改变固定的 Release 资产 URL 或 SHA-256 校验。
-
-下载连接失败、读取中断、HTTP `408`、`425`、`429`、`5xx` 和校验失败会重试。
-Kite 最多执行五轮下载尝试。
-传输中断时保留未完成的 `.part` 文件并从断点继续。
-校验失败时删除临时文件并从零重新下载。
-普通 `4xx` 拒绝不会在同一轮内重复请求。
-最终网络失败只向界面返回检查网络或系统代理的操作建议。
-底层传输详情只写入标准错误和更新诊断日志。
 
 ## Windows 安装
 
@@ -139,17 +123,23 @@ Windows Core 在下载前检查当前 EXE 文件及所在目录是否可写。
 检查失败时，Kite 不下载、不退出，并提示用户复制到可写目录。
 助手最多等待当前 Kite PID 10 秒。
 助手强制结束同名 Kite 进程。
-助手直接尝试把当前 EXE 移动为 `Kite.exe.old`。
+助手结束同目录的 Kensaku 进程。
+助手校验更新 ZIP 的 SHA-256。
+助手把 ZIP 解压到独立临时目录。
+助手确认 ZIP 包含 Kite EXE 和两个 Kensaku sidecar。
+助手备份当前受管文件。
+助手把当前 EXE 移动为 `Kite.exe.old`。
 移动失败时，助手重试。
-重试直接重命名目标文件。
 此操作兼容 Windows 加载器的共享删除权限。
-助手复制已经校验的新 EXE。
-助手使用 .NET SHA-256 计算目标文件摘要。
-助手不依赖 `Get-FileHash` PowerShell 模块。
+助手安装新 EXE、`kensaku-cli.exe` 和 `kensaku-daemon.exe`。
 助手启动新 EXE。
 启动成功后，助手删除备份。
-任一阶段失败时，助手恢复备份并启动旧 EXE。
+任一阶段失败时，助手恢复受管文件并启动旧 EXE。
 日志位于 `%LOCALAPPDATA%\Kite\updates\update.log`。
+
+Windows 首次发现 sidecar 缺失时，Core 自动下载当前稳定 Release ZIP。
+Core 校验 ZIP SHA-256 后只解压两个 sidecar。
+Core 用临时文件替换目标 sidecar。
 
 ## macOS 安装
 
@@ -166,16 +156,14 @@ AppKit 层创建 `/bin/bash` 安装助手。
 
 ## UI 入口
 
-Windows 入口位于 `Kite > 检查更新…` 和“Kite 设置”的“更新”页。
-macOS 入口位于应用菜单 `检查更新…` 和“Kite 设置”的“更新”页。
+Windows 入口位于 `Kite > 检查更新…`。
+macOS 入口位于应用菜单 `检查更新…`。
 Windows 在状态栏显示检查、下载和安装状态。
 macOS 在状态栏显示检查、下载和安装状态。
-检查结果直接显示在原有“更新”页中，不创建额外弹窗。
-“更新”页显示当前版本、新版本、更新包大小、发布说明和下载操作。
-Release 说明拆分为摘要和功能分组，并隐藏验证、构建、安装和平台说明等内部发布内容。
+更新可用时，平台 UI 显示版本和 Release 说明。
 下载时，平台 UI 显示百分比、已下载大小、总大小和进度条。
 总大小未知时，平台 UI 显示已下载大小。
-下载失败时，“更新”页显示原因，并允许用户重试。
+下载前必须得到用户确认。
 
 ## UniFFI
 
@@ -214,7 +202,6 @@ macOS 不实现第二套版本比较或资产选择逻辑。
 - 客户端不保存 GitHub Token。
 - 更新源固定为 `wyz541/kite`。
 - 资产 URL 使用固定前缀校验。
-- 代理不会替代 Release 资产地址或摘要校验。
 - 摘要缺失时拒绝更新。
 - 摘要不匹配时拒绝更新。
 - 下载大小限制为 256 MiB。
@@ -228,7 +215,6 @@ macOS 不实现第二套版本比较或资产选择逻辑。
 - API 限流时使用 Release 页面回退。
 - 自动更新信息不可用时，Kite 提示稍后重试或手动下载。
 - 界面不显示底层 `HTTP`、`TLS` 和库文档错误。
-- 下载会使用代理候选、直连回退和短暂重试。
 - 网络失败时保留当前版本。
 - 下载失败时保留当前版本。
 - 校验失败时删除临时文件。
@@ -236,7 +222,7 @@ macOS 不实现第二套版本比较或资产选择逻辑。
 - 权限不足时显示明确错误。
 - Windows 目标目录不可写时阻止更新并显示错误。
 - Windows 助手失败时显示错误对话框。
-- 更新诊断日志保留失败原因。
+- 更新日志保留失败原因。
 
 ## 测试
 
@@ -246,13 +232,11 @@ macOS 不实现第二套版本比较或资产选择逻辑。
 - 平台资产选择测试。
 - 缺少摘要测试。
 - 资产 URL 白名单测试。
-- 网络代理解析测试。
-- 瞬时 HTTP 状态重试分类测试。
-- 下载失败文案隐私测试。
 - `SHA256SUMS.txt` 解析测试。
 - 在线 Release 解析测试。
 - 在线 Windows 资产下载和摘要测试。
 - Windows 加载器兼容文件锁替换测试。
+- Windows sidecar 包解压测试。
 - Windows 更新助手 UTF-8 BOM 测试。
 - Windows 单元测试。
 - Windows Clippy。

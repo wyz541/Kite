@@ -40,21 +40,6 @@ Kite 适合需要频繁移动文件的开发者、设计人员和经常整理大
 
 > 看见路径，理解位置，然后直接行动。
 
-## 产品预览
-
-下图来自 macOS 实机运行。
-示例使用只读合成目录。
-截图展示完整 Kite 窗口和侧边栏。
-侧边栏只显示合成收藏。
-
-<p align="center">
-  <a href="docs/images/kite-product-preview-sidebar.png">
-    <img src="docs/images/kite-product-preview-sidebar.png" alt="Kite macOS 完整窗口：侧边栏、四栏文件浏览和图片预览" width="100%">
-  </a>
-</p>
-
-公开截图遵守[截图隐私规则](docs/SCREENSHOT_POLICY.md)。
-
 ## 下载
 
 请从 [GitHub Releases](https://github.com/wyz541/kite/releases/latest) 下载最新版本。
@@ -102,14 +87,13 @@ macOS 可与 Finder 共享文件剪贴板。
 - 页签、返回、前进、上一级和可编辑面包屑。
 - 侧边栏快速访问、收藏、设备和磁盘入口。
 - 会话恢复，包括页签、路径和视图模式。
-- Windows 和 macOS 提供结构一致的设置窗口。
 - 分栏监听目录变化，自动刷新新增、删除和重命名项目。
 - macOS 和 Windows 支持分栏排序方向切换。
 - 详细信息模式下，点击名称、日期、类型或大小表头排序，再次点击切换方向。
 - 支持文件类型筛选、分组和显示规则重置。
 - macOS 和 Windows 支持分栏递归搜索。
 - 两端通过独立全局搜索窗口搜索文件名或文件内容。
-- 分栏视图支持直接输入字符搜索最后操作的分栏。
+- 全局名称和内容搜索在本地完成，不上传文件。
 - 名称和内容模式支持当前文件夹、收藏文件夹和本地磁盘。
 - macOS 使用系统根卷名称作为范围名称，并搜索 `/`；Windows 提供“网络卷”范围。
 - 多磁盘范围只在按 Enter 或点击搜索后执行，避免输入时重复扫描。
@@ -150,7 +134,7 @@ macOS 可与 Finder 共享文件剪贴板。
 - 显示 Git 和 SVN 文件状态。
 - 文件夹显示子项目中优先级最高的状态。
 - 右键菜单支持 Git 和 SVN 常用操作。
-- Windows 可调用 TortoiseGit、TortoiseSVN 和系统扩展。
+- Windows 可调用 TortoiseGit、TortoiseSVN 和 Shell 扩展。
 - Windows 搜索和文件读取在后台执行，界面不会等待磁盘响应。
 
 ### 原生平台集成
@@ -172,7 +156,6 @@ macOS 可与 Finder 共享文件剪贴板。
 | 分栏排序方向 | 已支持 | 已支持 |
 | 分栏排序字段、筛选和分组 | 已支持 | 已支持 |
 | 分栏递归搜索 | 已支持 | 已支持 |
-| 分栏键盘搜索 | 已支持 | 已支持 |
 | 分栏目录变化自动刷新 | 已支持 | 已支持 |
 | 独立全局搜索窗口 | 已支持 | 已支持 |
 | 全局文件内容搜索 | 已支持 | 已支持 |
@@ -198,10 +181,10 @@ Kite 仍处于 `0.6.x` 活跃开发阶段。
 - 分栏视图支持批量选择。列表视图仍只保留一个当前行。
 - 文件名搜索最多显示 1000 个结果。
 - 内容搜索最多显示 50 个文件。
-- 内容搜索首次使用会在后台建立本地索引。
-- 内容搜索只索引 UTF-8 和 ASCII 文本。
-- 内容搜索不解析 PDF、Word、Excel 或压缩包。
-- 内容搜索默认跳过隐藏项、构建目录、依赖目录和超过 8 MiB 的文件。
+- 首次使用内容搜索时，Kite 会在后台建立本地索引。
+- 从源码构建时，搜索组件必须随应用一起构建。
+- 搜索组件安装说明见 [本地搜索后端](docs/search/kensaku-backend.md)。
+- 内容搜索覆盖范围取决于已安装的提取器和文字识别组件。
 - WPD/MTP 删除操作不会进入回收站。
 - Windows 禁止重命名或删除 WPD/MTP 设备根目录。
 - WPD/MTP 写入速度取决于设备和系统连接。
@@ -221,16 +204,14 @@ Kite 仍处于 `0.6.x` 活跃开发阶段。
 
 ## 安装与更新
 
-打开 `Kite > 检查更新…`，或在“Kite 设置”的“更新”页中执行同一操作。
+打开 `Kite > 检查更新…`，或在工具栏设置菜单中执行同一操作。
 Kite 只会在用户主动检查更新时访问 GitHub Release。
-检查结果显示在原有“更新”页中，不再额外弹出更新窗口。
-“更新”页显示版本信息、功能摘要、发布说明、下载按钮和下载进度，并隐藏验证、构建和安装等内部发布内容。
 Windows 更新助手会结束现有 Kite 进程。
 下载完成后，Kite 校验 SHA-256，再替换当前版本。
 更新失败时，安装器恢复旧版本。
 
-Windows 更新诊断日志位于 `%LOCALAPPDATA%\Kite\updates\update.log`。
-macOS 更新诊断日志位于 `~/Library/Application Support/Kite/updates/update.log`。
+Windows 更新日志位于 `%LOCALAPPDATA%\Kite\updates\update.log`。
+macOS 更新日志位于 `~/Library/Application Support/Kite/updates/update.log`。
 
 ## 从源码构建
 

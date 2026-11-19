@@ -544,7 +544,6 @@ struct BrowserTab: Identifiable {
     let id: UUID
     var columns: [BrowserColumn]
     var address: String
-    var lastOperatedColumnPath: String?
 
     var currentPath: String { columns.last?.path ?? address }
     var title: String {
@@ -741,8 +740,6 @@ struct UpdateDownloadState: Equatable {
 
 @MainActor
 final class KiteModel: ObservableObject {
-    static let restoreSessionDefaultsKey = "kite.macos.restore-session"
-    static let appearanceDefaultsKey = "kite.macos.appearance"
     private static let sessionSchemaVersion: UInt32 = 1
     private static let columnSearchDebounceNanoseconds: UInt64 = 180_000_000
     private static let columnViewRulesDefaultsKey = "kite.macos.column-view-rules-v1"
@@ -758,6 +755,8 @@ final class KiteModel: ObservableObject {
     private var columnAutoRefreshGeneration: UInt64 = 0
     private var columnAutoRefreshTask: Task<Void, Never>?
     private var contentSearchPowerPolicyTask: Task<Void, Never>?
+    private var columnKeyMonitor: Any?
+    private var lastHoveredColumnPath: String?
     private lazy var columnDirectoryWatcher = DirectoryWatcher { [weak self] in
         self?.directoryContentsDidChange()
     }
@@ -772,9 +771,6 @@ final class KiteModel: ObservableObject {
     @Published private(set) var updateInProgress = false
     @Published private(set) var updateStatusMessage: String?
     @Published private(set) var updateDownload: UpdateDownloadState?
-    @Published private(set) var updateLatestVersion: String?
-    @Published private(set) var updateReleaseNotes: String?
-    private var pendingUpdate: UpdateInfoDto?
     @Published var activeColumnSearchPath: String?
     @Published var columnSearchText = ""
     @Published private(set) var columnSearchLoading = false
@@ -805,12 +801,19 @@ final class KiteModel: ObservableObject {
                 self?.updateContentSearchPowerPolicy()
             }
         }
+        columnKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleColumnKeyDown(event) ? nil : event
+        }
         PerformanceTrace.mark("macos.model_ready")
     }
 
     deinit {
         contentSearchPowerPolicyTask?.cancel()
         globalSearchDebounceTask?.cancel()
+        if let columnKeyMonitor {
+            NSEvent.removeMonitor(columnKeyMonitor)
+        }
     }
 
     var activeTab: BrowserTab? {
@@ -938,7 +941,6 @@ final class KiteModel: ObservableObject {
         guard let tabIndex = activeTabIndex, tabs[tabIndex].columns.indices.contains(index) else {
             return
         }
-        tabs[tabIndex].lastOperatedColumnPath = tabs[tabIndex].columns[index].path
         let mode = BrowserSelectionMode(modifiers: modifiers)
         if mode != .replace, index != tabs[tabIndex].columns.count - 1 {
             return
@@ -1020,6 +1022,10 @@ final class KiteModel: ObservableObject {
         persistColumnViewRule(index: index)
     }
 
+    func noteColumnHover(path: String) {
+        lastHoveredColumnPath = path
+    }
+
     func resetColumnView(index: Int) {
         guard let tabIndex = activeTabIndex,
               tabs[tabIndex].columns.indices.contains(index) else {
@@ -1029,31 +1035,16 @@ final class KiteModel: ObservableObject {
         persistColumnViewRule(index: index)
     }
 
-    func markColumnHovered(index: Int) {
-        guard let tabIndex = activeTabIndex,
-              tabs[tabIndex].columns.indices.contains(index) else { return }
-        let path = tabs[tabIndex].columns[index].path
-        guard tabs[tabIndex].lastOperatedColumnPath != path else { return }
-        tabs[tabIndex].lastOperatedColumnPath = path
-    }
-
-    func beginColumnSearch(initialText: String = "") {
-        guard let tabIndex = activeTabIndex, !tabs[tabIndex].columns.isEmpty else { return }
-        let path = tabs[tabIndex].lastOperatedColumnPath
-            ?? tabs[tabIndex].columns.last?.path
-        guard let path else { return }
-        if activeColumnSearchPath != path {
-            toggleColumnSearch(path: path)
-        }
-        guard !initialText.isEmpty else { return }
-        setColumnSearchText(initialText)
-    }
-
     func toggleColumnSearch(path: String) {
         if activeColumnSearchPath == path {
             clearColumnSearch(path: path)
             return
         }
+
+        openColumnSearch(path: path)
+    }
+
+    private func openColumnSearch(path: String) {
 
         if let previousPath = activeColumnSearchPath {
             clearColumnSearch(path: previousPath)
@@ -1062,6 +1053,33 @@ final class KiteModel: ObservableObject {
         resetColumnSearchRequest()
         activeColumnSearchPath = path
         columnSearchText = columnQuery(for: path) ?? ""
+    }
+
+    private func handleColumnKeyDown(_ event: NSEvent) -> Bool {
+        let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option, .function]
+        guard event.window?.isMainWindow == true,
+              event.modifierFlags.intersection(blockedModifiers).isEmpty,
+              let characters = event.characters,
+              !characters.isEmpty,
+              !characters.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }),
+              let path = lastHoveredColumnPath,
+              columns.contains(where: { $0.path == path }) else {
+            return false
+        }
+
+        if let responder = event.window?.firstResponder,
+           responder is NSTextField || responder is NSTextView {
+            return false
+        }
+
+        if activeColumnSearchPath != path {
+            openColumnSearch(path: path)
+            columnSearchText = ""
+        }
+        setColumnSearchText(columnSearchText + characters)
+        return true
     }
 
     func setColumnSearchText(_ text: String) {
@@ -1123,33 +1141,6 @@ final class KiteModel: ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
-    }
-
-    func handleGlobalKey(_ event: NSEvent) -> Bool {
-        guard event.type == .keyDown,
-              !(event.window?.firstResponder is NSTextView),
-              !(event.window?.firstResponder is NSTextField),
-              !(event.window?.firstResponder is NSSearchField) else {
-            return false
-        }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if flags.contains(.command) || flags.contains(.control) {
-            guard event.charactersIgnoringModifiers?.lowercased() == "f" else { return false }
-            beginColumnSearch()
-            return true
-        }
-        guard flags.intersection([.option, .control, .command, .function]).isEmpty,
-              let characters = event.characters,
-              !characters.isEmpty,
-              characters.allSatisfy({ character in
-                  !character.isNewline
-                      && !character.isWhitespace
-                      && character.unicodeScalars.allSatisfy { $0.properties.generalCategory != .control }
-              }) else {
-            return false
-        }
-        beginColumnSearch(initialText: characters)
-        return true
     }
 
     func clearColumnSearch(path: String) {
@@ -1301,21 +1292,6 @@ final class KiteModel: ObservableObject {
         errorMessage = nil
         let core = self.core
         let filters = searchFilters
-
-        Task {
-            do {
-                let indexedResult = try await Task.detached(priority: .userInitiated) {
-                    try core.searchIndexedNames(paths: roots, query: query, filters: filters)
-                }.value
-
-                guard generation == self.globalSearchGeneration, self.globalSearchLoading else { return }
-                if let indexedResult {
-                    self.globalSearch = BrowserGlobalSearchState(dto: indexedResult)
-                }
-            } catch {
-                return
-            }
-        }
 
         Task {
             do {
@@ -1772,27 +1748,33 @@ final class KiteModel: ObservableObject {
     }
 
     func compress(_ path: String, format: String) {
-        runArchiveOperation(.compress(format: format), source: path)
-    }
-
-    func extract(_ path: String, to directory: String? = nil) {
-        runArchiveOperation(.extract(directory: directory), source: path)
-    }
-
-    private func runArchiveOperation(_ operation: KiteArchiveOperation, source: String) {
-        let progress = KiteArchiveProgressWindowController.show(operation: operation, source: source)
-        let monitor = progress.monitor
         let core = self.core
         Task {
             do {
-                let destination = try await Task.detached(priority: .userInitiated) {
-                    try operation.run(core: core, source: source, monitor: monitor)
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try core.compressPath(path: path, format: format)
                 }.value
-                progress.finish(.success(destination: destination))
                 errorMessage = nil
                 refreshVisibleColumns()
             } catch {
-                progress.finish(.failure(message: error.localizedDescription))
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func extract(_ path: String, to directory: String? = nil) {
+        let core = self.core
+        Task {
+            do {
+                _ = try await Task.detached(priority: .userInitiated) {
+                    if let directory {
+                        return try core.extractArchive(path: path, destinationDirectory: directory)
+                    }
+                    return try core.extractArchiveHere(path: path)
+                }.value
+                errorMessage = nil
+                refreshVisibleColumns()
+            } catch {
                 errorMessage = error.localizedDescription
             }
         }
@@ -2102,9 +2084,6 @@ final class KiteModel: ObservableObject {
         updateInProgress = true
         updateStatusMessage = "正在检查 Kite 更新…"
         updateDownload = nil
-        updateLatestVersion = nil
-        updateReleaseNotes = nil
-        pendingUpdate = nil
         errorMessage = nil
 
         Task {
@@ -2112,29 +2091,20 @@ final class KiteModel: ObservableObject {
             do {
                 let update = try await Self.fetchUpdateInfo()
                 guard update.updateAvailable else {
-                    updateStatusMessage = "Kite \(update.currentVersion) 已是最新版本"
+                    updateStatusMessage = nil
+                    showUpdateAlert(
+                        title: "Kite 已是最新版本",
+                        message: "当前版本：\(update.currentVersion)\n最新版本：\(update.latestVersion)",
+                        style: .informational
+                    )
                     return
                 }
-                pendingUpdate = update
-                updateLatestVersion = update.latestVersion
-                updateReleaseNotes = summarizedReleaseNotes(update.releaseNotes)
-                updateStatusMessage = "发现 Kite \(update.latestVersion) 新版本，可在设置中安装"
-            } catch {
-                updateStatusMessage = "Kite 更新检查失败"
-                errorMessage = error.localizedDescription
-            }
-        }
-    }
+                guard confirmUpdate(update) else {
+                    updateStatusMessage = nil
+                    return
+                }
 
-    func installAvailableUpdate() {
-        guard !updateInProgress, let update = pendingUpdate else { return }
-        updateInProgress = true
-        updateStatusMessage = "正在下载 Kite \(update.latestVersion)…"
-        errorMessage = nil
-
-        Task {
-            defer { updateInProgress = false }
-            do {
+                updateStatusMessage = "正在下载 Kite \(update.latestVersion)…"
                 let archive: String
                 do {
                     let progressTask = startUpdateDownloadMonitor(initialTotal: update.assetSize)
@@ -2151,20 +2121,15 @@ final class KiteModel: ObservableObject {
                 )
                 NSApp.terminate(nil)
             } catch {
-                updateStatusMessage = "Kite 更新失败，可在设置中重试"
+                updateStatusMessage = nil
                 errorMessage = error.localizedDescription
+                showUpdateAlert(
+                    title: "Kite 更新失败",
+                    message: error.localizedDescription,
+                    style: .warning
+                )
             }
         }
-    }
-
-    func openAvailableUpdateReleaseNotes() {
-        guard let update = pendingUpdate else { return }
-        guard update.releaseUrl.hasPrefix("https://github.com/wyz541/kite/releases/"),
-              let url = URL(string: update.releaseUrl) else {
-            errorMessage = "发布说明地址无效。"
-            return
-        }
-        NSWorkspace.shared.open(url)
     }
 
     nonisolated private static func fetchUpdateInfo() async throws -> UpdateInfoDto {
@@ -2195,6 +2160,29 @@ final class KiteModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 150_000_000)
             }
         }
+    }
+
+    private func confirmUpdate(_ update: UpdateInfoDto) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "发现 Kite \(update.latestVersion)"
+        alert.informativeText = "当前版本：\(update.currentVersion)\n\n\(summarizedReleaseNotes(update.releaseNotes))"
+        alert.addButton(withTitle: "下载并更新")
+        alert.addButton(withTitle: "稍后")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func showUpdateAlert(
+        title: String,
+        message: String,
+        style: NSAlert.Style
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = style
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "确定")
+        alert.runModal()
     }
 
     private func summarizedReleaseNotes(_ notes: String) -> String {
@@ -2286,10 +2274,7 @@ final class KiteModel: ObservableObject {
                 errorMessage = error.localizedDescription
             }
         }
-        let restoresSession = UserDefaults.standard.object(
-            forKey: Self.restoreSessionDefaultsKey
-        ) as? Bool ?? true
-        if restoresSession, let state = core.loadSession() {
+        if let state = core.loadSession() {
             let requestedIndex = min(Int(state.activeTab), max(state.tabs.count - 1, 0))
             var restoredTabs: [BrowserTab] = []
             var restoredActiveID: UUID?
@@ -2342,8 +2327,7 @@ final class KiteModel: ObservableObject {
         return BrowserTab(
             id: id,
             columns: restoredColumns,
-            address: currentListing.path,
-            lastOperatedColumnPath: currentListing.path
+            address: currentListing.path
         )
     }
 

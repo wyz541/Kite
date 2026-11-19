@@ -8,6 +8,7 @@ use crate::fs::{FileEntry, SortKey, SortSpec, VcsStatus, sort_entries};
 use crate::ui_preferences;
 use crate::vcs::{VcsSnapshot, apply_statuses};
 use gpui_kit::assets::IconName;
+use std::path::Path;
 
 pub struct FileTableDelegate {
     entries: Vec<FileEntry>,
@@ -419,8 +420,16 @@ impl From<FileIconKind> for Icon {
     }
 }
 
-pub(crate) fn column_icon_for(entry: &FileEntry) -> FileIconKind {
+pub(crate) fn icon_for(entry: &FileEntry) -> FileIconKind {
     FileIconKind::for_entry(entry)
+}
+
+pub(crate) fn icon_for_path(path: &Path) -> FileIconKind {
+    let extension = path
+        .extension()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    FileIconKind::for_extension(&extension)
 }
 
 pub(crate) fn folder_icon_color(cx: &App) -> Hsla {
@@ -429,23 +438,6 @@ pub(crate) fn folder_icon_color(cx: &App) -> Hsla {
     } else {
         // Keep the icon distinctly orange with at least 3:1 contrast on the light column surface.
         rgb(0xe8540a).into()
-    }
-}
-
-pub(crate) fn icon_for(entry: &FileEntry) -> IconName {
-    if entry.is_dir() {
-        return IconName::Folder;
-    }
-    match entry.extension.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => IconName::FileImage,
-        "mp3" | "wav" | "flac" | "aac" | "ogg" => IconName::FileMusic,
-        "mp4" | "mkv" | "mov" | "avi" | "webm" => IconName::FileVideoCamera,
-        "zip" | "7z" | "rar" | "tar" | "gz" => IconName::FileArchive,
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "css" | "c" | "cpp" | "h" | "cs"
-        | "java" | "go" | "kt" => IconName::FileCode,
-        "txt" | "md" | "log" | "ini" | "toml" | "yaml" | "yml" | "json" | "pdf" | "doc"
-        | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => IconName::FileText,
-        _ => IconName::File,
     }
 }
 
@@ -545,23 +537,29 @@ fn vcs_cell_text(entry: &FileEntry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileIconKind, FileTableDelegate};
+    use super::{FileIconKind, FileTableDelegate, icon_for_path};
     use crate::fs::SortSpec;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
-    fn column_icon_kinds_distinguish_common_file_types() {
-        assert_eq!(FileIconKind::for_extension("jpg"), FileIconKind::Image);
-        assert_eq!(FileIconKind::for_extension("flac"), FileIconKind::Audio);
-        assert_eq!(FileIconKind::for_extension("mp4"), FileIconKind::Video);
-        assert_eq!(FileIconKind::for_extension("hap"), FileIconKind::Archive);
-        assert_eq!(FileIconKind::for_extension("rs"), FileIconKind::Code);
-        assert_eq!(FileIconKind::for_extension("md"), FileIconKind::Text);
-        assert_eq!(FileIconKind::for_extension(""), FileIconKind::GenericFile);
+    fn file_icon_kinds_distinguish_common_file_types() {
+        assert_eq!(icon_for_path(Path::new("photo.JPG")), FileIconKind::Image);
+        assert_eq!(icon_for_path(Path::new("track.flac")), FileIconKind::Audio);
+        assert_eq!(icon_for_path(Path::new("clip.mp4")), FileIconKind::Video);
+        assert_eq!(
+            icon_for_path(Path::new("release.hap")),
+            FileIconKind::Archive
+        );
+        assert_eq!(icon_for_path(Path::new("main.rs")), FileIconKind::Code);
+        assert_eq!(icon_for_path(Path::new("README.md")), FileIconKind::Text);
+        assert_eq!(
+            icon_for_path(Path::new("LICENSE")),
+            FileIconKind::GenericFile
+        );
     }
 
     #[test]
-    fn column_icon_kinds_use_distinct_artwork() {
+    fn file_icon_kinds_use_distinct_artwork() {
         let kinds = [
             FileIconKind::Folder,
             FileIconKind::GenericFile,

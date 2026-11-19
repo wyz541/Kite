@@ -4,8 +4,6 @@ import SwiftUI
 struct KiteSidebar: View {
     @ObservedObject var model: KiteModel
 
-    @State private var isSettingsButtonHovering = false
-
     private var locations: [KiteSidebarLocation] {
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser.path
@@ -152,8 +150,32 @@ struct KiteSidebar: View {
     }
 
     private var settingsBar: some View {
-        Button {
-            KiteSettingsWindowController.open()
+        Menu {
+            Button {
+                model.checkForUpdates()
+            } label: {
+                Label("检查更新…", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(model.updateInProgress)
+
+            Divider()
+
+            Button {
+                model.setAsDefaultFileViewer()
+            } label: {
+                Label(
+                    KitePlatform.canSetDefaultFolderHandler
+                        ? "设为默认文件夹打开方式…"
+                        : "设为默认文件查看器…",
+                    systemImage: "folder.badge.gearshape"
+                )
+            }
+
+            Button {
+                model.restoreFinderAsDefaultFileViewer()
+            } label: {
+                Label("恢复 Finder 为默认…", systemImage: "arrow.uturn.backward.circle")
+            }
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: "gearshape.fill")
@@ -181,16 +203,15 @@ struct KiteSidebar: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: 34)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
+            }
         }
-        .buttonStyle(.plain)
-        .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(isSettingsButtonHovering ? 0.075 : 0.045))
-        }
-        .onHover { isSettingsButtonHovering = $0 }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .help("Kite 设置")
         .accessibilityLabel("Kite 设置")
-        .accessibilityHint("打开设置窗口")
     }
 
     @ViewBuilder

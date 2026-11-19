@@ -5,7 +5,7 @@ use std::sync::{
 };
 use std::time::UNIX_EPOCH;
 
-use crate::archive::{self, ArchiveFormat, ArchivePhase, ArchiveProgress};
+use crate::archive::{self, ArchiveFormat};
 use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSearchSnapshot};
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
@@ -98,66 +98,6 @@ pub struct UpdateDownloadProgressDto {
     pub active: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
-pub enum ArchiveProgressPhaseDto {
-    #[default]
-    Preparing,
-    Checking,
-    Working,
-    Finishing,
-}
-
-#[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct ArchiveProgressDto {
-    pub phase: ArchiveProgressPhaseDto,
-    pub destination: Option<String>,
-    pub processed_bytes: Option<u64>,
-    pub total_bytes: Option<u64>,
-}
-
-#[derive(Debug, uniffi::Object)]
-pub struct ArchiveProgressMonitor {
-    progress: Mutex<ArchiveProgressDto>,
-}
-
-#[uniffi::export]
-impl ArchiveProgressMonitor {
-    #[uniffi::constructor]
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            progress: Mutex::default(),
-        })
-    }
-
-    pub fn snapshot(&self) -> ArchiveProgressDto {
-        self.progress.lock().unwrap().clone()
-    }
-}
-
-impl ArchiveProgressMonitor {
-    fn record(&self, event: ArchiveProgress<'_>) {
-        let mut progress = self.progress.lock().unwrap();
-        match event {
-            ArchiveProgress::Destination(path) => {
-                progress.destination = Some(path.to_string_lossy().into_owned());
-            }
-            ArchiveProgress::Bytes {
-                phase,
-                processed,
-                total,
-            } => {
-                progress.phase = match phase {
-                    ArchivePhase::Checking => ArchiveProgressPhaseDto::Checking,
-                    ArchivePhase::Working => ArchiveProgressPhaseDto::Working,
-                };
-                progress.processed_bytes = Some(processed);
-                progress.total_bytes = total;
-            }
-            ArchiveProgress::Finishing => progress.phase = ArchiveProgressPhaseDto::Finishing,
-        }
-    }
-}
-
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TextDocumentDto {
     pub path: String,
@@ -228,7 +168,6 @@ impl KiteError {
 #[derive(Debug, uniffi::Object)]
 pub struct KiteCore {
     search_cancel: Mutex<Option<Arc<AtomicBool>>>,
-    indexed_search_cancel: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 #[uniffi::export]
@@ -237,7 +176,6 @@ impl KiteCore {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             search_cancel: Mutex::new(None),
-            indexed_search_cancel: Mutex::new(None),
         })
     }
 
@@ -381,106 +319,42 @@ impl KiteCore {
         }))
     }
 
-    pub fn search_indexed_names(
-        &self,
-        paths: Vec<String>,
-        query: String,
-        filters: crate::search_filters::SearchFilters,
-    ) -> Result<Option<GlobalSearchResultDto>, KiteError> {
-        let roots = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
-        let cancel = Arc::new(AtomicBool::new(false));
-        {
-            let mut active = self
-                .indexed_search_cancel
-                .lock()
-                .map_err(|_| KiteError::operation("索引搜索状态锁不可用"))?;
-            *active = Some(Arc::clone(&cancel));
-        }
-        let result =
-            crate::indexed_search::search_indexed_names(&roots, &query, filters, cancel.as_ref());
-        if let Ok(mut active) = self.indexed_search_cancel.lock()
-            && active
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &cancel))
-        {
-            *active = None;
-        }
-        let Some(snapshot) = result.map_err(KiteError::operation)? else {
-            return Ok(None);
-        };
-        Ok(Some(GlobalSearchResultDto {
-            roots: snapshot
-                .roots
-                .iter()
-                .map(|root| root.to_string_lossy().into_owned())
-                .collect(),
-            query: snapshot.query,
-            entries: snapshot.entries.iter().map(entry_dto).collect(),
-            truncated: snapshot.truncated,
-            partial: snapshot.partial,
-        }))
-    }
-
     pub fn cancel_directory_search(&self) {
-        for slot in [&self.search_cancel, &self.indexed_search_cancel] {
-            if let Ok(active) = slot.lock()
-                && let Some(cancel) = active.as_ref()
-            {
-                cancel.store(true, Ordering::Relaxed);
-            }
+        if let Ok(active) = self.search_cancel.lock()
+            && let Some(cancel) = active.as_ref()
+        {
+            cancel.store(true, Ordering::Relaxed);
         }
     }
 
     pub fn prepare_content_search(&self, roots: Vec<String>) -> Result<(), KiteError> {
-        let service = content_search::shared_service().map_err(KiteError::operation)?;
         let roots = roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
-        service
-            .ensure_roots(&roots)
-            .map(|_| ())
-            .map_err(KiteError::operation)
+        content_search::prepare_roots(&roots).map_err(KiteError::operation)
     }
 
     pub fn content_search_status(&self) -> ContentIndexStatusDto {
-        match content_search::shared_service() {
-            Ok(service) => {
-                let status = service.status();
-                ContentIndexStatusDto {
-                    state: status.state.as_str().to_string(),
-                    indexed_files: status.indexed_files,
-                    message: status.message,
-                }
-            }
-            Err(message) => ContentIndexStatusDto {
-                state: "error".to_string(),
-                indexed_files: 0,
-                message: Some(message),
-            },
+        let status = content_search::status();
+        ContentIndexStatusDto {
+            state: status.state.as_str().to_string(),
+            indexed_files: status.indexed_files,
+            message: status.message,
         }
     }
 
     pub fn note_content_search_interaction(&self) {
-        if let Ok(service) = content_search::shared_service() {
-            service.note_interaction();
-        }
+        content_search::note_interaction();
     }
 
     pub fn set_content_search_paused(&self, paused: bool) {
-        if let Ok(service) = content_search::shared_service() {
-            service.set_indexing_paused(paused);
-        }
+        content_search::set_indexing_paused(paused);
     }
 
     pub fn cancel_content_search(&self) {
-        if let Ok(service) = content_search::shared_service() {
-            service.cancel_search();
-        }
+        content_search::cancel_search();
     }
 
     pub fn clear_content_search_index(&self) -> Result<(), KiteError> {
-        content_search::shared_service()
-            .map_err(KiteError::operation)?
-            .clear()
-            .map_err(KiteError::operation)
+        content_search::clear().map_err(KiteError::operation)
     }
 
     pub fn search_content(
@@ -491,12 +365,16 @@ impl KiteCore {
         max_files: u32,
         filters: crate::search_filters::SearchFilters,
     ) -> Result<Option<ContentSearchResultDto>, KiteError> {
-        let service = content_search::shared_service().map_err(KiteError::operation)?;
         let roots = roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
-        service
-            .search_with_filters(&roots, &query, regex, max_files.max(1) as usize, filters)
-            .map(|snapshot| snapshot.map(content_search_result_dto))
-            .map_err(KiteError::operation)
+        content_search::search_with_filters(
+            &roots,
+            &query,
+            regex,
+            max_files.max(1) as usize,
+            filters,
+        )
+        .map(|snapshot| snapshot.map(content_search_result_dto))
+        .map_err(KiteError::operation)
     }
 
     pub fn devices(&self) -> DeviceSnapshotDto {
@@ -575,19 +453,6 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
-    pub fn compress_path_with_progress(
-        &self,
-        path: String,
-        format: String,
-        monitor: Arc<ArchiveProgressMonitor>,
-    ) -> Result<String, KiteError> {
-        let format = ArchiveFormat::parse(&format)
-            .ok_or_else(|| KiteError::operation("不支持的压缩格式。当前支持 ZIP 和 TAR.GZ。"))?;
-        archive::compress_with_progress(&PathBuf::from(path), format, |event| monitor.record(event))
-            .map(|path| path.to_string_lossy().into_owned())
-            .map_err(KiteError::operation)
-    }
-
     pub fn extract_archive(
         &self,
         path: String,
@@ -600,25 +465,6 @@ impl KiteCore {
 
     pub fn extract_archive_here(&self, path: String) -> Result<String, KiteError> {
         archive::extract_here(&PathBuf::from(path))
-            .map(|path| path.to_string_lossy().into_owned())
-            .map_err(KiteError::operation)
-    }
-
-    pub fn extract_archive_with_progress(
-        &self,
-        path: String,
-        destination_directory: Option<String>,
-        monitor: Arc<ArchiveProgressMonitor>,
-    ) -> Result<String, KiteError> {
-        let path = PathBuf::from(path);
-        let result = if let Some(destination) = destination_directory {
-            archive::extract_with_progress(&path, &PathBuf::from(destination), |event| {
-                monitor.record(event)
-            })
-        } else {
-            archive::extract_here_with_progress(&path, |event| monitor.record(event))
-        };
-        result
             .map(|path| path.to_string_lossy().into_owned())
             .map_err(KiteError::operation)
     }
@@ -791,69 +637,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn archive_progress_binding_keeps_destinations_and_work_per_operation() {
-        let root = std::env::temp_dir().join(format!(
-            "kite-ffi-archive-progress-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let source = root.join("notes.txt");
-        std::fs::write(&source, b"hello").unwrap();
-        let core = KiteCore::new();
-        let compression = ArchiveProgressMonitor::new();
-        let archive = core
-            .compress_path_with_progress(
-                source.to_string_lossy().into_owned(),
-                "zip".into(),
-                compression.clone(),
-            )
-            .unwrap();
-        let snapshot = compression.snapshot();
-        assert_eq!(snapshot.phase, ArchiveProgressPhaseDto::Finishing);
-        assert_eq!(snapshot.destination.as_deref(), Some(archive.as_str()));
-        assert_eq!(
-            (snapshot.processed_bytes, snapshot.total_bytes),
-            (Some(5), Some(5))
-        );
-
-        let extraction = ArchiveProgressMonitor::new();
-        assert_eq!(
-            extraction.snapshot().phase,
-            ArchiveProgressPhaseDto::Preparing
-        );
-        assert!(extraction.snapshot().destination.is_none());
-        let extracted_here = core
-            .extract_archive_with_progress(archive.clone(), None, extraction.clone())
-            .unwrap();
-        assert_eq!(PathBuf::from(&extracted_here), root.join("notes"));
-        assert_eq!(
-            extraction.snapshot().destination.as_deref(),
-            Some(extracted_here.as_str())
-        );
-        assert_eq!(extraction.snapshot().processed_bytes, Some(5));
-
-        let selected = root.join("selected").to_string_lossy().into_owned();
-        let extracted_to = core
-            .extract_archive_with_progress(
-                archive,
-                Some(selected.clone()),
-                ArchiveProgressMonitor::new(),
-            )
-            .unwrap();
-        assert_eq!(extracted_to, selected);
-        assert_eq!(
-            std::fs::read(PathBuf::from(extracted_to).join("notes.txt")).unwrap(),
-            b"hello"
-        );
-        assert_eq!(std::fs::read(source).unwrap(), b"hello");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn update_record_round_trips_asset_fields() {
         let update = UpdateInfo {
             current_version: "0.6.12".to_string(),
@@ -907,6 +690,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires packaged Kensaku sidecars"]
     fn core_searches_multiple_name_roots() {
         let directory = std::env::temp_dir().join(format!(
             "kite-core-global-search-{}-{}",
@@ -946,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires packaged Kensaku sidecars"]
     fn core_applies_global_name_filters() {
         let directory = std::env::temp_dir().join(format!(
             "kite-core-global-filter-{}-{}",
@@ -976,6 +761,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires packaged Kensaku sidecars"]
     fn core_searches_file_content_and_returns_lines() {
         let directory = std::env::temp_dir().join(format!(
             "kite-core-content-search-{}-{}",

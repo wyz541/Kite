@@ -11,15 +11,14 @@ on:
       - "src/devices.rs"
       - "src/fs.rs"
       - "src/global_name_search.rs"
-      - "src/indexed_search.rs"
-      - "src/name_index.rs"
+      - "src/kensaku_search.rs"
       - "src/search_filters.rs"
       - "src/session.rs"
       - "src/text_editor.rs"
       - "src/updater.rs"
       - "src/vcs.rs"
       - "scripts/performance/**"
-      - "src/usn_journal.rs"
+      - "scripts/kensaku/**"
       - ".github/workflows/performance.yml"
   workflow_dispatch:
     inputs:
@@ -147,7 +146,6 @@ jobs:
             --markdown "target/performance/${{ matrix.platform }}-aggregate.md"
 
       - name: Upload performance results
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kite-performance-${{ matrix.platform }}

@@ -5,10 +5,10 @@ use std::rc::Rc;
 use crate::actions::{CloseTab, NewTab, NextTab, PreviousTab};
 use crate::app::{AppLaunchTarget, KiteApp, SharedClipboard, TabRequest};
 use crate::session::{self, SessionStateDto, SessionTabDto};
-use crate::ui_preferences;
+use crate::single_instance::{InstanceRequest, SingleInstance};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, Theme, ThemeMode, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -31,11 +31,20 @@ pub struct KiteWindow {
     tab_scroll: ScrollHandle,
     focus_handle: FocusHandle,
     last_persisted_session: Option<SessionStateDto>,
+    _single_instance: Option<SingleInstance>,
+    _instance_task: Task<()>,
 }
 
 impl KiteWindow {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        mut single_instance: Option<SingleInstance>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let clipboard = Rc::new(RefCell::new(None));
+        let instance_receiver = single_instance
+            .as_mut()
+            .and_then(SingleInstance::take_receiver);
         let mut this = Self {
             tabs: Vec::new(),
             active_index: 0,
@@ -43,15 +52,12 @@ impl KiteWindow {
             tab_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             last_persisted_session: None,
+            _single_instance: single_instance,
+            _instance_task: Task::ready(()),
         };
 
         let launch_target = KiteApp::launch_target_override();
-        let preferences = ui_preferences::load_ui_preferences();
-        if preferences.appearance == ui_preferences::AppearancePreference::System {
-            Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
-        }
         if launch_target.is_none()
-            && preferences.restore_session
             && let Some(state) = session::load_session()
         {
             this.restore_session(&state, window, cx);
@@ -63,6 +69,22 @@ impl KiteWindow {
                 None => Self::create_tab(KiteApp::default_directory(), clipboard, window, cx),
             };
             this.attach_tab(view, window, cx);
+        }
+
+        if let Some(mut receiver) = instance_receiver {
+            this._instance_task = cx.spawn(async move |this, cx| {
+                while let Ok(request) = receiver.recv().await {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if let InstanceRequest::OpenPath(path) = request
+                            && let Some(target) =
+                                AppLaunchTarget::from_existing_path(PathBuf::from(path))
+                        {
+                            this.open_launch_target(target, window, cx);
+                        }
+                        window.activate_window();
+                    });
+                }
+            });
         }
 
         this.active_index = this.active_index.min(this.tabs.len().saturating_sub(1));
@@ -219,7 +241,12 @@ impl KiteWindow {
         let Some(entry) = self.tabs.get(self.active_index) else {
             return;
         };
-        let path = entry.view.read(cx).current_dir().display().to_string();
+        let view = entry.view.read(cx);
+        if view.settings_visible() {
+            window.set_window_title("Kite 设置");
+            return;
+        }
+        let path = view.current_dir().display().to_string();
         window.set_window_title(&format!("Kite — {path}"));
     }
 
@@ -251,6 +278,17 @@ impl KiteWindow {
         self.focus_active(window, cx);
         self.persist_session(cx);
         cx.notify();
+    }
+
+    fn open_launch_target(
+        &mut self,
+        target: AppLaunchTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = Self::create_launch_tab(target, self.clipboard.clone(), window, cx);
+        self.attach_tab(view, window, cx);
+        self.activate_tab(self.tabs.len() - 1, window, cx);
     }
 
     fn open_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {

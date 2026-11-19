@@ -429,16 +429,29 @@ private struct KiteBrowserColumn: View {
             if column.entries.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(column.displayRows) { row in
-                            columnRow(row)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(column.displayRows) { row in
+                                columnRow(row)
+                            }
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 5)
+                    }
+                    .scrollIndicators(.hidden)
+                    .onChange(of: column.searchQuery) { _ in
+                        guard let firstMatchID = column.displayRows.compactMap({ row in
+                            guard case .entry(let entry) = row else { return nil }
+                            return entry.id
+                        }).first else {
+                            return
+                        }
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(firstMatchID, anchor: .top)
                         }
                     }
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 5)
                 }
-                .scrollIndicators(.hidden)
             }
         }
         .frame(width: columnWidth)
@@ -461,20 +474,15 @@ private struct KiteBrowserColumn: View {
         .shadow(color: .black.opacity(0.08), radius: 12, y: 3)
         .animation(.snappy(duration: 0.22), value: showsDetails)
         .animation(.snappy(duration: 0.18), value: model.activeColumnSearchPath)
-        .onHover { hovered in
-            if hovered {
-                model.markColumnHovered(index: index)
-            }
-        }
         .onChange(of: model.activeColumnSearchPath) { activePath in
-            let shouldFocus = activePath == column.path
-            DispatchQueue.main.async {
-                searchFocused = shouldFocus
-            }
+            searchFocused = activePath == column.path
         }
         .onAppear {
-            DispatchQueue.main.async {
-                searchFocused = model.activeColumnSearchPath == column.path
+            searchFocused = model.activeColumnSearchPath == column.path
+        }
+        .onHover { hovered in
+            if hovered {
+                model.noteColumnHover(path: column.path)
             }
         }
         .modifier(
@@ -589,7 +597,7 @@ private struct KiteBrowserColumn: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(searchFocused ? Color.accentColor : Color.secondary)
+                .foregroundStyle(.secondary)
 
             TextField(
                 "搜索此分栏",
@@ -599,7 +607,6 @@ private struct KiteBrowserColumn: View {
                 )
             )
             .textFieldStyle(.plain)
-            .font(.system(size: 11.5))
             .focused($searchFocused)
             .onSubmit {
                 model.submitColumnSearch(path: column.path)
@@ -610,26 +617,20 @@ private struct KiteBrowserColumn: View {
                     .controlSize(.small)
             }
 
-            searchCloseButton
-        }
-        .padding(.horizontal, 9)
-        .frame(height: 30)
-        .background(
-            Color(nsColor: .textBackgroundColor).opacity(0.52),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(
-                    searchFocused
-                        ? Color.accentColor.opacity(0.38)
-                        : Color.primary.opacity(0.08),
-                    lineWidth: 0.75
-                )
+            Button {
+                model.clearColumnSearch(path: column.path)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("关闭分栏搜索")
+            .accessibilityLabel("关闭分栏搜索")
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(Color.primary.opacity(0.018))
+        .frame(height: 34)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.28))
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Color.primary.opacity(0.045))
@@ -638,19 +639,6 @@ private struct KiteBrowserColumn: View {
         .onExitCommand {
             model.clearColumnSearch(path: column.path)
         }
-    }
-
-    private var searchCloseButton: some View {
-        Button {
-            model.clearColumnSearch(path: column.path)
-        } label: {
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(Color.secondary)
-        }
-        .buttonStyle(.plain)
-        .help("关闭分栏搜索")
-        .accessibilityLabel("关闭分栏搜索")
     }
 
     @ViewBuilder
@@ -693,6 +681,7 @@ private struct KiteBrowserColumn: View {
                 entry: entry,
                 columnIndex: index,
                 isSelected: column.selectedPaths.contains(entry.path),
+                searchQuery: column.searchQuery,
                 showsDetails: showsDetails,
                 showsDateColumn: showsDateColumn,
                 showsKindColumn: showsKindColumn,
@@ -973,6 +962,7 @@ private struct KiteBrowserRow: View {
     let entry: BrowserEntry
     let columnIndex: Int
     let isSelected: Bool
+    let searchQuery: String?
     let showsDetails: Bool
     let showsDateColumn: Bool
     let showsKindColumn: Bool
@@ -1093,7 +1083,7 @@ private struct KiteBrowserRow: View {
             .frame(width: 22, height: 22)
             .accessibilityHidden(true)
 
-            Text(entry.name)
+            highlightedName
                 .font(.system(size: 12.5, weight: isSelected ? .medium : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -1120,6 +1110,31 @@ private struct KiteBrowserRow: View {
         guard let modifiedUnixMs = entry.modifiedUnixMs else { return "—" }
         let date = Date(timeIntervalSince1970: TimeInterval(modifiedUnixMs) / 1_000)
         return date.formatted(date: .numeric, time: .omitted)
+    }
+
+    private var highlightedName: Text {
+        guard let query = searchQuery?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return Text(entry.name)
+        }
+
+        var result = Text("")
+        var cursor = entry.name.startIndex
+        while let range = entry.name.range(
+            of: query,
+            options: [.caseInsensitive],
+            range: cursor..<entry.name.endIndex
+        ) {
+            result = result + Text(String(entry.name[cursor..<range.lowerBound]))
+            result = result + Text(String(entry.name[range]))
+                .foregroundColor(Color.accentColor)
+                .bold()
+            cursor = range.upperBound
+            if cursor == entry.name.endIndex {
+                break
+            }
+        }
+        return result + Text(String(entry.name[cursor...]))
     }
 
     private var metadataKind: String {
@@ -1486,7 +1501,7 @@ struct KiteGlobalSearchResults: View {
                             .foregroundStyle(.tertiary)
                     }
                     if search.partial {
-                        Text("索引结果，正在核对全部文件…")
+                        Text("Kensaku 索引更新中")
                             .font(.system(size: 9.5, weight: .medium))
                             .foregroundStyle(.tertiary)
                     }

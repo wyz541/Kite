@@ -1,8 +1,8 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use semver::Version;
 use serde::Deserialize;
@@ -15,12 +15,6 @@ const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/wyz541/kite/releases/d
 const MAX_RELEASE_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 const MAX_UPDATE_BYTES: u64 = 256 * 1024 * 1024;
-const DOWNLOAD_RETRY_DELAYS: [Duration; 4] = [
-    Duration::from_millis(300),
-    Duration::from_millis(900),
-    Duration::from_millis(1_800),
-    Duration::from_millis(3_000),
-];
 const USER_AGENT: &str = concat!(
     "Kite/",
     env!("CARGO_PKG_VERSION"),
@@ -124,6 +118,13 @@ struct GithubAsset {
     size: u64,
     digest: Option<String>,
     browser_download_url: String,
+}
+
+struct VerifiedAsset {
+    name: String,
+    url: String,
+    sha256: String,
+    size: u64,
 }
 
 pub fn current_version() -> &'static str {
@@ -242,11 +243,12 @@ fn fetch_api_release() -> Result<GithubRelease, String> {
 }
 
 fn fetch_redirected_release() -> Result<GithubRelease, String> {
-    let response = http_get_response(
-        LATEST_RELEASE_PAGE_URL,
-        "text/html",
-        "GitHub 最新 Release 页面",
-    )?;
+    let response = agent()
+        .get(LATEST_RELEASE_PAGE_URL)
+        .set("Accept", "text/html")
+        .set("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|error| format!("无法读取 GitHub 最新 Release 页面：{error}"))?;
     let final_url = response.get_url().to_string();
     drop(response);
     let tag = final_url
@@ -270,6 +272,7 @@ fn fetch_redirected_release() -> Result<GithubRelease, String> {
     let mut assets = Vec::new();
     for name in [
         "Kite.exe".to_string(),
+        format!("Kite-{tag}-windows-x64.zip"),
         format!("Kite-{tag}-macOS-arm64.zip"),
     ] {
         if let Some(hash) = checksum_for(&checksums, &name) {
@@ -297,7 +300,13 @@ fn fetch_redirected_release() -> Result<GithubRelease, String> {
 }
 
 fn http_get_bytes(url: &str, accept: &str, limit: u64, context: &str) -> Result<Vec<u8>, String> {
-    let response = http_get_response(url, accept, context)?;
+    let response = agent()
+        .get(url)
+        .set("Accept", accept)
+        .set("X-GitHub-Api-Version", "2022-11-28")
+        .set("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|error| format!("无法连接{context}：{error}"))?;
     let mut reader = response.into_reader().take(limit + 1);
     let mut bytes = Vec::new();
     reader
@@ -307,26 +316,6 @@ fn http_get_bytes(url: &str, accept: &str, limit: u64, context: &str) -> Result<
         return Err(format!("{context}超过大小限制"));
     }
     Ok(bytes)
-}
-
-fn http_get_response(url: &str, accept: &str, context: &str) -> Result<ureq::Response, String> {
-    let mut last_error = None;
-    for agent in request_agents() {
-        match agent
-            .get(url)
-            .set("Accept", accept)
-            .set("X-GitHub-Api-Version", "2022-11-28")
-            .set("User-Agent", USER_AGENT)
-            .call()
-        {
-            Ok(response) => return Ok(response),
-            Err(error) => last_error = Some(error.to_string()),
-        }
-    }
-    Err(format!(
-        "无法连接{context}：{}",
-        last_error.unwrap_or_else(|| "没有可用的网络连接".to_string())
-    ))
 }
 
 fn checksum_for(checksums: &str, asset_name: &str) -> Option<String> {
@@ -368,11 +357,23 @@ fn resolve_release(
         return Ok(info);
     }
 
-    let asset = release
-        .assets
+    let asset = resolve_verified_asset(&release.assets, target, &latest)?;
+    info.asset_name = asset.name;
+    info.asset_url = asset.url;
+    info.asset_sha256 = asset.sha256;
+    info.asset_size = asset.size;
+    Ok(info)
+}
+
+fn resolve_verified_asset(
+    assets: &[GithubAsset],
+    target: UpdateTarget,
+    latest: &Version,
+) -> Result<VerifiedAsset, String> {
+    let asset = assets
         .iter()
         .find(|asset| asset_matches_target(&asset.name, target))
-        .ok_or_else(|| format!("Release {} 不包含当前平台的更新包", latest))?;
+        .ok_or_else(|| format!("Release {latest} 不包含当前平台的更新包"))?;
     validate_asset_name(&asset.name)?;
     validate_asset_url(&asset.browser_download_url)?;
     if asset.size > MAX_UPDATE_BYTES {
@@ -382,13 +383,12 @@ fn resolve_release(
         .digest
         .as_deref()
         .ok_or_else(|| "更新包缺少 SHA-256 摘要".to_string())?;
-    let digest = parse_sha256(digest)?;
-
-    info.asset_name = asset.name.clone();
-    info.asset_url = asset.browser_download_url.clone();
-    info.asset_sha256 = digest;
-    info.asset_size = asset.size;
-    Ok(info)
+    Ok(VerifiedAsset {
+        name: asset.name.clone(),
+        url: asset.browser_download_url.clone(),
+        sha256: parse_sha256(digest)?,
+        size: asset.size,
+    })
 }
 
 fn parse_release_version(tag: &str) -> Result<Version, String> {
@@ -415,7 +415,10 @@ fn current_target() -> Result<UpdateTarget, String> {
 
 fn asset_matches_target(name: &str, target: UpdateTarget) -> bool {
     match target {
-        UpdateTarget::WindowsX64 => name.eq_ignore_ascii_case("Kite.exe"),
+        UpdateTarget::WindowsX64 => {
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("kite-v") && lower.ends_with("windows-x64.zip")
+        }
         UpdateTarget::MacOSArm64 => {
             let lower = name.to_ascii_lowercase();
             lower.starts_with("kite-v") && lower.ends_with("macos-arm64.zip")
@@ -435,11 +438,7 @@ fn validate_asset_name(name: &str) -> Result<(), String> {
 }
 
 fn validate_asset_url(url: &str) -> Result<(), String> {
-    if !url
-        .to_ascii_lowercase()
-        .starts_with(RELEASE_DOWNLOAD_PREFIX)
-        || url.contains(char::is_whitespace)
-    {
+    if !url.starts_with(RELEASE_DOWNLOAD_PREFIX) || url.contains(char::is_whitespace) {
         return Err("更新包地址不在 Kite Release 中".to_string());
     }
     Ok(())
@@ -453,266 +452,12 @@ fn parse_sha256(value: &str) -> Result<String, String> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn update_agent(proxy: Option<&str>) -> ureq::Agent {
-    let mut builder = ureq::AgentBuilder::new()
-        .https_only(true)
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(60))
-        .timeout_write(Duration::from_secs(60));
-    if let Some(proxy) = proxy
-        && let Ok(proxy) = ureq::Proxy::new(proxy)
-    {
-        builder = builder.proxy(proxy);
-    }
-    builder.build()
-}
-
-fn request_agents() -> Vec<ureq::Agent> {
-    let mut agents = configured_proxy_urls()
-        .into_iter()
-        .map(|proxy| update_agent(Some(&proxy)))
-        .collect::<Vec<_>>();
-    agents.push(update_agent(None));
-    agents
-}
-
-fn configured_proxy_urls() -> Vec<String> {
-    let mut proxies = Vec::new();
-    for name in [
-        "ALL_PROXY",
-        "all_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-    ] {
-        if let Ok(value) = std::env::var(name) {
-            let value = value.trim();
-            if !value.is_empty() && !proxies.iter().any(|proxy| proxy == value) {
-                proxies.push(value.to_string());
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(proxy) = windows_system_proxy_url()
-        && !proxies.iter().any(|value| value == &proxy)
-    {
-        proxies.push(proxy);
-    }
-    proxies
-}
-
-#[cfg(target_os = "windows")]
-fn windows_system_proxy_url() -> Option<String> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let settings = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
-        .ok()?;
-    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
-    if enabled == 0 {
-        return None;
-    }
-    let server: String = settings.get_value("ProxyServer").ok()?;
-    parse_windows_proxy_server(&server)
-}
-
-fn parse_windows_proxy_server(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if !value.contains('=') {
-        return Some(proxy_url("http", value));
-    }
-
-    let mut http = None;
-    let mut socks = None;
-    for entry in value.split(';') {
-        let Some((scheme, address)) = entry.split_once('=') else {
-            continue;
-        };
-        let address = address.trim();
-        if address.is_empty() {
-            continue;
-        }
-        match scheme.trim().to_ascii_lowercase().as_str() {
-            "https" => return Some(proxy_url("https", address)),
-            "http" => http = Some(proxy_url("http", address)),
-            "socks" | "socks5" => socks = Some(proxy_url("socks5", address)),
-            _ => {}
-        }
-    }
-    http.or(socks)
-}
-
-fn proxy_url(scheme: &str, address: &str) -> String {
-    if address.contains("://") {
-        address.to_string()
-    } else {
-        format!("{scheme}://{address}")
-    }
-}
-
-fn retryable_status(status: u16) -> bool {
-    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
-}
-
-#[derive(Debug)]
-enum DownloadAttemptError {
-    Local(String),
-    Rejected(String),
-    Transient(String),
-    Integrity(String),
-}
-
-impl DownloadAttemptError {
-    fn detail(&self) -> &str {
-        match self {
-            Self::Local(detail)
-            | Self::Rejected(detail)
-            | Self::Transient(detail)
-            | Self::Integrity(detail) => detail,
-        }
-    }
-
-    fn should_retry(&self) -> bool {
-        matches!(self, Self::Transient(_) | Self::Integrity(_))
-    }
-}
-
-fn download_once(
-    info: &UpdateInfo,
-    partial: &Path,
-    agent: &ureq::Agent,
-) -> Result<(), DownloadAttemptError> {
-    let mut resume_offset = fs::metadata(partial)
-        .map(|metadata| metadata.len())
-        .unwrap_or_default();
-    if info.asset_size > 0 && resume_offset >= info.asset_size {
-        fs::remove_file(partial)
-            .map_err(|error| DownloadAttemptError::Local(format!("无法重置更新文件：{error}")))?;
-        resume_offset = 0;
-    }
-
-    let mut request = agent
-        .get(&info.asset_url)
-        .set("Accept", "application/octet-stream")
-        .set("User-Agent", USER_AGENT);
-    if resume_offset > 0 {
-        request = request.set("Range", &format!("bytes={resume_offset}-"));
-    }
-    let response = request.call().map_err(|error| match error {
-        ureq::Error::Status(416, _) => DownloadAttemptError::Integrity(error.to_string()),
-        ureq::Error::Status(status, _) if retryable_status(status) => {
-            DownloadAttemptError::Transient(error.to_string())
-        }
-        ureq::Error::Status(_, _) => DownloadAttemptError::Rejected(error.to_string()),
-        ureq::Error::Transport(_) => DownloadAttemptError::Transient(error.to_string()),
-    })?;
-
-    let append = response.status() == 206
-        && content_range_start(response.header("Content-Range")) == Some(resume_offset);
-    if !append {
-        resume_offset = 0;
-    }
-    let content_length = response
-        .header("Content-Length")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or_default();
-    let total_bytes = if info.asset_size > 0 {
-        info.asset_size
-    } else {
-        resume_offset.saturating_add(content_length)
-    };
-    if total_bytes > MAX_UPDATE_BYTES {
-        return Err(DownloadAttemptError::Integrity(
-            "更新包大小无效".to_string(),
-        ));
-    }
-    publish_download_progress(resume_offset, total_bytes);
-
-    let mut reader = response.into_reader().take(MAX_UPDATE_BYTES + 1);
-    let mut file = if append {
-        OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(partial)
-            .map_err(|error| DownloadAttemptError::Local(format!("无法打开更新文件：{error}")))?
-    } else {
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(partial)
-            .map_err(|error| DownloadAttemptError::Local(format!("无法创建更新文件：{error}")))?
-    };
-    let mut total = resume_offset;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = match reader.read(&mut buffer) {
-            Ok(count) => count,
-            Err(error) => {
-                let _ = file.flush();
-                return Err(DownloadAttemptError::Transient(format!(
-                    "无法读取更新文件：{error}"
-                )));
-            }
-        };
-        if count == 0 {
-            break;
-        }
-        total = total.saturating_add(count as u64);
-        if total > MAX_UPDATE_BYTES {
-            drop(file);
-            return Err(DownloadAttemptError::Integrity(
-                "更新文件超过大小限制".to_string(),
-            ));
-        }
-        file.write_all(&buffer[..count])
-            .map_err(|error| DownloadAttemptError::Local(format!("无法写入更新文件：{error}")))?;
-        publish_download_progress(total, total_bytes);
-    }
-    file.flush()
-        .map_err(|error| DownloadAttemptError::Local(format!("无法写入更新文件：{error}")))?;
-    file.sync_all()
-        .map_err(|error| DownloadAttemptError::Local(format!("无法保存更新文件：{error}")))?;
-    drop(file);
-    publish_download_progress(total, total_bytes);
-
-    if info.asset_size > 0 && total != info.asset_size {
-        return Err(DownloadAttemptError::Integrity(format!(
-            "更新文件大小不匹配：期望 {}，实际 {total}",
-            info.asset_size
-        )));
-    }
-    let actual_hash = sha256_file(partial).map_err(DownloadAttemptError::Local)?;
-    if actual_hash != info.asset_sha256 {
-        return Err(DownloadAttemptError::Integrity(
-            "更新文件 SHA-256 校验失败".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn content_range_start(value: Option<&str>) -> Option<u64> {
-    value?
-        .strip_prefix("bytes ")?
-        .split_once('-')?
-        .0
-        .parse()
-        .ok()
-}
-
-fn download_failure_message(version: &str) -> String {
-    format!(
-        "无法下载 Kite {version} 更新。请检查网络或系统代理设置后重试，或前往 GitHub Releases 手动下载。"
-    )
-}
-
-fn integrity_failure_message(version: &str) -> String {
-    format!("下载的 Kite {version} 更新包校验失败。请稍后重试，或前往 GitHub Releases 手动下载。")
+        .timeout_write(Duration::from_secs(60))
+        .build()
 }
 
 pub fn download_update(info: &UpdateInfo) -> Result<PathBuf, String> {
@@ -744,54 +489,63 @@ pub fn download_update(info: &UpdateInfo) -> Result<PathBuf, String> {
     }
 
     let partial = destination.with_extension("part");
-    let agents = request_agents();
-    let mut last_error = None;
-    let mut integrity_failed = false;
-    for pass in 0..=DOWNLOAD_RETRY_DELAYS.len() {
-        if pass > 0 {
-            std::thread::sleep(DOWNLOAD_RETRY_DELAYS[pass - 1]);
-        }
-        let mut retry_recommended = false;
-        let mut downloaded = false;
-        for agent in &agents {
-            start_download_progress(info.asset_size);
-            match download_once(info, &partial, agent) {
-                Ok(()) => {
-                    downloaded = true;
-                    break;
-                }
-                Err(DownloadAttemptError::Local(detail)) => {
-                    let _ = fs::remove_file(&partial);
-                    return Err(detail);
-                }
-                Err(error) => {
-                    retry_recommended |= error.should_retry();
-                    if matches!(error, DownloadAttemptError::Integrity(_)) {
-                        integrity_failed = true;
-                        let _ = fs::remove_file(&partial);
-                    }
-                    last_error = Some(error.detail().to_string());
-                }
-            }
-        }
-        if downloaded {
+    let _ = fs::remove_file(&partial);
+    let response = agent()
+        .get(&info.asset_url)
+        .set("Accept", "application/octet-stream")
+        .set("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|error| format!("无法下载 Kite 更新：{error}"))?;
+    let total_bytes = if info.asset_size > 0 {
+        info.asset_size
+    } else {
+        response
+            .header("Content-Length")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default()
+    };
+    start_download_progress(total_bytes);
+    let mut reader = response.into_reader().take(MAX_UPDATE_BYTES + 1);
+    let mut file = File::create(&partial).map_err(|error| format!("无法创建更新文件：{error}"))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("无法读取更新文件：{error}"))?;
+        if count == 0 {
             break;
         }
-        if !retry_recommended {
-            break;
+        total = total.saturating_add(count as u64);
+        if total > MAX_UPDATE_BYTES {
+            drop(file);
+            let _ = fs::remove_file(&partial);
+            return Err("更新文件超过大小限制".to_string());
         }
+        hasher.update(&buffer[..count]);
+        file.write_all(&buffer[..count])
+            .map_err(|error| format!("无法写入更新文件：{error}"))?;
+        publish_download_progress(total, total_bytes);
     }
+    file.flush()
+        .map_err(|error| format!("无法写入更新文件：{error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("无法保存更新文件：{error}"))?;
+    drop(file);
+    publish_download_progress(total, total_bytes);
 
-    if !partial.is_file() {
+    if info.asset_size > 0 && total != info.asset_size {
         let _ = fs::remove_file(&partial);
-        if let Some(detail) = last_error {
-            eprintln!("Kite update download failed: {detail}");
-        }
-        return Err(if integrity_failed {
-            integrity_failure_message(&info.latest_version)
-        } else {
-            download_failure_message(&info.latest_version)
-        });
+        return Err(format!(
+            "更新文件大小不匹配：期望 {}，实际 {total}",
+            info.asset_size
+        ));
+    }
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if actual_hash != expected_hash {
+        let _ = fs::remove_file(&partial);
+        return Err("更新文件 SHA-256 校验失败".to_string());
     }
     if destination.exists() {
         fs::remove_file(&destination).map_err(|error| format!("无法替换旧更新文件：{error}"))?;
@@ -819,6 +573,107 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(target_os = "windows")]
+pub fn repair_windows_sidecars() -> Result<(), String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法定位当前 Kite.exe：{error}"))?;
+    let target_directory = executable
+        .parent()
+        .ok_or_else(|| format!("无法定位 Kite.exe 所在目录：{}", executable.display()))?;
+    let release = fetch_latest_release()?;
+    if release.draft || release.prerelease {
+        return Err("GitHub 最新 Release 不是稳定版本".to_string());
+    }
+    let latest = parse_release_version(&release.tag_name)?;
+    let asset = resolve_verified_asset(&release.assets, UpdateTarget::WindowsX64, &latest)?;
+    let current = Version::parse(current_version())
+        .map_err(|error| format!("无法读取当前 Kite 版本：{error}"))?;
+    let info = UpdateInfo {
+        current_version: current.to_string(),
+        latest_version: latest.to_string(),
+        update_available: latest > current,
+        release_name: release
+            .name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| release.tag_name.clone()),
+        release_url: release.html_url,
+        release_notes: release.body.unwrap_or_default(),
+        published_at: release.published_at,
+        asset_name: asset.name,
+        asset_url: asset.url,
+        asset_sha256: asset.sha256,
+        asset_size: asset.size,
+    };
+    let package = download_update(&info)?;
+    install_sidecars_from_zip(&package, target_directory)
+}
+
+#[cfg(target_os = "windows")]
+fn install_sidecars_from_zip(package: &Path, target_directory: &Path) -> Result<(), String> {
+    use zip::ZipArchive;
+
+    const REQUIRED_SIDECARS: [&str; 2] = ["kensaku-cli.exe", "kensaku-daemon.exe"];
+    let suffix = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let staging = target_directory.join(format!(".kite-sidecars-{suffix}"));
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("无法创建 Kensaku sidecar 临时目录：{error}"))?;
+    let result = (|| {
+        let file =
+            File::open(package).map_err(|error| format!("无法打开 Kensaku sidecar 包：{error}"))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|error| format!("无法读取 Kensaku sidecar 包：{error}"))?;
+        for name in REQUIRED_SIDECARS {
+            let entry = archive
+                .by_name(name)
+                .map_err(|error| format!("Kensaku sidecar 包缺少 {name}：{error}"))?;
+            if entry.is_dir() {
+                return Err(format!("Kensaku sidecar 包中的 {name} 不是文件"));
+            }
+            if entry.size() > MAX_UPDATE_BYTES {
+                return Err(format!("Kensaku sidecar {name} 超过大小限制"));
+            }
+            let destination = staging.join(name);
+            let mut output = File::create(&destination)
+                .map_err(|error| format!("无法创建临时 sidecar {name}：{error}"))?;
+            let mut reader = entry.take(MAX_UPDATE_BYTES + 1);
+            let copied = std::io::copy(&mut reader, &mut output)
+                .map_err(|error| format!("无法解压 sidecar {name}：{error}"))?;
+            if copied > MAX_UPDATE_BYTES {
+                return Err(format!("Kensaku sidecar {name} 超过大小限制"));
+            }
+            output
+                .sync_all()
+                .map_err(|error| format!("无法保存临时 sidecar {name}：{error}"))?;
+        }
+        for name in REQUIRED_SIDECARS {
+            let source = staging.join(name);
+            let destination = target_directory.join(name);
+            let backup = target_directory.join(format!(".{name}.{suffix}.old"));
+            if destination.exists() {
+                fs::rename(&destination, &backup)
+                    .map_err(|error| format!("无法备份旧 {name}：{error}"))?;
+            }
+            if let Err(error) = fs::rename(&source, &destination) {
+                if backup.exists() {
+                    let _ = fs::rename(&backup, &destination);
+                }
+                return Err(format!("无法安装 {name}：{error}"));
+            }
+            let _ = fs::remove_file(&backup);
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -929,7 +784,7 @@ pub fn install_windows_update(
     Ok(())
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 const WINDOWS_UPDATE_TARGET_REPLACEMENT: &str = r#"
 # Windows executable images can share delete access while running.
 # Rename the target directly instead of requiring an exclusive write lock.
@@ -960,7 +815,7 @@ function Move-UpdateTargetToBackup {
 }
 "#;
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 fn windows_update_helper() -> String {
     WINDOWS_UPDATE_HELPER.replace(
         "__MOVE_UPDATE_TARGET_TO_BACKUP__",
@@ -968,7 +823,7 @@ fn windows_update_helper() -> String {
     )
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 const WINDOWS_UPDATE_HELPER: &str = r#"
 param(
     [Parameter(Mandatory=$true)][int]$ProcessId,
@@ -979,29 +834,28 @@ param(
     [Parameter(Mandatory=$true)][string]$ScriptPath
 )
 $ErrorActionPreference = 'Stop'
+$targetDirectory = Split-Path -Parent $Target
+$targetName = [IO.Path]::GetFileName($Target)
+$updatesDirectory = Split-Path -Parent $LogPath
+$backupDirectory = Join-Path $updatesDirectory ("backup-" + [Guid]::NewGuid().ToString('N'))
+$stagingDirectory = Join-Path $updatesDirectory ("staging-" + [Guid]::NewGuid().ToString('N'))
+$oldTarget = "$Target.old"
+$sidecarNames = @(
+    'kensaku-cli.exe',
+    'kensaku-daemon.exe',
+    'KENSAKU_LICENSE',
+    'kensaku-backend.md'
+)
+$managedNames = @((@($targetName) + $sidecarNames) | Select-Object -Unique)
 function Write-UpdateLog([string]$Message) {
     $line = "$(Get-Date -Format o) $Message"
     Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
-}
-function Get-Sha256Hex([string]$Path) {
-    $stream = [IO.File]::OpenRead($Path)
-    try {
-        $sha = [Security.Cryptography.SHA256]::Create()
-        try {
-            $hash = $sha.ComputeHash($stream)
-        } finally {
-            $sha.Dispose()
-        }
-    } finally {
-        $stream.Dispose()
-    }
-    return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
 }
 function Show-UpdateError([string]$Message) {
     try {
         Add-Type -AssemblyName PresentationFramework
         [System.Windows.MessageBox]::Show(
-            "$Message`n`n更新诊断日志：$LogPath",
+            "$Message`n`n更新日志：$LogPath",
             "Kite 更新失败",
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Error
@@ -1030,39 +884,114 @@ function Stop-KiteProcesses {
         throw "无法结束现有 Kite 进程。请关闭所有 Kite 窗口后重试。"
     }
 }
+function Stop-KensakuProcesses {
+    $root = [IO.Path]::GetFullPath($targetDirectory).TrimEnd('\') + '\'
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        $processes = @(
+            Get-Process -Name 'kensaku-daemon', 'kensaku-cli' -ErrorAction SilentlyContinue |
+                Where-Object {
+                    try {
+                        $processPath = $_.Path
+                        $processPath -and [IO.Path]::GetFullPath($processPath).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+                    } catch {
+                        $false
+                    }
+                }
+        )
+        if ($processes.Count -eq 0) { return }
+        foreach ($process in $processes) {
+            try {
+                Write-UpdateLog "Stopping Kensaku process $($process.Id) before update"
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            } catch {
+                Write-UpdateLog "Unable to stop Kensaku process $($process.Id): $($_.Exception.Message)"
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "无法结束现有 Kensaku 进程。请关闭 Kite 后重试。"
+}
 __MOVE_UPDATE_TARGET_TO_BACKUP__
-$backup = "$Target.old"
-$targetDirectory = Split-Path -Parent $Target
+function Restore-ManagedFiles {
+    foreach ($name in $managedNames) {
+        $backupPath = Join-Path $backupDirectory $name
+        $destination = Join-Path $targetDirectory $name
+        if (Test-Path -LiteralPath $backupPath) {
+            Copy-Item -LiteralPath $backupPath -Destination $destination -Force
+        } elseif (Test-Path -LiteralPath $destination) {
+            Remove-Item -LiteralPath $destination -Force
+        }
+    }
+}
+$kiteStopped = $false
+$backupReady = $false
 try {
     Write-UpdateLog "Starting update from $Source to $Target"
+    $actualPackageHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualPackageHash -ne $ExpectedHash.ToLowerInvariant()) {
+        throw "更新包 SHA-256 不匹配"
+    }
+    New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
+    Expand-Archive -LiteralPath $Source -DestinationPath $stagingDirectory -Force
+    foreach ($name in @('Kite.exe', 'kensaku-cli.exe', 'kensaku-daemon.exe')) {
+        $sourcePath = Join-Path $stagingDirectory $name
+        if (-not (Test-Path -LiteralPath $sourcePath)) {
+            throw "更新包缺少文件：$name"
+        }
+    }
     $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($process) { $process.WaitForExit(10000) | Out-Null }
     Write-UpdateLog "Stopping existing Kite processes before update"
     Stop-KiteProcesses
-    Move-UpdateTargetToBackup -TargetPath $Target -BackupPath $backup
-    Copy-Item -LiteralPath $Source -Destination $Target -Force
-    $actualHash = Get-Sha256Hex $Target
-    if ($actualHash -ne $ExpectedHash) { throw "SHA-256 mismatch" }
-    Write-UpdateLog "Installed Kite update at $Target"
+    $kiteStopped = $true
+    Stop-KensakuProcesses
+    Start-Sleep -Milliseconds 250
+    New-Item -ItemType Directory -Path $backupDirectory | Out-Null
+    foreach ($name in $managedNames) {
+        $existing = Join-Path $targetDirectory $name
+        if (Test-Path -LiteralPath $existing) {
+            Copy-Item -LiteralPath $existing -Destination (Join-Path $backupDirectory $name) -Force
+        }
+    }
+    $backupReady = $true
+    Move-UpdateTargetToBackup -TargetPath $Target -BackupPath $oldTarget
+    Copy-Item -LiteralPath (Join-Path $stagingDirectory 'Kite.exe') -Destination $Target -Force
+    foreach ($name in $sidecarNames) {
+        $sourcePath = Join-Path $stagingDirectory $name
+        if (Test-Path -LiteralPath $sourcePath) {
+            Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $targetDirectory $name) -Force
+        }
+    }
+    Write-UpdateLog "Installed Kite package at $Target"
     $started = Start-Process -FilePath $Target -WorkingDirectory $targetDirectory -PassThru
     Start-Sleep -Seconds 2
     $started.Refresh()
     if ($started.HasExited) { throw "Updated Kite exited during startup" }
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
+    if (Test-Path -LiteralPath $oldTarget) { Remove-Item -LiteralPath $oldTarget -Force }
     Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
 } catch {
     $failure = $_.Exception.Message
     Write-UpdateLog "Update failed: $($_.Exception.ToString())"
-    if (Test-Path -LiteralPath $backup) {
-        if (Test-Path -LiteralPath $Target) { Remove-Item -LiteralPath $Target -Force }
-        Move-Item -LiteralPath $backup -Destination $Target -Force
+    if ($kiteStopped) {
+        try {
+            Stop-KiteProcesses
+            Stop-KensakuProcesses
+            if ($backupReady) { Restore-ManagedFiles }
+            if (Test-Path -LiteralPath $oldTarget) { Remove-Item -LiteralPath $oldTarget -Force }
+        } catch {
+            Write-UpdateLog "Rollback failed: $($_.Exception.ToString())"
+        }
     }
     Show-UpdateError $failure
-    if (Test-Path -LiteralPath $Target) {
+    $currentProcess = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (($kiteStopped -or -not $currentProcess) -and (Test-Path -LiteralPath $Target)) {
         Start-Process -FilePath $Target -WorkingDirectory $targetDirectory
     }
     exit 1
 } finally {
+    Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
 }
 "#;
@@ -1088,6 +1017,12 @@ mod tests {
                     "size": 1234,
                     "digest": format!("sha256:{digest}"),
                     "browser_download_url": format!("https://github.com/wyz541/kite/releases/download/v{version}/Kite.exe")
+                },
+                {
+                    "name": format!("Kite-v{version}-windows-x64.zip"),
+                    "size": 2345,
+                    "digest": format!("sha256:{digest}"),
+                    "browser_download_url": format!("https://github.com/wyz541/kite/releases/download/v{version}/Kite-v{version}-windows-x64.zip")
                 },
                 {
                     "name": format!("Kite-v{version}-macOS-arm64.zip"),
@@ -1183,6 +1118,60 @@ mod tests {
         assert!(helper.contains("-Force -ErrorAction Stop"));
         assert!(helper.contains("Stopping existing Kite processes before update"));
         assert!(!helper.contains("__MOVE_UPDATE_TARGET_TO_BACKUP__"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_update_helper_installs_kensaku_sidecars() {
+        let helper = windows_update_helper();
+        assert!(helper.contains("Expand-Archive"));
+        assert!(helper.contains("kensaku-cli.exe"));
+        assert!(helper.contains("kensaku-daemon.exe"));
+        assert!(helper.contains("Join-Path $targetDirectory $name"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_sidecar_package_installs_both_sidecars() {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        let directory = std::env::temp_dir().join(format!(
+            "kite-sidecar-package-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create sidecar test directory");
+        let package = directory.join("Kite-v0.6.65-windows-x64.zip");
+        let mut writer =
+            zip::ZipWriter::new(File::create(&package).expect("create sidecar test zip"));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("kensaku-cli.exe", options)
+            .expect("start CLI sidecar entry");
+        writer
+            .write_all(b"new-cli")
+            .expect("write CLI sidecar entry");
+        writer
+            .start_file("kensaku-daemon.exe", options)
+            .expect("start daemon sidecar entry");
+        writer
+            .write_all(b"new-daemon")
+            .expect("write daemon sidecar entry");
+        writer.finish().expect("finish sidecar test zip");
+        fs::write(directory.join("kensaku-cli.exe"), b"old-cli").expect("write old CLI sidecar");
+
+        install_sidecars_from_zip(&package, &directory).expect("install sidecars from package");
+
+        let cli = fs::read(directory.join("kensaku-cli.exe")).expect("read installed CLI sidecar");
+        let daemon =
+            fs::read(directory.join("kensaku-daemon.exe")).expect("read installed daemon sidecar");
+        assert_eq!(cli, b"new-cli");
+        assert_eq!(daemon, b"new-daemon");
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[cfg(target_os = "windows")]
@@ -1321,14 +1310,6 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
         );
     }
 
-    #[test]
-    fn windows_update_helper_hashes_without_powershell_modules() {
-        let helper = windows_update_helper();
-        assert!(helper.contains("function Get-Sha256Hex"));
-        assert!(helper.contains("Get-Sha256Hex $Target"));
-        assert!(!helper.contains("Get-FileHash"));
-    }
-
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_update_helper_has_valid_powershell_syntax() {
@@ -1359,7 +1340,7 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
     }
 
     #[test]
-    fn newer_windows_release_selects_verified_exe() {
+    fn newer_windows_release_selects_verified_zip() {
         let digest = "a".repeat(64);
         let release = parse(&release_json("0.6.13", &digest));
         let info = resolve_release(
@@ -1371,7 +1352,7 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
 
         assert!(info.update_available);
         assert_eq!(info.latest_version, "0.6.13");
-        assert_eq!(info.asset_name, "Kite.exe");
+        assert_eq!(info.asset_name, "Kite-v0.6.13-windows-x64.zip");
         assert_eq!(info.asset_sha256, digest);
     }
 
@@ -1412,66 +1393,6 @@ semver = { version = "1" }
     }
 
     #[test]
-    fn retryable_http_statuses_cover_transient_failures() {
-        for status in [408, 425, 429, 500, 502, 503, 504] {
-            assert!(retryable_status(status), "status {status} should retry");
-        }
-        for status in [400, 401, 403, 404, 422] {
-            assert!(
-                !retryable_status(status),
-                "status {status} should not retry"
-            );
-        }
-    }
-
-    #[test]
-    fn windows_proxy_parser_prefers_https_entry() {
-        assert_eq!(
-            parse_windows_proxy_server("http=127.0.0.1:7890;https=127.0.0.1:7891"),
-            Some("https://127.0.0.1:7891".to_string())
-        );
-        assert_eq!(
-            parse_windows_proxy_server("127.0.0.1:7890"),
-            Some("http://127.0.0.1:7890".to_string())
-        );
-        assert_eq!(
-            parse_windows_proxy_server("socks=127.0.0.1:7892"),
-            Some("socks5://127.0.0.1:7892".to_string())
-        );
-        assert_eq!(parse_windows_proxy_server("  "), None);
-    }
-
-    #[test]
-    fn download_failure_message_omits_transport_details() {
-        let message = download_failure_message("0.6.77");
-        assert!(message.contains("Kite 0.6.77"));
-        assert!(message.contains("系统代理"));
-        assert!(message.contains("GitHub Releases"));
-        assert!(!message.contains("Connection"));
-        assert!(!message.contains("https://github.com"));
-    }
-
-    #[test]
-    fn download_retries_are_short_and_bounded() {
-        assert_eq!(DOWNLOAD_RETRY_DELAYS.len(), 4);
-        assert!(
-            DOWNLOAD_RETRY_DELAYS
-                .iter()
-                .all(|delay| *delay <= Duration::from_secs(3))
-        );
-    }
-
-    #[test]
-    fn content_range_parser_requires_a_byte_range_start() {
-        assert_eq!(
-            content_range_start(Some("bytes 1024-2047/4096")),
-            Some(1024)
-        );
-        assert_eq!(content_range_start(Some("items 1024-2047/4096")), None);
-        assert_eq!(content_range_start(None), None);
-    }
-
-    #[test]
     fn equal_version_reports_no_update() {
         let digest = "b".repeat(64);
         let release = parse(&release_json("0.6.12", &digest));
@@ -1491,7 +1412,9 @@ semver = { version = "1" }
         let digest = "c".repeat(64);
         let mut value: serde_json::Value =
             serde_json::from_str(&release_json("0.6.13", &digest)).unwrap();
-        value["assets"][0]["digest"] = serde_json::Value::Null;
+        for asset in value["assets"].as_array_mut().unwrap() {
+            asset["digest"] = serde_json::Value::Null;
+        }
         let release: GithubRelease = serde_json::from_value(value).unwrap();
         let error = resolve_release(
             release,
@@ -1520,15 +1443,7 @@ semver = { version = "1" }
             validate_asset_url("https://github.com/wyz541/kite/releases/download/v0.6.13/Kite.exe")
                 .is_ok()
         );
-        assert!(
-            validate_asset_url("https://github.com/wyz541/Kite/releases/download/v0.6.13/Kite.exe")
-                .is_ok()
-        );
         assert!(validate_asset_url("https://example.com/Kite.exe").is_err());
-        assert!(
-            validate_asset_url("https://github.com/other/Kite/releases/download/v0.6.13/Kite.exe")
-                .is_err()
-        );
     }
 
     #[cfg(target_os = "windows")]
