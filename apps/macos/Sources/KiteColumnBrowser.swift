@@ -498,7 +498,13 @@ private struct KiteBrowserColumn: View {
             KiteDirectoryMenu(model: model, column: column)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(column.title)，\(column.entries.count) 个项目")
+        .accessibilityLabel(columnAccessibilityLabel)
+    }
+
+    private var columnAccessibilityLabel: String {
+        let title = column.title
+        let count = column.entries.count
+        return "\(title)，\(count) 个项目"
     }
 
     private var header: some View {
