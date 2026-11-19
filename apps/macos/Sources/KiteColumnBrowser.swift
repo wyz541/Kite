@@ -467,10 +467,15 @@ private struct KiteBrowserColumn: View {
             }
         }
         .onChange(of: model.activeColumnSearchPath) { activePath in
-            searchFocused = activePath == column.path
+            let shouldFocus = activePath == column.path
+            DispatchQueue.main.async {
+                searchFocused = shouldFocus
+            }
         }
         .onAppear {
-            searchFocused = model.activeColumnSearchPath == column.path
+            DispatchQueue.main.async {
+                searchFocused = model.activeColumnSearchPath == column.path
+            }
         }
         .modifier(
             KiteFileDropModifier(
@@ -584,7 +589,7 @@ private struct KiteBrowserColumn: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(searchFocused ? Color.accentColor : Color.secondary)
 
             TextField(
                 "搜索此分栏",
@@ -594,6 +599,7 @@ private struct KiteBrowserColumn: View {
                 )
             )
             .textFieldStyle(.plain)
+            .font(.system(size: 11.5))
             .focused($searchFocused)
             .onSubmit {
                 model.submitColumnSearch(path: column.path)
@@ -604,20 +610,26 @@ private struct KiteBrowserColumn: View {
                     .controlSize(.small)
             }
 
-            Button {
-                model.clearColumnSearch(path: column.path)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain)
-            .help("关闭分栏搜索")
-            .accessibilityLabel("关闭分栏搜索")
+            searchCloseButton
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(
+            Color(nsColor: .textBackgroundColor).opacity(0.52),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(
+                    searchFocused
+                        ? Color.accentColor.opacity(0.38)
+                        : Color.primary.opacity(0.08),
+                    lineWidth: 0.75
+                )
         }
         .padding(.horizontal, 8)
-        .frame(height: 34)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.28))
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.018))
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Color.primary.opacity(0.045))
@@ -626,6 +638,19 @@ private struct KiteBrowserColumn: View {
         .onExitCommand {
             model.clearColumnSearch(path: column.path)
         }
+    }
+
+    private var searchCloseButton: some View {
+        Button {
+            model.clearColumnSearch(path: column.path)
+        } label: {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("关闭分栏搜索")
+        .accessibilityLabel("关闭分栏搜索")
     }
 
     @ViewBuilder

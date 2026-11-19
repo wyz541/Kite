@@ -68,7 +68,7 @@ const COLUMN_WIDTH: f32 = 252.;
 const COLUMN_STRIP_GAP: f32 = 4.;
 const COLUMN_STRIP_PADDING: f32 = 4.;
 const COLUMN_HEADER_HEIGHT: f32 = 32.;
-const COLUMN_SEARCH_HEIGHT: f32 = 32.;
+const COLUMN_SEARCH_HEIGHT: f32 = 40.;
 const PREVIEW_WIDTH: f32 = 300.;
 const PREVIEW_LOAD_DEBOUNCE: Duration = Duration::from_millis(45);
 const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 12;
@@ -6511,7 +6511,7 @@ impl KiteApp {
                 .h(px(COLUMN_SEARCH_HEIGHT))
                 .w_full()
                 .px_2()
-                .gap_1()
+                .py_1()
                 .items_center()
                 .bg(cx.theme().status_bar)
                 .border_b_1()
@@ -6521,21 +6521,25 @@ impl KiteApp {
                         .aria_label("搜索当前分栏")
                         .prefix(Icon::new(IconName::Search).size_3())
                         .cleanable(true)
-                        .flex_1(),
-                )
-                .child(
-                    Button::new(("column-close-search", index))
-                        .ghost()
-                        .compact()
-                        .icon(IconName::X)
-                        .tooltip("关闭分栏搜索 (Esc)")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.column_search_path.as_ref().is_some_and(|active_path| {
-                                same_path(active_path, &close_search_path)
-                            }) {
-                                this.close_column_search(window, cx);
-                            }
-                        })),
+                        .suffix(
+                            Button::new(("column-close-search", index))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::X)
+                                .tooltip("关闭分栏搜索 (Esc)")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if this.column_search_path.as_ref().is_some_and(|active_path| {
+                                        same_path(active_path, &close_search_path)
+                                    }) {
+                                        this.close_column_search(window, cx);
+                                    }
+                                })),
+                        )
+                        .small()
+                        .flex_1()
+                        .rounded_md()
+                        .bg(cx.theme().background)
+                        .border_color(cx.theme().border),
                 )
                 .into_any_element()
         });
