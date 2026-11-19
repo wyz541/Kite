@@ -68,7 +68,7 @@ const COLUMN_WIDTH: f32 = 252.;
 const COLUMN_STRIP_GAP: f32 = 4.;
 const COLUMN_STRIP_PADDING: f32 = 4.;
 const COLUMN_HEADER_HEIGHT: f32 = 32.;
-const COLUMN_SEARCH_HEIGHT: f32 = 32.;
+const COLUMN_SEARCH_HEIGHT: f32 = 40.;
 const PREVIEW_WIDTH: f32 = 300.;
 const PREVIEW_LOAD_DEBOUNCE: Duration = Duration::from_millis(45);
 const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 12;
@@ -1858,10 +1858,13 @@ impl KiteApp {
         if let Some(query) = initial_query {
             self.column_search_input.update(cx, |input, cx| {
                 input.set_value(query.clone(), window, cx);
-                input.focus(window, cx);
             });
             self.schedule_column_search(query, window, cx);
         }
+        let search_input = self.column_search_input.clone();
+        window.defer(cx, move |window, cx| {
+            search_input.update(cx, |input, cx| input.focus(window, cx));
+        });
     }
 
     fn handle_global_key(
@@ -1883,9 +1886,11 @@ impl KiteApp {
         {
             return;
         }
-        let Some(character) = event.keystroke.key_char.as_deref() else {
-            return;
-        };
+        let character = event.keystroke.key_char.as_deref().or_else(|| {
+            let key = event.keystroke.key.as_str();
+            (key.chars().count() == 1).then_some(key)
+        });
+        let Some(character) = character else { return };
         if character.is_empty() || character.chars().any(char::is_control) {
             return;
         }
@@ -6506,7 +6511,7 @@ impl KiteApp {
                 .h(px(COLUMN_SEARCH_HEIGHT))
                 .w_full()
                 .px_2()
-                .gap_1()
+                .py_1()
                 .items_center()
                 .bg(cx.theme().status_bar)
                 .border_b_1()
@@ -6516,21 +6521,25 @@ impl KiteApp {
                         .aria_label("搜索当前分栏")
                         .prefix(Icon::new(IconName::Search).size_3())
                         .cleanable(true)
-                        .flex_1(),
-                )
-                .child(
-                    Button::new(("column-close-search", index))
-                        .ghost()
-                        .compact()
-                        .icon(IconName::X)
-                        .tooltip("关闭分栏搜索 (Esc)")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.column_search_path.as_ref().is_some_and(|active_path| {
-                                same_path(active_path, &close_search_path)
-                            }) {
-                                this.close_column_search(window, cx);
-                            }
-                        })),
+                        .suffix(
+                            Button::new(("column-close-search", index))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::X)
+                                .tooltip("关闭分栏搜索 (Esc)")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if this.column_search_path.as_ref().is_some_and(|active_path| {
+                                        same_path(active_path, &close_search_path)
+                                    }) {
+                                        this.close_column_search(window, cx);
+                                    }
+                                })),
+                        )
+                        .small()
+                        .flex_1()
+                        .rounded_md()
+                        .bg(cx.theme().background)
+                        .border_color(cx.theme().border),
                 )
                 .into_any_element()
         });
