@@ -137,12 +137,6 @@ pub fn check_for_update() -> Result<UpdateInfo, String> {
     let target = current_target()?;
     let manifest_version = fetch_main_manifest_version().ok();
 
-    if let Some(latest) = manifest_version.as_ref()
-        && latest <= &current
-    {
-        return Ok(latest_only_update_info(&current, latest.clone()));
-    }
-
     let result =
         fetch_latest_release().and_then(|release| resolve_release(release, &current, target));
     match result {
