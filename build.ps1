@@ -91,7 +91,11 @@ try {
     finally {
         $zipArchive.Dispose()
     }
-    foreach ($requiredEntry in @('Kite.exe', 'kensaku-cli.exe', 'kensaku-daemon.exe')) {
+    $requiredEntries = @('Kite.exe')
+    if (-not $SkipKensaku) {
+        $requiredEntries += @('kensaku-cli.exe', 'kensaku-daemon.exe')
+    }
+    foreach ($requiredEntry in $requiredEntries) {
         if ($zipEntries -notcontains $requiredEntry) {
             throw "Release ZIP is missing $requiredEntry"
         }
@@ -138,7 +142,7 @@ try {
     }
     try {
         Expand-Archive -LiteralPath $distBinary -DestinationPath $bootstrapValidation -Force
-        foreach ($requiredEntry in @('Kite.exe', 'kensaku-cli.exe', 'kensaku-daemon.exe')) {
+        foreach ($requiredEntry in $requiredEntries) {
             if (-not (Test-Path -LiteralPath (Join-Path $bootstrapValidation $requiredEntry))) {
                 throw "Standalone update asset is missing $requiredEntry"
             }
