@@ -1,11 +1,14 @@
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use atomicwrites::{AllowOverwrite, AtomicFile};
 use sha2::{Digest, Sha256};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MAX_TEXT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextLineEnding {
@@ -39,6 +42,13 @@ pub struct TextDocument {
     pub has_bom: bool,
     pub content_sha256: String,
     pub byte_len: u64,
+    source: DocumentSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DocumentSource {
+    PlainText,
+    ZipEntry { entry: String },
 }
 
 impl TextDocument {
@@ -56,18 +66,113 @@ impl TextDocument {
         }
 
         let bytes = fs::read(path).map_err(|error| format!("无法读取文本文件：{error}"))?;
-        decode_text(path, &bytes, metadata.len())
+        decode_text(path, &bytes, metadata.len(), DocumentSource::PlainText)
+    }
+
+    /// Opens a plain text file or the editable XML/JSON payload inside a
+    /// supported document package. The package itself remains the save target.
+    pub fn open_editable(path: &Path) -> Result<Self, String> {
+        if !is_packaged_document_path(path) {
+            return Self::open(path);
+        }
+        let bytes = read_package(path)?;
+        let Some(entry) = package_entry(path, &bytes)? else {
+            return Err("文档包中没有可编辑的内容".to_string());
+        };
+        let text = entry.1;
+        let mut document = decode_text(
+            path,
+            &text,
+            bytes.len() as u64,
+            DocumentSource::ZipEntry { entry: entry.0 },
+        )?;
+        document.content_sha256 = hash_bytes(&bytes);
+        Ok(document)
     }
 
     pub fn save(&self, text: &str) -> Result<Self, String> {
-        save_text_document(
-            &self.path,
-            text,
-            self.line_ending,
-            self.has_bom,
-            &self.content_sha256,
-        )
+        match &self.source {
+            DocumentSource::PlainText => save_text_document(
+                &self.path,
+                text,
+                self.line_ending,
+                self.has_bom,
+                &self.content_sha256,
+            ),
+            DocumentSource::ZipEntry { entry } => {
+                if text.as_bytes().contains(&0) {
+                    return Err("文本包含空字节，Kite 已阻止保存。".to_string());
+                }
+                if entry.ends_with(".json") {
+                    serde_json::from_str::<serde_json::Value>(text)
+                        .map_err(|error| format!("文档 JSON 无效：{error}"))?;
+                } else {
+                    parse_document_xml(text)?;
+                }
+                let bytes = encode_text(text, self.line_ending, self.has_bom);
+                save_zip_entry(&self.path, entry, &bytes, &self.content_sha256)
+            }
+        }
     }
+}
+
+pub fn is_packaged_document_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("xmind" | "docx" | "pptx")
+    )
+}
+
+pub fn is_mind_map_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("mm" | "freemind" | "opml" | "opmlm")
+    )
+}
+
+pub fn is_editable_preview_path(path: &Path) -> bool {
+    is_text_path(path) || is_packaged_document_path(path) || is_mind_map_path(path)
+}
+
+pub fn editable_document_limit(path: &Path) -> u64 {
+    if is_packaged_document_path(path) {
+        MAX_PACKAGE_BYTES
+    } else {
+        MAX_TEXT_FILE_BYTES
+    }
+}
+
+/// Returns a bounded human-readable preview for text, mind-map and Office-like files.
+pub fn read_preview_text(path: &Path) -> Result<String, String> {
+    if is_packaged_document_path(path) {
+        let bytes = read_package(path)?;
+        let Some((entry, payload)) = package_entry(path, &bytes)? else {
+            return Err("文档包中没有可预览的内容".to_string());
+        };
+        let text = String::from_utf8_lossy(&payload);
+        let content = match path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "docx" | "pptx" => extract_xml_text(&text)?,
+            "xmind" if entry.ends_with(".json") => serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| text.into_owned()),
+            _ => text.into_owned(),
+        };
+        return bounded_preview(&content);
+    }
+    crate::preview::read_text_preview(path)
 }
 
 pub fn save_text_document(
@@ -133,6 +238,16 @@ pub fn is_text_path(path: &Path) -> bool {
         )
 }
 
+pub fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            crate::search_filters::MARKDOWN_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
 pub fn language_for_path(path: &Path) -> String {
     let name = path
         .file_name()
@@ -155,11 +270,12 @@ pub fn language_for_path(path: &Path) -> String {
         "ts" => "typescript",
         "tsx" => "tsx",
         "py" | "pyw" => "python",
-        "json" | "jsonc" => "json",
+        "json" | "jsonc" | "xmind" => "json",
         "toml" => "toml",
         "yaml" | "yml" => "yaml",
-        "md" | "markdown" | "mdx" => "markdown",
+        _ if is_markdown_path(path) => "markdown",
         "html" | "htm" => "html",
+        "mm" | "freemind" | "opml" | "opmlm" | "docx" | "pptx" => "xml",
         "css" | "scss" | "less" => "css",
         "c" | "h" => "c",
         "cc" | "cpp" | "cxx" | "hpp" | "hxx" => "cpp",
@@ -181,7 +297,12 @@ pub fn language_for_path(path: &Path) -> String {
     language.to_string()
 }
 
-fn decode_text(path: &Path, bytes: &[u8], byte_len: u64) -> Result<TextDocument, String> {
+fn decode_text(
+    path: &Path,
+    bytes: &[u8],
+    byte_len: u64,
+    source: DocumentSource,
+) -> Result<TextDocument, String> {
     let (has_bom, content) = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         Some(content) => (true, content),
         None => (false, bytes),
@@ -200,6 +321,163 @@ fn decode_text(path: &Path, bytes: &[u8], byte_len: u64) -> Result<TextDocument,
         has_bom,
         content_sha256: hash_bytes(bytes),
         byte_len,
+        source,
+    })
+}
+
+fn read_package(path: &Path) -> Result<Vec<u8>, String> {
+    let file = File::open(path).map_err(|error| format!("无法打开文档包：{error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("无法读取文档包信息：{error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_PACKAGE_BYTES {
+        return Err("目标不是普通文件，或文档包超过 64 MiB。".to_string());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PACKAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("无法读取文档包：{error}"))?;
+    if bytes.len() as u64 > MAX_PACKAGE_BYTES {
+        return Err("文档包超过 64 MiB。".to_string());
+    }
+    Ok(bytes)
+}
+
+fn package_entry(path: &Path, bytes: &[u8]) -> Result<Option<(String, Vec<u8>)>, String> {
+    if !is_packaged_document_path(path) {
+        return Ok(None);
+    }
+    let mut archive =
+        ZipArchive::new(Cursor::new(bytes)).map_err(|error| format!("无法读取文档包：{error}"))?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let preferred = match extension.as_str() {
+        "xmind" => ["content.json", "content.xml"].as_slice(),
+        "docx" => ["word/document.xml"].as_slice(),
+        "pptx" => ["ppt/slides/slide1.xml"].as_slice(),
+        _ => &[] as &[&str],
+    };
+    let mut selected = preferred.iter().find_map(|candidate| {
+        archive
+            .by_name(candidate)
+            .ok()
+            .map(|entry| entry.name().to_string())
+    });
+    if selected.is_none() && extension == "pptx" {
+        selected = (1..=archive.len()).find_map(|index| {
+            archive.by_index(index - 1).ok().and_then(|entry| {
+                let name = entry.name().to_string();
+                (name.starts_with("ppt/slides/slide") && name.ends_with(".xml")).then_some(name)
+            })
+        });
+    }
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let entry = archive
+        .by_name(&selected)
+        .map_err(|error| format!("无法读取文档内容：{error}"))?;
+    if entry.size() > MAX_TEXT_FILE_BYTES {
+        return Err("文档中的可编辑内容超过 8 MiB。".to_string());
+    }
+    let mut payload = Vec::new();
+    entry
+        .take(MAX_TEXT_FILE_BYTES + 1)
+        .read_to_end(&mut payload)
+        .map_err(|error| format!("无法读取文档内容：{error}"))?;
+    if payload.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err("文档中的可编辑内容超过 8 MiB。".to_string());
+    }
+    Ok(Some((selected, payload)))
+}
+
+fn save_zip_entry(
+    path: &Path,
+    target_entry: &str,
+    bytes: &[u8],
+    expected_sha256: &str,
+) -> Result<TextDocument, String> {
+    if bytes.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err("文档中的可编辑内容超过 8 MiB。".to_string());
+    }
+    let original = read_package(path)?;
+    if hash_bytes(&original) != expected_sha256 {
+        return Err("文件已在 Kite 外被修改。请重新打开后再保存。".to_string());
+    }
+    let mut archive = ZipArchive::new(Cursor::new(&original))
+        .map_err(|error| format!("无法读取文档包：{error}"))?;
+    let mut output = Cursor::new(Vec::with_capacity(original.len()));
+    {
+        let mut writer = ZipWriter::new(&mut output);
+        for index in 0..archive.len() {
+            let entry = archive
+                .by_index_raw(index)
+                .map_err(|error| format!("无法读取文档包条目：{error}"))?;
+            if entry.name() == target_entry {
+                let options =
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+                writer
+                    .start_file(target_entry, options)
+                    .map_err(|error| format!("无法写入文档包：{error}"))?;
+                writer
+                    .write_all(bytes)
+                    .map_err(|error| format!("无法写入文档内容：{error}"))?;
+            } else {
+                writer
+                    .raw_copy_file(entry)
+                    .map_err(|error| format!("无法复制文档包条目：{error}"))?;
+            }
+        }
+        writer
+            .finish()
+            .map_err(|error| format!("无法完成文档包写入：{error}"))?;
+    }
+    if output.get_ref().len() as u64 > MAX_PACKAGE_BYTES {
+        return Err("修改后的文档包超过 64 MiB。".to_string());
+    }
+    AtomicFile::new(path, AllowOverwrite)
+        .write(|file| file.write_all(output.get_ref()))
+        .map_err(|error| format!("无法保存文档包：{error}"))?;
+    TextDocument::open_editable(path)
+}
+
+fn parse_document_xml(xml: &str) -> Result<roxmltree::Document<'_>, String> {
+    roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            nodes_limit: 250_000,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("文档 XML 无效或超过结构限制：{error}"))
+}
+
+fn extract_xml_text(xml: &str) -> Result<String, String> {
+    let document = parse_document_xml(xml)?;
+    Ok(document
+        .descendants()
+        .filter(|node| {
+            node.is_text() && node.parent().is_some_and(|parent| parent.has_tag_name("t"))
+        })
+        .filter_map(|node| node.text())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn bounded_preview(text: &str) -> Result<String, String> {
+    let mut chars = text.chars();
+    let mut excerpt = String::new();
+    excerpt.extend(chars.by_ref().take(crate::preview::TEXT_PREVIEW_CHAR_LIMIT));
+    if chars.next().is_some() {
+        excerpt.push('…');
+    }
+    Ok(if excerpt.trim().is_empty() {
+        "文件没有可显示的文本内容。".to_string()
+    } else {
+        excerpt
     })
 }
 
@@ -267,6 +545,26 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_mk_and_markdown_without_promoting_makefiles() {
+        use std::path::Path;
+
+        for name in [
+            "notes.mk",
+            "notes.MK",
+            "notes.MD",
+            "notes.markdown",
+            "notes.mdx",
+        ] {
+            let path = Path::new(name);
+            assert!(super::is_markdown_path(path));
+            assert!(super::is_editable_preview_path(path));
+            assert_eq!(language_for_path(path), "markdown");
+        }
+        assert!(!super::is_markdown_path(Path::new("Makefile")));
+        assert!(!super::is_markdown_path(Path::new("notes.txt")));
+    }
+
+    #[test]
     fn save_preserves_bom_and_crlf() {
         let path = temporary_path("save");
         fs::write(&path, b"\xEF\xBB\xBFfirst\r\nsecond\r\n").expect("write fixture");
@@ -315,5 +613,56 @@ mod tests {
         let error = super::TextDocument::open(&oversized).expect_err("oversized file must fail");
         assert!(error.contains("8 MB"));
         let _ = fs::remove_file(oversized);
+    }
+
+    #[test]
+    fn opens_and_saves_xmind_content_entry() {
+        use std::io::{Read, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::{ZipArchive, ZipWriter};
+
+        let path = temporary_path("xmind").with_extension("xmind");
+        let mut output = fs::File::create(&path).expect("create fixture");
+        let mut writer = ZipWriter::new(&mut output);
+        writer
+            .start_file("mimetype", SimpleFileOptions::default())
+            .expect("start mimetype");
+        writer
+            .write_all(b"application/xmind")
+            .expect("write mimetype");
+        writer
+            .start_file("content.json", SimpleFileOptions::default())
+            .expect("start content");
+        writer
+            .write_all(br#"{"title":"before"}"#)
+            .expect("write content");
+        writer.finish().expect("finish fixture");
+        drop(output);
+
+        let document = super::TextDocument::open_editable(&path).expect("open xmind");
+        assert!(document.text.contains("before"));
+        assert!(super::read_preview_text(&path).unwrap().contains("before"));
+        assert!(document.save("{").is_err());
+        document.save(r#"{"title":"after"}"#).expect("save xmind");
+
+        let file = fs::File::open(&path).expect("open saved fixture");
+        let mut archive = ZipArchive::new(file).expect("read saved fixture");
+        assert_eq!(archive.by_index(0).expect("first entry").name(), "mimetype");
+        let mut content = String::new();
+        archive
+            .by_name("content.json")
+            .expect("content entry")
+            .read_to_string(&mut content)
+            .expect("read content entry");
+        assert!(content.contains("after"));
+        drop(archive);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn office_preview_extracts_text_and_rejects_invalid_xml() {
+        let xml = r#"<w:document xmlns:w="urn:test"><w:p><w:r><w:t>One &amp; two</w:t></w:r></w:p></w:document>"#;
+        assert_eq!(super::extract_xml_text(xml).unwrap(), "One & two");
+        assert!(super::parse_document_xml("<document>").is_err());
     }
 }

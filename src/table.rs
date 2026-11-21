@@ -393,8 +393,10 @@ impl FileIconKind {
                 Self::Code
             }
             "txt" | "md" | "log" | "ini" | "toml" | "yaml" | "yml" | "json" | "pdf" | "doc"
-            | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "csv" | "tsv" | "rtf" | "epub" | "tex"
-            | "cfg" | "conf" | "env" => Self::Text,
+            | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "xmind" | "mm" | "freemind" | "opml"
+            | "opmlm" | "csv" | "tsv" | "rtf" | "epub" | "tex" | "cfg" | "conf" | "env" => {
+                Self::Text
+            }
             _ => Self::GenericFile,
         }
     }

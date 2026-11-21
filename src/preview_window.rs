@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::actions::SaveEditor;
 use crate::app::{
-    is_image_preview_entry, is_raster_image_preview_entry, is_text_preview_entry, read_log_preview,
-    read_text_preview,
+    is_editor_preview_entry, is_image_preview_entry, is_raster_image_preview_entry,
+    is_text_preview_entry, read_log_preview,
 };
 use crate::fs::FileEntry;
-use crate::shell_fs;
 use crate::text_editor::{self, TextDocument};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
@@ -24,6 +24,7 @@ use kite_core::preview::{PreviewImageData, is_raster_image_preview_path, load_im
 
 const PREVIEW_WINDOW_IMAGE_MAX_WIDTH: u32 = 1_920;
 const PREVIEW_WINDOW_IMAGE_MAX_HEIGHT: u32 = 1_440;
+const MARKDOWN_PREVIEW_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreviewKind {
@@ -45,6 +46,7 @@ pub(crate) struct PreviewWindow {
     document: Option<TextDocument>,
     editor: Option<Entity<EditorState>>,
     text_view: Option<Entity<TextViewState>>,
+    markdown_preview_visible: bool,
     image: Option<Arc<RenderImage>>,
     scroll: ScrollHandle,
     message: Option<SharedString>,
@@ -54,18 +56,15 @@ pub(crate) struct PreviewWindow {
     _editor_subscription: Option<Subscription>,
     _load_task: Task<()>,
     _save_task: Task<()>,
+    _markdown_preview_task: Task<()>,
 }
 
 impl PreviewWindow {
     pub(crate) fn new(entry: FileEntry, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let shell_path = shell_fs::is_shell_namespace_path(&entry.path);
-        let kind = if is_image_preview_entry(&entry) {
-            PreviewKind::Image
-        } else if !shell_path
-            && text_editor::is_text_path(&entry.path)
-            && entry.size <= text_editor::MAX_TEXT_FILE_BYTES
-        {
+        let kind = if is_editor_preview_entry(&entry) {
             PreviewKind::Editor
+        } else if is_image_preview_entry(&entry) {
+            PreviewKind::Image
         } else if is_text_preview_entry(&entry) {
             PreviewKind::ReadOnlyText
         } else {
@@ -79,7 +78,9 @@ impl PreviewWindow {
                     .language(language)
             })
         });
-        let text_view = (kind == PreviewKind::ReadOnlyText).then(|| {
+        let live_markdown =
+            kind == PreviewKind::Editor && text_editor::is_markdown_path(&entry.path);
+        let text_view = (kind == PreviewKind::ReadOnlyText || live_markdown).then(|| {
             cx.new(|cx| {
                 TextViewState::markdown("正在加载文件…", cx)
                     .selectable(true)
@@ -99,6 +100,7 @@ impl PreviewWindow {
             document: None,
             editor,
             text_view,
+            markdown_preview_visible: live_markdown,
             image: None,
             scroll: ScrollHandle::new(),
             message: None,
@@ -108,7 +110,12 @@ impl PreviewWindow {
             _editor_subscription: None,
             _load_task: Task::ready(()),
             _save_task: Task::ready(()),
+            _markdown_preview_task: Task::ready(()),
         };
+        if live_markdown && let Some(editor) = &this.editor {
+            this.word_wrap = true;
+            editor.update(cx, |editor, cx| editor.set_soft_wrap(true, window, cx));
+        }
         if let Some(editor) = this.editor.clone() {
             this._editor_subscription = Some(cx.subscribe_in(
                 &editor,
@@ -116,6 +123,7 @@ impl PreviewWindow {
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.dirty = true;
+                        this.schedule_markdown_preview(cx);
                         this.update_window_title(window);
                         cx.notify();
                     }
@@ -145,7 +153,7 @@ impl PreviewWindow {
         };
         self._load_task = cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { TextDocument::open(&path) })
+                .background_spawn(async move { TextDocument::open_editable(&path) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.loading = false;
@@ -157,6 +165,7 @@ impl PreviewWindow {
                             editor.focus(window, cx);
                         });
                         this.document = Some(document);
+                        this.update_markdown_preview(cx);
                         this.message = None;
                         this.dirty = false;
                         this.update_window_title(window);
@@ -177,7 +186,7 @@ impl PreviewWindow {
             .map(|value| value.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         let log_preview = extension.eq_ignore_ascii_case("log");
-        let markdown = is_markdown_path(&path);
+        let markdown = extension == "txt" || text_editor::is_markdown_path(&path);
         let Some(text_view) = self.text_view.clone() else {
             return;
         };
@@ -187,7 +196,7 @@ impl PreviewWindow {
                     if log_preview {
                         read_log_preview(&path)
                     } else {
-                        read_text_preview(&path)
+                        text_editor::read_preview_text(&path)
                     }
                 })
                 .await;
@@ -299,9 +308,16 @@ impl PreviewWindow {
                 this.saving = false;
                 match result {
                     Ok(document) => {
+                        this.dirty = editor.read(cx).value().as_ref() != document.text;
                         this.document = Some(document);
-                        this.dirty = false;
-                        this.message = Some("已保存".into());
+                        this.message = Some(
+                            if this.dirty {
+                                "还有未保存的更改"
+                            } else {
+                                "已保存"
+                            }
+                            .into(),
+                        );
                         this.update_window_title(window);
                         editor.update(cx, |editor, cx| editor.focus(window, cx));
                     }
@@ -312,6 +328,39 @@ impl PreviewWindow {
                 cx.notify();
             });
         });
+    }
+
+    fn schedule_markdown_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.markdown_preview_visible {
+            return;
+        }
+        self._markdown_preview_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MARKDOWN_PREVIEW_DELAY).await;
+            let _ = this.update(cx, |this, cx| this.update_markdown_preview(cx));
+        });
+    }
+
+    fn update_markdown_preview(&self, cx: &mut Context<Self>) {
+        if !self.markdown_preview_visible {
+            return;
+        }
+        if let (Some(editor), Some(preview)) = (&self.editor, &self.text_view) {
+            let source = editor.read(cx).value();
+            preview.update(cx, |view, cx| {
+                view.set_text(
+                    kite_core::preview::markdown_preview_source(source.as_ref()),
+                    cx,
+                );
+            });
+        }
+    }
+
+    fn toggle_markdown_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.markdown_preview_visible = !self.markdown_preview_visible;
+        self._markdown_preview_task = Task::ready(());
+        self.update_markdown_preview(cx);
+        self.focus_editor(window, cx);
+        cx.notify();
     }
 
     fn open_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -490,6 +539,20 @@ impl PreviewWindow {
                         this.toggle_whitespace(window, cx)
                     })),
             )
+            .when(self.text_view.is_some(), |bar| {
+                bar.child(
+                    Button::new("editor-markdown-preview")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::PanelRightOpen)
+                        .label("实时预览")
+                        .selected(self.markdown_preview_visible)
+                        .disabled(self.document.is_none())
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle_markdown_preview(window, cx);
+                        })),
+                )
+            })
             .child(
                 div()
                     .ml_auto()
@@ -560,15 +623,29 @@ impl PreviewWindow {
                     .track_scroll(&self.scroll)
                     .px_8()
                     .py_6()
-                    .child(
-                        div().w_full().max_w(px(920.)).mx_auto().child(
+                    .child(div().w_full().max_w(px(920.)).mx_auto().child(
+                        if self.kind == PreviewKind::Editor {
+                            gpui_kit::base::TextView::new(text_view)
+                                .w_full()
+                                .text_sm()
+                                .selectable(true)
+                                .scrollable(false)
+                                .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
+                                .on_link_click(|url, _, _, cx| {
+                                    if url.starts_with("https://") || url.starts_with("http://") {
+                                        cx.open_url(url);
+                                    }
+                                })
+                                .into_any_element()
+                        } else {
                             TextView::new(text_view)
                                 .w_full()
                                 .text_sm()
                                 .selectable(true)
-                                .scrollable(false),
-                        ),
-                    ),
+                                .scrollable(false)
+                                .into_any_element()
+                        },
+                    )),
             )
             .child(
                 div().absolute().inset_0().child(
@@ -588,6 +665,47 @@ impl PreviewWindow {
                         })
                         .viewport_from_layout(),
                 ),
+            )
+            .into_any_element()
+    }
+
+    fn render_markdown_workspace(&self, cx: &App) -> AnyElement {
+        let editor = self.render_editor_body(cx);
+        if !self.markdown_preview_visible || self.document.is_none() {
+            return editor;
+        }
+        let heading = |label: &'static str| {
+            div()
+                .px_3()
+                .py_2()
+                .text_xs()
+                .flex_shrink_0()
+                .text_color(cx.theme().muted_foreground)
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(label)
+        };
+        h_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(heading("Markdown 源码"))
+                    .child(editor),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(cx.theme().border)
+                    .child(heading("实时预览"))
+                    .child(self.render_read_only_text_body(cx)),
             )
             .into_any_element()
     }
@@ -637,7 +755,7 @@ impl Render for PreviewWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let body = match self.kind {
-            PreviewKind::Editor => self.render_editor_body(cx),
+            PreviewKind::Editor => self.render_markdown_workspace(cx),
             PreviewKind::ReadOnlyText => self.render_read_only_text_body(cx),
             PreviewKind::Image => {
                 if let Some(image) = self.image.clone() {
@@ -809,15 +927,6 @@ fn display_language(language: &str) -> &'static str {
     }
 }
 
-fn is_markdown_path(path: &std::path::Path) -> bool {
-    matches!(
-        path.extension()
-            .map(|value| value.to_string_lossy().to_ascii_lowercase())
-            .as_deref(),
-        Some("txt" | "md" | "markdown")
-    )
-}
-
 fn plain_text_markdown(text: &str, extension: &str) -> String {
     let max_backticks = text
         .split(|character| character != '`')
@@ -848,5 +957,123 @@ mod tests {
     fn editor_language_labels_are_stable() {
         assert_eq!(display_language("rust"), "Rust");
         assert_eq!(display_language("unknown"), "纯文本");
+    }
+
+    #[test]
+    #[ignore = "opens a Markdown editor window on the Windows desktop"]
+    fn live_markdown_follows_unsaved_edits_and_catches_up_when_reopened() {
+        use super::{MARKDOWN_PREVIEW_DELAY, PreviewWindow};
+        use crate::fs::{EntryKind, FileEntry};
+        use gpui_kit::{AppContext as _, WindowOptions};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kite-live-markdown-{stamp}.mk"));
+        let original = "# Initial heading\n";
+        std::fs::write(&path, original).expect("write Markdown fixture");
+        let entry = FileEntry {
+            path: path.clone(),
+            name: "Live Markdown fixture.mk".to_string(),
+            kind: EntryKind::File,
+            size: original.len() as u64,
+            modified: None,
+            extension: "mk".to_string(),
+            git_status: None,
+            svn_status: None,
+        };
+        let (observed, result) = std::sync::mpsc::channel();
+        gpui_kit::application()
+            .with_assets(gpui_kit::assets::AllAssets)
+            .run(move |cx| {
+                gpui_kit::init(cx);
+                let (window, view) =
+                    gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+                        cx.new(|cx| PreviewWindow::new(entry, window, cx))
+                    })
+                    .expect("open Markdown test window");
+                cx.spawn(async move |cx| {
+                    let check = async {
+                        let rendered = || {
+                            cx.update(|cx| {
+                                view.read(cx)
+                                    .text_view
+                                    .as_ref()
+                                    .map(|preview| {
+                                        preview.read(cx).rendered_text().as_str().to_string()
+                                    })
+                                    .unwrap_or_default()
+                            })
+                        };
+                        for (expected, next) in [
+                            ("Initial heading", Some((false, "# Updated heading\n"))),
+                            ("Updated heading", Some((true, "# Hidden edit\n"))),
+                            ("Hidden edit", None),
+                        ] {
+                            if expected == "Hidden edit" {
+                                if !rendered().contains("Updated heading") {
+                                    return Err("hidden preview was updated");
+                                }
+                                cx.update(|cx| {
+                                    window.update(cx, |_, window, cx| {
+                                        view.update(cx, |editor, cx| {
+                                            editor.toggle_markdown_preview(window, cx)
+                                        });
+                                    })
+                                })
+                                .map_err(|_| "show preview")?;
+                            }
+                            for _ in 0..50 {
+                                if rendered().contains(expected) {
+                                    break;
+                                }
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(30))
+                                    .await;
+                            }
+                            if !rendered().contains(expected) {
+                                return Err(expected);
+                            }
+                            if let Some((hide, next)) = next {
+                                cx.update(|cx| {
+                                    window.update(cx, |_, window, cx| {
+                                        view.update(cx, |editor, cx| {
+                                            if hide {
+                                                editor.toggle_markdown_preview(window, cx);
+                                            }
+                                            editor.editor.as_ref().unwrap().update(
+                                                cx,
+                                                |state, cx| {
+                                                    state.replace_all(next, window, cx);
+                                                },
+                                            );
+                                        });
+                                    })
+                                })
+                                .map_err(|_| "edit fixture")?;
+                                if hide {
+                                    cx.background_executor()
+                                        .timer(MARKDOWN_PREVIEW_DELAY * 2)
+                                        .await;
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    let _ = observed.send(check);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            });
+        let unchanged = std::fs::read_to_string(&path).expect("read fixture after editing");
+        std::fs::remove_file(path).expect("remove test fixture");
+        result
+            .try_recv()
+            .expect("observe Markdown window")
+            .expect("live preview state");
+        assert_eq!(unchanged, original);
     }
 }

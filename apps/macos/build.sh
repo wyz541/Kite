@@ -55,6 +55,7 @@ xcrun swiftc \
     -lkite_core \
     -framework AppKit \
     -framework QuickLookUI \
+    -framework WebKit \
     -Xlinker -rpath \
     -Xlinker @executable_path/../Frameworks \
     "$ROOT"/apps/macos/Sources/*.swift \

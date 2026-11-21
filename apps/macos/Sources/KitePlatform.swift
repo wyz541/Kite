@@ -27,10 +27,16 @@ enum KitePlatform {
         }
     }
 
+    static func isMarkdownFile(_ path: String) -> Bool {
+        let extensionName = URL(fileURLWithPath: path).pathExtension.lowercased()
+        return ["md", "markdown", "mdx", "mk"].contains(extensionName)
+    }
+
     static func isEditableTextFile(_ path: String) -> Bool {
+        if isMarkdownFile(path) { return true }
         let extensionName = URL(fileURLWithPath: path).pathExtension.lowercased()
         return [
-            "", "txt", "md", "markdown", "log", "json", "jsonc", "toml", "yaml", "yml",
+            "", "txt", "log", "json", "jsonc", "toml", "yaml", "yml",
             "xml", "ini", "conf", "cfg", "properties", "env", "csv", "tsv", "svg",
             "rs", "py", "pyw", "js", "mjs", "cjs", "jsx", "ts", "tsx", "html", "htm",
             "css", "scss", "less", "c", "h", "cc", "cpp", "cxx", "hpp", "hxx", "cs",

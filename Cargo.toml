@@ -1,6 +1,6 @@
 [package]
 name = "kite-explorer"
-version = "0.6.85"
+version = "0.6.87"
 edition = "2024"
 description = "A fast, native cross-platform file manager with a shared Rust Core, Windows GPUI UI, and native macOS SwiftUI UI with Liquid Glass"
 license = "MIT"
@@ -44,6 +44,7 @@ image = { version = "0.25.10", default-features = false, features = ["bmp", "gif
 notify = "8.2.0"
 open = "5"
 regex = "1"
+roxmltree = "0.21.2"
 semver = "1"
 sysinfo = "0.39.6"
 serde = { version = "1", features = ["derive"] }
@@ -95,6 +96,12 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+markdown = "1.0.0"
+
+[dev-dependencies]
+markdown = "1.0.0"
 
 [profile.dev]
 opt-level = 1
