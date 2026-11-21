@@ -48,6 +48,7 @@ actions!(
         CreateStartMenuShortcut,
         CheckForUpdates,
         OpenSettings,
+        OpenWorkspaceEditor,
         SaveEditor,
     ]
 );

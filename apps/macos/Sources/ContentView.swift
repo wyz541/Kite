@@ -98,6 +98,15 @@ struct ContentView: View {
             .frame(width: 38, height: KiteTheme.toolbarControlHeight)
             .kiteGlass(.panel, cornerRadius: KiteTheme.controlRadius)
 
+            KiteToolbarIconButton(
+                systemName: "rectangle.split.3x1",
+                title: "打开工作区编辑器"
+            ) {
+                KitePlatform.openWorkspaceEditor(model.currentPath)
+            }
+            .frame(width: 38, height: KiteTheme.toolbarControlHeight)
+            .kiteGlass(.panel, cornerRadius: KiteTheme.controlRadius)
+
             navigationControls
             Spacer(minLength: 0)
         }

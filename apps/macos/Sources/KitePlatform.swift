@@ -27,6 +27,19 @@ enum KitePlatform {
         }
     }
 
+    @MainActor
+    static func openWorkspaceEditor(_ path: String) {
+        do {
+            try WorkspaceEditorWindowController.open(path: path)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "无法打开工作区编辑器"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
     static func isMarkdownFile(_ path: String) -> Bool {
         let extensionName = URL(fileURLWithPath: path).pathExtension.lowercased()
         return ["md", "markdown", "mdx", "mk"].contains(extensionName)
@@ -497,3 +510,5 @@ private final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLP
         currentURL as NSURL?
     }
 }
+
+

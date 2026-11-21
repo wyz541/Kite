@@ -39,6 +39,7 @@ use crate::vcs::{
     VcsOperation, VcsQuery, VcsTool, apply_statuses, load_vcs_snapshot, open_vcs_log_window,
     run_vcs_operation, run_vcs_query,
 };
+use crate::workspace_window::WorkspaceWindow;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{SelectableText, TextSelectionHandle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -1475,6 +1476,7 @@ impl KiteApp {
             ]),
             Menu::new("Kite").items([
                 MenuItem::action("设置…", OpenSettings),
+                MenuItem::action("工作区编辑器…", OpenWorkspaceEditor),
                 MenuItem::separator(),
                 MenuItem::action("检查更新…", CheckForUpdates),
                 MenuItem::separator(),
@@ -2673,6 +2675,26 @@ impl KiteApp {
                 self.notice = None;
                 self.error = Some(format!("无法打开预览窗口：{error}").into());
             }
+        }
+        cx.notify();
+    }
+
+    fn open_workspace_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.current_dir.clone();
+        let title = format!("Kite 工作区 — {}", root.display());
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some(title.into()),
+                ..Default::default()
+            }),
+            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+            window_min_size: Some(size(px(860.), px(560.))),
+            ..Default::default()
+        };
+        if let Err(error) = gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| WorkspaceWindow::new(root, window, cx))
+        }) {
+            self.error = Some(format!("无法打开工作区编辑器：{error}").into());
         }
         cx.notify();
     }
@@ -4794,6 +4816,16 @@ impl KiteApp {
                     })
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.toggle_current_favorite(cx)
+                    })),
+            )
+            .child(
+                Button::new("open-workspace-editor")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::FilePen)
+                    .tooltip("打开工作区编辑器（目录树）")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_workspace_editor(window, cx)
                     })),
             )
             .child(
@@ -8180,6 +8212,9 @@ impl Render for KiteApp {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings_window(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenWorkspaceEditor, window, cx| {
+                this.open_workspace_editor(window, cx)
             }))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::set_default_explorer))

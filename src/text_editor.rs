@@ -239,13 +239,9 @@ pub fn is_text_path(path: &Path) -> bool {
 }
 
 pub fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            crate::search_filters::MARKDOWN_EXTENSIONS
-                .iter()
-                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        })
+    crate::plugins::builtin_plugins()
+        .iter()
+        .any(|plugin| plugin.supports_path(path))
 }
 
 pub fn language_for_path(path: &Path) -> String {

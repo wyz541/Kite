@@ -25,6 +25,8 @@ mod shell_fs;
 mod table;
 #[cfg(windows)]
 mod tabs;
+#[cfg(windows)]
+mod workspace_window;
 
 #[cfg(windows)]
 use app::KiteApp;
@@ -34,7 +36,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 #[cfg(windows)]
 pub use kite_core::{
-    archive, content_search, devices, favorites, fs, platform, session, text_editor,
+    archive, content_search, devices, favorites, fs, platform, plugins, session, text_editor,
     ui_preferences, update_notes, updater, vcs,
 };
 #[cfg(windows)]

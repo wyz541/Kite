@@ -13,6 +13,7 @@ pub mod indexed_search;
 pub mod name_index;
 pub mod perf_trace;
 pub mod platform;
+pub mod plugins;
 pub mod preview;
 #[cfg(windows)]
 pub mod recycle_bin;
