@@ -3720,7 +3720,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kite-explorer"
-version = "0.6.85"
+version = "0.6.87"
 dependencies = [
  "atomicwrites",
  "chrono",
@@ -3735,10 +3735,12 @@ dependencies = [
  "ignore",
  "image",
  "libloading",
+ "markdown",
  "notify",
  "open",
  "raw-window-handle",
  "regex",
+ "roxmltree 0.21.2",
  "semver",
  "serde",
  "serde_json",

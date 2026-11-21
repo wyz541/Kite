@@ -10,6 +10,23 @@ pub const LOG_PREVIEW_READ_BYTES: u64 = 64 * 1024;
 pub const IMAGE_PREVIEW_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const IMAGE_PREVIEW_MAX_SOURCE_EDGE: u32 = 32_768;
 pub const IMAGE_PREVIEW_MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const LIVE_MARKDOWN_MAX_BYTES: usize = 256 * 1024;
+
+pub fn markdown_preview_source(source: &str) -> &str {
+    if source.len() > LIVE_MARKDOWN_MAX_BYTES {
+        "文档超过 256 KiB，已暂停实时预览。仍可编辑和保存。"
+    } else if source.trim().is_empty() {
+        "*输入 Markdown 后，预览会显示在这里。*"
+    } else {
+        source
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn render_markdown_preview_html(source: &str) -> String {
+    markdown::to_html_with_options(markdown_preview_source(source), &markdown::Options::gfm())
+        .unwrap_or_else(|_| "<p>无法渲染 Markdown 预览。</p>".to_string())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewImageData {
@@ -262,5 +279,20 @@ mod tests {
         assert_eq!(fitted_preview_size(800, 400, 200, 200), (200, 100));
         assert_eq!(fitted_preview_size(400, 800, 200, 200), (100, 200));
         assert_eq!(fitted_preview_size(40, 30, 200, 200), (40, 30));
+    }
+
+    #[test]
+    fn live_markdown_bounds_input_and_renders_gfm_without_active_html() {
+        let source =
+            "# 标题\n\n- [x] 完成\n\n```rust\nfn main() {}\n```\n\n<script>alert(1)</script>";
+        let rendered = super::render_markdown_preview_html(source);
+        assert!(rendered.contains("<h1>标题</h1>"));
+        assert!(rendered.contains("type=\"checkbox\""));
+        assert!(rendered.contains("class=\"language-rust\""));
+        assert!(!rendered.contains("<script>"));
+        assert_eq!(super::markdown_preview_source(source), source);
+        assert!(super::markdown_preview_source(" \n").contains("输入 Markdown"));
+        let large = "文".repeat(super::LIVE_MARKDOWN_MAX_BYTES / 3 + 1);
+        assert!(super::markdown_preview_source(&large).contains("已暂停实时预览"));
     }
 }

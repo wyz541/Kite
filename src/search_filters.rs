@@ -167,8 +167,8 @@ fn extension_matches(path: &Path, extensions: &[&str]) -> bool {
 }
 
 pub const DOCUMENT_EXTENSIONS: &[&str] = &[
-    "txt", "rtf", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "csv",
-    "epub",
+    "txt", "rtf", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "xmind", "mm", "freemind",
+    "opml", "opmlm", "odt", "ods", "odp", "csv", "epub",
 ];
 pub const SOURCE_EXTENSIONS: &[&str] = &[
     "rs", "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "java", "kt", "kts", "go", "py", "rb", "php",
@@ -176,7 +176,7 @@ pub const SOURCE_EXTENSIONS: &[&str] = &[
     "fish", "ps1", "sql", "html", "htm", "css", "scss", "sass", "less", "xml", "yaml", "yml",
     "toml", "ini", "json", "proto", "gradle",
 ];
-pub const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdx"];
+pub const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdx", "mk"];
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tif", "tiff", "heic", "heif", "avif",
 ];

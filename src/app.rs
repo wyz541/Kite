@@ -57,8 +57,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
+pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
-pub(crate) use kite_core::preview::{read_log_preview, read_text_preview};
 
 const SIDEBAR_WIDTH: f32 = 208.;
 const TOOLBAR_CONTROL_HEIGHT: f32 = 36.;
@@ -2648,8 +2648,7 @@ impl KiteApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let editor_target = text_editor::is_text_path(&entry.path)
-            && entry.size <= text_editor::MAX_TEXT_FILE_BYTES;
+        let editor_target = is_editor_preview_entry(&entry);
         let title = if editor_target {
             format!("Kite 编辑器 — {}", entry.name)
         } else {
@@ -3623,7 +3622,7 @@ impl KiteApp {
                     } else if log_preview {
                         PreviewLoadResult::Text(read_log_preview(&path))
                     } else {
-                        PreviewLoadResult::Text(read_text_preview(&path))
+                        PreviewLoadResult::Text(text_editor::read_preview_text(&path))
                     }
                 })
                 .await;
@@ -5715,9 +5714,14 @@ impl KiteApp {
         let preview_more_working_directory = self.current_dir.clone();
         let preview_window_entry = entry.clone();
         let preview_more_supports_local_ops = !shell_fs::is_shell_namespace_path(&entry.path);
-        let editor_preview = preview_more_supports_local_ops
-            && text_editor::is_text_path(&entry.path)
-            && entry.size <= text_editor::MAX_TEXT_FILE_BYTES;
+        let editor_preview = is_editor_preview_entry(entry);
+        let open_label = if editor_preview && text_editor::is_markdown_path(&entry.path) {
+            "在窗口中编辑和预览 Markdown"
+        } else if editor_preview {
+            "在文本编辑器中打开"
+        } else {
+            "在窗口中预览"
+        };
         let preview = self
             .column_preview
             .as_ref()
@@ -6027,16 +6031,8 @@ impl KiteApp {
                             } else {
                                 IconName::Maximize2
                             })
-                            .tooltip(if editor_preview {
-                                "在文本编辑器中打开"
-                            } else {
-                                "在窗口中预览"
-                            })
-                            .accessibility_label(if editor_preview {
-                                "在文本编辑器中打开"
-                            } else {
-                                "在窗口中预览"
-                            })
+                            .tooltip(open_label)
+                            .accessibility_label(open_label)
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.open_preview_window(preview_window_entry.clone(), window, cx);
                             })),
@@ -6547,10 +6543,10 @@ impl KiteApp {
         let mut column = v_flex()
             .id(("column", index))
             .on_hover(cx.listener(move |this, hovered: &bool, _window, _cx| {
-                if *hovered {
-                    if let Some(path) = this.column_panes.get(index).map(|pane| pane.path.clone()) {
-                        this.remember_column(&path);
-                    }
+                if *hovered
+                    && let Some(path) = this.column_panes.get(index).map(|pane| pane.path.clone())
+                {
+                    this.remember_column(&path);
                 }
             }))
             .w(px(column_width))
@@ -7543,14 +7539,24 @@ pub(crate) fn is_log_preview_entry(entry: &FileEntry) -> bool {
 }
 
 pub(crate) fn is_markdown_preview_entry(entry: &FileEntry) -> bool {
-    entry.extension.eq_ignore_ascii_case("txt")
-        || entry.extension.eq_ignore_ascii_case("md")
-        || entry.extension.eq_ignore_ascii_case("markdown")
+    entry.extension.eq_ignore_ascii_case("txt") || text_editor::is_markdown_path(&entry.path)
+}
+
+pub(crate) fn is_editor_preview_entry(entry: &FileEntry) -> bool {
+    !shell_fs::is_shell_namespace_path(&entry.path)
+        && entry.size <= text_editor::editable_document_limit(&entry.path)
+        && text_editor::is_editable_preview_path(&entry.path)
 }
 
 pub(crate) fn is_text_preview_entry(entry: &FileEntry) -> bool {
+    if text_editor::is_packaged_document_path(&entry.path) {
+        return entry.size <= text_editor::editable_document_limit(&entry.path);
+    }
     if entry.size > 512 * 1024 && !is_log_preview_entry(entry) {
         return false;
+    }
+    if text_editor::is_mind_map_path(&entry.path) || text_editor::is_markdown_path(&entry.path) {
+        return true;
     }
     if entry.extension.is_empty() {
         return true;
@@ -8854,11 +8860,12 @@ mod path_bar_tests {
 mod preview_tests {
     use super::{
         is_markdown_preview_entry, is_text_preview_entry, preview_info_text,
-        preview_more_menu_items, preview_text_lines, read_log_preview, read_text_preview,
+        preview_more_menu_items, preview_text_lines, read_log_preview,
     };
     use crate::actions::ContextMenuCommand;
     use crate::fs::{EntryKind, FileEntry, VcsStatus};
     use gpui_kit::SharedString;
+    use kite_core::preview::read_text_preview;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -8901,6 +8908,7 @@ otes.{extension}"
         assert!(is_markdown_preview_entry(&make_entry("TXT")));
         assert!(is_markdown_preview_entry(&make_entry("md")));
         assert!(is_markdown_preview_entry(&make_entry("MARKDOWN")));
+        assert!(is_markdown_preview_entry(&make_entry("MK")));
         assert!(!is_markdown_preview_entry(&make_entry("log")));
         assert!(is_text_preview_entry(&make_entry("markdown")));
         assert!(is_text_preview_entry(&make_entry("TXT")));

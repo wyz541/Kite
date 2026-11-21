@@ -89,7 +89,10 @@ struct KitePreviewPane: View {
             }
 
             if KitePlatform.isEditableTextFile(entry.path) {
-                KitePreviewAction(title: "编辑", systemImage: "square.and.pencil") {
+                KitePreviewAction(
+                    title: KitePlatform.isMarkdownFile(entry.path) ? "编辑与预览" : "编辑",
+                    systemImage: "square.and.pencil"
+                ) {
                     KitePlatform.openTextEditor(entry.path)
                 }
             } else {

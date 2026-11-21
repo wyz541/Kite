@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import WebKit
 
 @MainActor
 final class TextEditorDocumentModel: ObservableObject {
@@ -13,11 +14,17 @@ final class TextEditorDocumentModel: ObservableObject {
     @Published private(set) var line = 1
     @Published private(set) var column = 1
     @Published private(set) var lineCount = 1
+    @Published private(set) var markdownSource = ""
 
     init(path: String, core: KiteCore = KiteCore()) throws {
         self.core = core
         self.document = try core.openTextDocument(path: path)
+        if document.language == "markdown" {
+            markdownSource = document.text
+        }
     }
+
+    var isMarkdown: Bool { document.language == "markdown" }
 
     var fileName: String {
         URL(fileURLWithPath: document.path).lastPathComponent
@@ -70,6 +77,9 @@ final class TextEditorDocumentModel: ObservableObject {
     func markChanged() {
         isDirty = true
         message = "未保存"
+        if isMarkdown, let textView {
+            markdownSource = textView.string
+        }
         updateStatistics()
         textView?.enclosingScrollView?.verticalRulerView?.needsDisplay = true
     }
@@ -226,6 +236,7 @@ private struct KiteTextEditorSurface: NSViewRepresentable {
 @MainActor
 private struct TextEditorWindowView: View {
     @ObservedObject var model: TextEditorDocumentModel
+    @State private var showMarkdownPreview = true
 
     var body: some View {
         ZStack {
@@ -233,13 +244,41 @@ private struct TextEditorWindowView: View {
 
             VStack(spacing: 0) {
                 toolbar
-                KiteTextEditorSurface(model: model)
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        if model.isMarkdown && showMarkdownPreview {
+                            paneHeading("Markdown 源码")
+                        }
+                        KiteTextEditorSurface(model: model)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if model.isMarkdown && showMarkdownPreview {
+                        Divider()
+                        VStack(spacing: 0) {
+                            paneHeading("实时预览")
+                            LiveMarkdownPreview(source: model.markdownSource)
+                                .accessibilityLabel("Markdown 实时预览")
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
                 statusBar
             }
             .padding(10)
         }
         .frame(minWidth: 720, minHeight: 520)
+    }
+
+    private func paneHeading(_ title: String) -> some View {
+        Text(title)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
     }
 
     private var toolbar: some View {
@@ -283,6 +322,11 @@ private struct TextEditorWindowView: View {
             }
             .help("查找并替换 ⌥⌘F")
 
+            if model.isMarkdown {
+                Toggle("实时预览", isOn: $showMarkdownPreview)
+                    .toggleStyle(.button)
+            }
+
             Spacer()
 
             Text(model.metadataLabel)
@@ -312,6 +356,83 @@ private struct TextEditorWindowView: View {
         .padding(.horizontal, 12)
         .frame(height: 28)
         .kiteGlassGroup(cornerRadius: 10)
+    }
+}
+
+@MainActor
+private struct LiveMarkdownPreview: NSViewRepresentable {
+    let source: String
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.navigationDelegate = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ view: WKWebView, context: Context) {
+        context.coordinator.update(source, in: view)
+    }
+
+    static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
+        coordinator.pending?.cancel()
+        view.stopLoading()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private var source: String?
+        var pending: Task<Void, Never>?
+
+        func update(_ source: String, in view: WKWebView) {
+            guard source != self.source else { return }
+            let firstRender = self.source == nil
+            self.source = source
+            pending?.cancel()
+            pending = Task { @MainActor [weak view] in
+                if !firstRender {
+                    try? await Task.sleep(for: .milliseconds(150))
+                }
+                guard !Task.isCancelled else { return }
+                let html = await Task.detached(priority: .userInitiated) {
+                    renderLiveMarkdown(source: source)
+                }.value
+                guard !Task.isCancelled else { return }
+                view?.loadHTMLString(Self.page(html), baseURL: nil)
+            }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction
+        ) async -> WKNavigationActionPolicy {
+            if navigationAction.navigationType == .linkActivated,
+               let url = navigationAction.request.url,
+               url.scheme == "https" || url.scheme == "http" {
+                NSWorkspace.shared.open(url)
+            }
+            return navigationAction.request.url?.absoluteString == "about:blank" ? .allow : .cancel
+        }
+
+        private static func page(_ content: String) -> String {
+            """
+            <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'">
+            <meta name="color-scheme" content="light dark">
+            <style>
+            body { font: 14px/1.55 -apple-system, sans-serif; margin: 24px; overflow-wrap: anywhere; }
+            pre { overflow: auto; padding: 12px; }
+            pre, th { background: light-dark(#f3f3f5, #252527); }
+            table { border-collapse: collapse; }
+            td, th { border: 1px solid GrayText; padding: 4px 8px; }
+            blockquote { margin-left: 0; padding-left: 12px; border-left: 2px solid GrayText; }
+            </style></head><body>\(content)</body></html>
+            """
+        }
     }
 }
 

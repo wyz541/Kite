@@ -16,6 +16,12 @@ use crate::text_editor::{self, TextDocument, TextLineEnding};
 use crate::updater::{self, UpdateInfo};
 use crate::vcs::{apply_statuses, load_vcs_snapshot};
 
+#[cfg(target_os = "macos")]
+#[uniffi::export]
+pub fn render_live_markdown(source: String) -> String {
+    crate::preview::render_markdown_preview_html(&source)
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct DirectoryEntryDto {
     pub path: String,
