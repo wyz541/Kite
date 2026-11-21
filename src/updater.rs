@@ -134,39 +134,23 @@ pub fn check_for_update() -> Result<UpdateInfo, String> {
     let current = Version::parse(current_version())
         .map_err(|error| format!("无法读取当前 Kite 版本：{error}"))?;
     let target = current_target()?;
-    let manifest_version = fetch_main_manifest_version().ok();
+    check_release_update(&current, target, fetch_latest_release(), || {
+        fetch_main_manifest_version().ok()
+    })
+}
 
-    if let Some(latest) = manifest_version.as_ref()
-        && latest <= &current
-    {
-        return Ok(latest_only_update_info(&current, latest.clone()));
-    }
-
-    let result =
-        fetch_latest_release().and_then(|release| resolve_release(release, &current, target));
-    match result {
+fn check_release_update(
+    current: &Version,
+    target: UpdateTarget,
+    release: Result<GithubRelease, String>,
+    manifest_version: impl FnOnce() -> Option<Version>,
+) -> Result<UpdateInfo, String> {
+    match release.and_then(|release| resolve_release(release, current, target)) {
         Ok(update) => Ok(update),
         Err(error) => {
             eprintln!("Kite update lookup failed: {error}");
-            Err(update_check_failure_message(manifest_version.as_ref()))
+            Err(update_check_failure_message(manifest_version().as_ref()))
         }
-    }
-}
-
-fn latest_only_update_info(current: &Version, latest: Version) -> UpdateInfo {
-    let latest_version = current.max(&latest).to_string();
-    UpdateInfo {
-        current_version: current.to_string(),
-        latest_version: latest_version.clone(),
-        update_available: false,
-        release_name: format!("Kite {latest_version}"),
-        release_url: format!("https://github.com/wyz541/kite/releases/tag/v{latest_version}"),
-        release_notes: String::new(),
-        published_at: None,
-        asset_name: String::new(),
-        asset_url: String::new(),
-        asset_sha256: String::new(),
-        asset_size: 0,
     }
 }
 
@@ -415,7 +399,10 @@ fn current_target() -> Result<UpdateTarget, String> {
 
 fn asset_matches_target(name: &str, target: UpdateTarget) -> bool {
     match target {
-        UpdateTarget::WindowsX64 => name.eq_ignore_ascii_case("Kite.exe"),
+        UpdateTarget::WindowsX64 => {
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("kite-v") && lower.ends_with("windows-x64.zip")
+        }
         UpdateTarget::MacOSArm64 => {
             let lower = name.to_ascii_lowercase();
             lower.starts_with("kite-v") && lower.ends_with("macos-arm64.zip")
@@ -1084,6 +1071,12 @@ mod tests {
             "prerelease": false,
             "assets": [
                 {
+                    "name": format!("Kite-v{version}-windows-x64.zip"),
+                    "size": 2345,
+                    "digest": format!("sha256:{digest}"),
+                    "browser_download_url": format!("https://github.com/wyz541/kite/releases/download/v{version}/Kite-v{version}-windows-x64.zip")
+                },
+                {
                     "name": "Kite.exe",
                     "size": 1234,
                     "digest": format!("sha256:{digest}"),
@@ -1359,7 +1352,7 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
     }
 
     #[test]
-    fn newer_windows_release_selects_verified_exe() {
+    fn newer_windows_release_selects_complete_zip() {
         let digest = "a".repeat(64);
         let release = parse(&release_json("0.6.13", &digest));
         let info = resolve_release(
@@ -1371,7 +1364,7 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
 
         assert!(info.update_available);
         assert_eq!(info.latest_version, "0.6.13");
-        assert_eq!(info.asset_name, "Kite.exe");
+        assert_eq!(info.asset_name, "Kite-v0.6.13-windows-x64.zip");
         assert_eq!(info.asset_sha256, digest);
     }
 
@@ -1389,15 +1382,6 @@ semver = { version = "1" }
             parse_package_version(manifest).unwrap(),
             Version::new(0, 6, 74)
         );
-    }
-
-    #[test]
-    fn main_manifest_equal_version_reports_no_update() {
-        let info = latest_only_update_info(&Version::new(0, 6, 74), Version::new(0, 6, 74));
-        assert!(!info.update_available);
-        assert_eq!(info.current_version, "0.6.74");
-        assert_eq!(info.latest_version, "0.6.74");
-        assert!(info.asset_name.is_empty());
     }
 
     #[test]
@@ -1469,6 +1453,32 @@ semver = { version = "1" }
         );
         assert_eq!(content_range_start(Some("items 1024-2047/4096")), None);
         assert_eq!(content_range_start(None), None);
+    }
+
+    #[test]
+    fn published_release_is_checked_without_consulting_main_manifest() {
+        let digest = "a".repeat(64);
+        let release = parse(&release_json("0.6.88", &digest));
+        let info = check_release_update(
+            &Version::new(0, 6, 84),
+            UpdateTarget::WindowsX64,
+            Ok(release),
+            || panic!("a published release must not depend on the main branch version"),
+        )
+        .expect("resolve published release");
+
+        assert!(info.update_available);
+        assert_eq!(info.latest_version, "0.6.88");
+        assert_eq!(info.asset_name, "Kite-v0.6.88-windows-x64.zip");
+    }
+
+    #[test]
+    fn windows_updates_require_the_complete_zip_asset() {
+        assert!(asset_matches_target(
+            "Kite-v0.6.88-windows-x64.zip",
+            UpdateTarget::WindowsX64
+        ));
+        assert!(!asset_matches_target("Kite.exe", UpdateTarget::WindowsX64));
     }
 
     #[test]
