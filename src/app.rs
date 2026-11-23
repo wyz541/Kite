@@ -22,6 +22,8 @@ use crate::fs::{
     format_size, load_directory, open_file, recycle_entry, rename_entry, search_directory,
     sort_entries, transfer_entry, validate_name, worse_status,
 };
+use crate::git_branches::GitHeadSummary;
+use crate::git_branches_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -865,6 +867,9 @@ pub struct KiteApp {
     _search_task: Task<()>,
     _column_search_task: Task<()>,
     _vcs_task: Task<()>,
+    git_head: Option<GitHeadSummary>,
+    pending_git_refresh: bool,
+    pending_git_open: Option<PathBuf>,
     view_mode: ViewMode,
     show_path_bar: bool,
     show_sidebar: bool,
@@ -1131,6 +1136,9 @@ impl KiteApp {
             _search_task: Task::ready(()),
             _column_search_task: Task::ready(()),
             _vcs_task: Task::ready(()),
+            git_head: None,
+            pending_git_refresh: false,
+            pending_git_open: None,
             view_mode,
             show_path_bar,
             show_sidebar: ui_preferences.sidebar_visible,
@@ -2247,24 +2255,34 @@ impl KiteApp {
     fn invalidate_vcs(&mut self) {
         self.vcs_generation = self.vcs_generation.wrapping_add(1);
         self._vcs_task = Task::ready(());
+        self.git_head = None;
     }
 
     fn refresh_vcs_statuses(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.vcs_generation = self.vcs_generation.wrapping_add(1);
         if shell_fs::is_shell_namespace_path(&root) {
             self._vcs_task = Task::ready(());
+            self.git_head = None;
             return;
         }
         let generation = self.vcs_generation;
         let status_root = root.clone();
+        let head_root = root.clone();
         self._vcs_task = cx.spawn(async move |this, cx| {
-            let snapshot = cx
-                .background_spawn(async move { load_vcs_snapshot(&status_root) })
+            let (snapshot, git_head) = cx
+                .background_spawn(async move {
+                    let snapshot = load_vcs_snapshot(&status_root);
+                    let git_head = crate::git_branches::git_head_summary(&head_root)
+                        .ok()
+                        .flatten();
+                    (snapshot, git_head)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.vcs_generation != generation {
                     return;
                 }
+                this.git_head = git_head;
                 this.table.update(cx, |state, cx| {
                     state.delegate_mut().apply_vcs_statuses(&root, &snapshot);
                     state.refresh(cx);
@@ -4817,6 +4835,7 @@ impl KiteApp {
         let can_modify_current = !self.current_dir.as_os_str().is_empty();
         let has_clipboard = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let current_favorite = self.current_dir_is_favorite();
+        let git_head = self.git_head.clone();
         let loading = self.loading;
         let search_expanded = self.search_visible
             || self.active_search.is_some()
@@ -4899,6 +4918,29 @@ impl KiteApp {
                         this.toggle_current_favorite(cx)
                     })),
             )
+            .when_some(git_head, |this, head| {
+                let branch = head.branch.clone().unwrap_or_else(|| {
+                    head.short_hash
+                        .map(|hash| format!("HEAD {hash}"))
+                        .unwrap_or_else(|| "分离 HEAD".to_string())
+                });
+                let label = if head.ahead > 0 || head.behind > 0 {
+                    format!("{branch}  ↑{} ↓{}", head.ahead, head.behind)
+                } else {
+                    branch
+                };
+                this.child(
+                    Button::new("git-branches")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::GitBranch)
+                        .label(label)
+                        .tooltip("分支与标签")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_git_branches_window(window, cx)
+                        })),
+                )
+            })
             .child(
                 Button::new("copy")
                     .ghost()
@@ -5097,6 +5139,32 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn open_git_branches_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(head) = self.git_head.as_ref() else {
+            self.notice = None;
+            self.error = Some("当前文件夹不在 Git 工作区中".into());
+            cx.notify();
+            return;
+        };
+        git_branches_window::open_git_branches_window(
+            cx.entity(),
+            head.repository_root.clone(),
+            cx,
+        );
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn request_git_refresh(&mut self, cx: &mut Context<Self>) {
+        self.pending_git_refresh = true;
+        self.git_head = None;
+        cx.notify();
+    }
+
+    pub(crate) fn open_git_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.pending_git_open = Some(path);
+        cx.notify();
+    }
     pub(crate) fn apply_ui_preferences(
         &mut self,
         preferences: UiPreferences,
@@ -8405,6 +8473,21 @@ impl Render for KiteApp {
         let active_search = self.active_search.clone();
         let search_truncated = self.search_truncated;
         let skipped = self.skipped;
+        if self.pending_git_refresh {
+            self.pending_git_refresh = false;
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |this, cx| this.refresh(window, cx));
+            });
+        }
+        if let Some(path) = self.pending_git_open.take() {
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |this, cx| {
+                    this.navigate_to(path.clone(), NavigationIntent::Push, window, cx)
+                });
+            });
+        }
         if self.column_scroll_pending {
             self.column_scroll_pending = false;
             let handle = self.column_scroll.clone();

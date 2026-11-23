@@ -14,6 +14,8 @@ mod explorer_integration;
 #[cfg(windows)]
 mod file_clipboard;
 #[cfg(windows)]
+mod git_branches_window;
+#[cfg(windows)]
 mod global_search_window;
 #[cfg(windows)]
 mod preview_window;
@@ -34,7 +36,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 #[cfg(windows)]
 pub use kite_core::{
-    archive, content_search, devices, favorites, fs, platform, session, text_editor,
+    archive, content_search, devices, favorites, fs, git_branches, platform, session, text_editor,
     ui_preferences, update_notes, updater, vcs,
 };
 #[cfg(windows)]
