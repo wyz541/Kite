@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::diff_viewer_window;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Selectable as _, SelectableText};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,6 +12,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kite_core::diff::DiffEndpoint;
 use kite_core::git::{GitDiffLine, GitDiffLineKind, GitOperationState};
 use kite_core::git_ops::{
     GitCommandOutcome, GitRepositoryStatus, GitResetMode, GitStashEntry, GitStashSaveOptions,
@@ -258,6 +260,38 @@ impl GitToolsWindow {
                 cx.notify();
             });
         });
+    }
+
+    fn open_stash_diff_viewer(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_stash_index() else {
+            return;
+        };
+        let Some(stash) = self.stashes.get(index as usize) else {
+            return;
+        };
+        let selector = stash.selector.clone();
+        let repository_root = self
+            .status
+            .as_ref()
+            .map(|status| status.repository_root.clone())
+            .unwrap_or_else(|| self.path.clone());
+        let result = diff_viewer_window::open_diff_viewer_window(
+            repository_root,
+            DiffEndpoint::Revision(format!("{selector}^1")),
+            DiffEndpoint::Revision(selector),
+            cx,
+        );
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("已在 Diff 查看器中打开 Stash。".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
     }
 
     fn create_branch_from_stash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -779,6 +813,15 @@ impl GitToolsWindow {
                                         )),
                                 )
                                 .child(
+                                    Button::new("git-stash-open-diff-viewer")
+                                        .compact()
+                                        .label("Diff 查看器")
+                                        .disabled(selected.is_none())
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.open_stash_diff_viewer(cx)
+                                        })),
+                                )
+                                .child(
                                     Button::new("git-stash-drop")
                                         .compact()
                                         .danger()
@@ -833,25 +876,56 @@ impl GitToolsWindow {
             .into_any_element()
     }
 
-    fn render_log_tab(&self, cx: &App) -> AnyElement {
+    fn render_log_tab(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let repository_root = self
+            .status
+            .as_ref()
+            .map(|status| status.repository_root.clone())
+            .unwrap_or_else(|| self.path.clone());
         self.card(
             "Git 历史",
             v_flex()
-                .id("git-tools-log")
                 .w_full()
-                .max_h(px(560.))
-                .overflow_y_scrollbar()
-                .rounded_md()
-                .bg(cx.theme().muted.opacity(0.20))
-                .p_3()
-                .text_xs()
-                .font_family("monospace")
-                .child(SelectableText::new(
-                    "git-tools-log-text",
-                    self.log_text
-                        .clone()
-                        .unwrap_or_else(|| "正在读取 Git 历史…".to_string()),
-                ))
+                .gap_2()
+                .child(
+                    h_flex().w_full().justify_end().child(
+                        Button::new("git-log-latest-diff")
+                            .ghost()
+                            .compact()
+                            .label("最新提交 Diff")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                let result = diff_viewer_window::open_diff_viewer_window(
+                                    repository_root.clone(),
+                                    DiffEndpoint::Revision("HEAD~1".to_string()),
+                                    DiffEndpoint::Revision("HEAD".to_string()),
+                                    cx,
+                                );
+                                match result {
+                                    Ok(()) => this.error = None,
+                                    Err(error) => this.error = Some(error.into()),
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(
+                    v_flex()
+                        .id("git-tools-log")
+                        .w_full()
+                        .max_h(px(560.))
+                        .overflow_y_scrollbar()
+                        .rounded_md()
+                        .bg(cx.theme().muted.opacity(0.20))
+                        .p_3()
+                        .text_xs()
+                        .font_family("monospace")
+                        .child(SelectableText::new(
+                            "git-tools-log-text",
+                            self.log_text
+                                .clone()
+                                .unwrap_or_else(|| "正在读取 Git 历史…".to_string()),
+                        )),
+                )
                 .into_any_element(),
             cx,
         )

@@ -329,6 +329,8 @@ struct KiteGitToolsView: View {
                             .disabled(selectedStashIndex == nil || busy)
                         Button("查看差异") { showStashDiff() }
                             .disabled(selectedStashIndex == nil || busy)
+                        Button("Diff 查看器") { openStashDiffViewer() }
+                            .disabled(selectedStashIndex == nil || busy)
                         Spacer()
                         Button("删除") { requestDrop() }
                             .foregroundStyle(.red)
@@ -409,19 +411,35 @@ struct KiteGitToolsView: View {
 
     private var logContent: some View {
         card("Git 历史") {
-            ScrollView([.vertical, .horizontal]) {
-                Text(logText.isEmpty ? "正在读取 Git 历史…" : logText)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Spacer()
+                    Button("最新提交 Diff") {
+                        KiteDiffViewerWindowController.shared.show(
+                            path: status?.repositoryRoot ?? path,
+                            appModel: model,
+                            preset: .custom,
+                            oldRevision: "HEAD~1",
+                            newRevision: "HEAD"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                ScrollView([.vertical, .horizontal]) {
+                    Text(logText.isEmpty ? "正在读取 Git 历史…" : logText)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(maxHeight: 560)
+                .background(
+                    Color.primary.opacity(0.035),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
             }
-            .frame(maxHeight: 560)
-            .background(
-                Color.primary.opacity(0.035),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
         }
     }
 
@@ -614,6 +632,18 @@ struct KiteGitToolsView: View {
             }
             busy = false
         }
+    }
+
+    private func openStashDiffViewer() {
+        guard let index = selectedStashIndex, Int(index) < stashes.count else { return }
+        let selector = stashes[Int(index)].selector
+        KiteDiffViewerWindowController.shared.show(
+            path: status?.repositoryRoot ?? path,
+            appModel: model,
+            preset: .custom,
+            oldRevision: "\(selector)^1",
+            newRevision: selector
+        )
     }
 
     private func requestDrop() {

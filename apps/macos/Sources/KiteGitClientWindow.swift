@@ -276,6 +276,15 @@ private struct KiteGitClientWindowView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                Button("比较") {
+                    KiteDiffViewerWindowController.shared.show(
+                        path: repositoryPath,
+                        appModel: model,
+                        preset: .headToWorkingTree
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button {
                     Task { await loadChanges() }
                 } label: {
@@ -576,6 +585,16 @@ private struct KiteGitClientWindowView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button("Diff 查看器") {
+                let fullPath = diff.path.hasPrefix("/")
+                    ? diff.path
+                    : (repositoryPath as NSString).appendingPathComponent(diff.path)
+                KiteDiffViewerWindowController.shared.show(
+                    path: fullPath,
+                    appModel: model,
+                    preset: diff.scope == .staged ? .headToIndex : .indexToWorkingTree
+                )
+            }
             if !checked.isEmpty {
                 if let selectedGroup {
                     switch selectedGroup {

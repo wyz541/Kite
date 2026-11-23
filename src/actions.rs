@@ -64,6 +64,8 @@ actions!(
         GitClientCancelTask,
         GitClientDismiss,
         SaveEditor,
+        DiffNextChange,
+        DiffPreviousChange,
     ]
 );
 
