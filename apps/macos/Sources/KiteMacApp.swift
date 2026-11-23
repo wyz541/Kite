@@ -192,6 +192,12 @@ struct KiteMacApp: App {
                 }
                 .keyboardShortcut("r", modifiers: [.command])
             }
+            CommandMenu("Git") {
+                Button("打开 Git 客户端…") {
+                    KiteGitClientWindowController.open(path: model.currentPath)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+            }
             CommandMenu("页签") {
                 Button("新建页签") {
                     model.newTab()

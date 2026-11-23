@@ -16,6 +16,7 @@ struct KitePreviewPane: View {
                     previewSurface
                     identity
                     actionGrid
+                    KiteGitPreviewSection(model: model, entry: entry)
                     metadata
                 }
                 .padding(.bottom, 4)
@@ -101,6 +102,11 @@ struct KitePreviewPane: View {
                 }
             }
 
+            if entry.gitStatus != nil || model.isGitAvailable(forEntryPath: entry.path) {
+                KitePreviewAction(title: "Git 客户端", systemImage: "arrow.triangle.branch") {
+                    KiteGitClientWindowController.open(path: entry.path)
+                }
+            }
             KitePreviewAction(title: "Finder", systemImage: "folder") {
                 KitePlatform.revealInFinder(entry.path)
             }

@@ -1747,6 +1747,15 @@ private struct KiteEntryMenu: View {
         } label: {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
         }
+        if model.columns.last?.gitAvailable == true {
+            Menu {
+                Button("打开 Git 客户端…") {
+                    KiteGitClientWindowController.open(path: entry.path)
+                }
+            } label: {
+                Label("Git", systemImage: "arrow.triangle.branch")
+            }
+        }
 
         Divider()
 
@@ -1939,6 +1948,15 @@ private struct KiteDirectoryMenu: View {
             KitePlatform.copyPath(column.path)
         } label: {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+        }
+        if column.gitAvailable {
+            Menu {
+                Button("打开 Git 客户端…") {
+                    KiteGitClientWindowController.open(path: column.path)
+                }
+            } label: {
+                Label("Git", systemImage: "arrow.triangle.branch")
+            }
         }
 
         Divider()

@@ -67,6 +67,10 @@ impl FileTableDelegate {
         self.working_directory = working_directory;
     }
 
+    pub fn git_available(&self) -> bool {
+        self.git_available
+    }
+
     pub fn apply_vcs_statuses(&mut self, view_root: &std::path::Path, snapshot: &VcsSnapshot) {
         self.git_available = snapshot.git_available();
         self.svn_available = snapshot.svn_available();
@@ -524,7 +528,7 @@ pub(crate) fn vcs_badge(icon: IconName, status: VcsStatus) -> AnyElement {
         .into_any_element()
 }
 
-fn vcs_status_color(status: VcsStatus) -> Hsla {
+pub(crate) fn vcs_status_color(status: VcsStatus) -> Hsla {
     match status {
         VcsStatus::Modified | VcsStatus::PropertyModified => rgb(0xe5a84b).into(),
         VcsStatus::Added | VcsStatus::Renamed => rgb(0x55b978).into(),
