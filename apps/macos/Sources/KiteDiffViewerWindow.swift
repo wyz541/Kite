@@ -765,7 +765,7 @@ private enum DiffSide: Equatable {
     case left, right
 }
 
-private struct VisibleDiffRow: Identifiable {
+struct VisibleDiffRow: Identifiable {
     let index: Int
     let row: DiffRowDto
 
