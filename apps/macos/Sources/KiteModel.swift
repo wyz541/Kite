@@ -749,7 +749,7 @@ final class KiteModel: ObservableObject {
     private static let columnViewRulesDefaultsKey = "kite.macos.column-view-rules-v1"
     private static let maxStoredColumnRules = 512
 
-    private let core: KiteCore
+    let core: KiteCore
     private var storedColumnViewRules: StoredColumnViewRules
     private var columnSearchGeneration: UInt64 = 0
     private var globalSearchGeneration: UInt64 = 0
