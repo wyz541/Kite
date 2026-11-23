@@ -175,6 +175,16 @@ struct KiteMacApp: App {
                 .disabled(model.updateInProgress)
             }
             CommandMenu("导航") {
+                Button("打开 Git 客户端") {
+                    KiteGitClientWindowController.shared.show(
+                        model: model,
+                        repositoryPath: model.currentPath
+                    )
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+
+                Divider()
+
                 Button("聚焦路径栏") {
                     model.focusAddress()
                 }

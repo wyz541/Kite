@@ -332,7 +332,7 @@ pub fn git_commit_details(path: &Path, hash: &str) -> Result<GitCommitDetails, S
     let signature_code = fields.next().unwrap_or("N").trim().to_string();
     let signer = nonempty(fields.next().unwrap_or_default());
     let key = nonempty(fields.next().unwrap_or_default());
-    let refs = refs_from_decorations(&decorations);
+    let refs = refs_from_decorations(decorations);
     let commit = GitLogCommit {
         hash: hash.clone(),
         short_hash,
@@ -826,10 +826,10 @@ fn cherry_picked_status(root: &Path, revision: &str) -> Option<bool> {
             if hash.trim() == revision {
                 return Some(true);
             }
-        } else if let Some(hash) = line.strip_prefix('+') {
-            if hash.trim() == revision {
-                return Some(false);
-            }
+        } else if let Some(hash) = line.strip_prefix('+')
+            && hash.trim() == revision
+        {
+            return Some(false);
         }
     }
     None

@@ -17,6 +17,7 @@ actions!(
         FocusAddress,
         FocusSearch,
         OpenGlobalSearch,
+        OpenGitClient,
         SetGlobalSearchScopeCurrentFolder,
         SetGlobalSearchScopeFavorites,
         SetGlobalSearchScopeLocalDisks,
@@ -48,6 +49,7 @@ actions!(
         CreateStartMenuShortcut,
         CheckForUpdates,
         OpenSettings,
+        OpenWorkspaceEditor,
         SaveEditor,
     ]
 );
@@ -120,6 +122,7 @@ pub struct ColumnPaneAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VcsMenuCommand {
+    GitClient,
     GitAdd,
     GitUnstage,
     GitCommit,

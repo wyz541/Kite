@@ -25,6 +25,7 @@ use crate::fs::{
 
 use crate::git_branches::GitHeadSummary;
 use crate::git_branches_window;
+use crate::git_client_window::open_git_client_window;
 use crate::git_log_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
@@ -43,6 +44,7 @@ use crate::vcs::{
     VcsOperation, VcsQuery, VcsTool, apply_statuses, load_vcs_snapshot, open_vcs_log_window,
     run_vcs_operation, run_vcs_query,
 };
+use crate::workspace_window::WorkspaceWindow;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{SelectableText, TextSelectionHandle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -1463,6 +1465,7 @@ impl KiteApp {
             KeyBinding::new("secondary-l", FocusAddress, Some("Kite")),
             KeyBinding::new("secondary-f", FocusSearch, Some("Kite")),
             KeyBinding::new("secondary-shift-f", OpenGlobalSearch, Some("Kite")),
+            KeyBinding::new("secondary-shift-g", OpenGitClient, Some("Kite")),
             KeyBinding::new("secondary-1", ShowListView, Some("Kite")),
             KeyBinding::new("secondary-2", ShowColumnsView, Some("Kite")),
             KeyBinding::new("secondary-t", NewTab, Some("Kite")),
@@ -1495,6 +1498,7 @@ impl KiteApp {
                 MenuItem::action("聚焦路径栏", FocusAddress),
                 MenuItem::separator(),
                 MenuItem::action("全局搜索…", OpenGlobalSearch),
+                MenuItem::action("打开 Git 客户端", OpenGitClient),
             ]),
             Menu::new("显示").items([
                 MenuItem::action("列表视图", ShowListView),
@@ -1504,6 +1508,7 @@ impl KiteApp {
             ]),
             Menu::new("Kite").items([
                 MenuItem::action("设置…", OpenSettings),
+                MenuItem::action("工作区编辑器…", OpenWorkspaceEditor),
                 MenuItem::separator(),
                 MenuItem::action("检查更新…", CheckForUpdates),
                 MenuItem::separator(),
@@ -2716,6 +2721,26 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn open_workspace_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.current_dir.clone();
+        let title = format!("Kite 工作区 — {}", root.display());
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some(title.into()),
+                ..Default::default()
+            }),
+            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+            window_min_size: Some(size(px(860.), px(560.))),
+            ..Default::default()
+        };
+        if let Err(error) = gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| WorkspaceWindow::new(root, window, cx))
+        }) {
+            self.error = Some(format!("无法打开工作区编辑器：{error}").into());
+        }
+        cx.notify();
+    }
+
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let shell_path = shell_fs::is_shell_namespace_path(&path);
         if path.is_dir() || (shell_path && shell_fs::is_directory(&path)) {
@@ -3226,6 +3251,19 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         match command {
+            VcsMenuCommand::GitClient => {
+                match open_git_client_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开 Git 客户端窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitAdd => {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Add, path, window, cx)
             }
@@ -4956,6 +4994,16 @@ impl KiteApp {
                 )
             })
             .child(
+                Button::new("open-workspace-editor")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::FilePen)
+                    .tooltip("打开工作区编辑器（目录树）")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_workspace_editor(window, cx)
+                    })),
+            )
+            .child(
                 Button::new("copy")
                     .ghost()
                     .compact()
@@ -5130,6 +5178,20 @@ impl KiteApp {
             Ok(()) => {
                 self.error = None;
                 self.notice = Some("已打开全局搜索窗口".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_git_client(&mut self, _: &OpenGitClient, _window: &mut Window, cx: &mut Context<Self>) {
+        match open_git_client_window(self.current_dir.clone(), cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("已打开 Git 客户端窗口".into());
             }
             Err(error) => {
                 self.notice = None;
@@ -8656,6 +8718,9 @@ impl Render for KiteApp {
             .on_action(cx.listener(|this, action: &OpenGlobalSearch, window, cx| {
                 this.open_global_search(action, window, cx)
             }))
+            .on_action(cx.listener(|this, action: &OpenGitClient, window, cx| {
+                this.open_git_client(action, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &CreateFolder, window, cx| this.begin_new_folder(window, cx)),
             )
@@ -8680,6 +8745,9 @@ impl Render for KiteApp {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings_window(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenWorkspaceEditor, window, cx| {
+                this.open_workspace_editor(window, cx)
             }))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::set_default_explorer))

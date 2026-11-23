@@ -769,8 +769,7 @@ fn parse_left_right_count(value: &str) -> (u32, u32) {
 fn parse_compare_commits(output: &[u8]) -> Vec<GitCompareCommit> {
     let mut commits = Vec::new();
     let mut fields = output.split(|byte| *byte == 0);
-    loop {
-        let Some(hash) = fields.next() else { break };
+    while let Some(hash) = fields.next() {
         let hash = String::from_utf8_lossy(hash).trim().to_string();
         if hash.is_empty() {
             continue;

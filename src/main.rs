@@ -16,6 +16,7 @@ mod file_clipboard;
 #[cfg(windows)]
 mod git_branches_window;
 #[cfg(windows)]
+mod git_client_window;
 mod git_log_window;
 #[cfg(windows)]
 mod global_search_window;
@@ -29,6 +30,8 @@ mod shell_fs;
 mod table;
 #[cfg(windows)]
 mod tabs;
+#[cfg(windows)]
+mod workspace_window;
 
 #[cfg(windows)]
 use app::KiteApp;
@@ -38,8 +41,8 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 #[cfg(windows)]
 pub use kite_core::{
-    archive, content_search, devices, favorites, fs, git_branches, platform, session, text_editor,
-    ui_preferences, update_notes, updater, vcs,
+    archive, content_search, devices, favorites, fs, git_branches, platform, plugins, session,
+    text_editor, ui_preferences, update_notes, updater, vcs,
 };
 #[cfg(windows)]
 use tabs::KiteWindow;

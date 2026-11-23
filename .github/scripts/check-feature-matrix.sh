@@ -19,6 +19,7 @@ required_features=(
   "设备浏览与写入"
   "预览 Git 状态"
   "Git 分支与标签"
+  "Git 客户端变更与行级暂存"
   "提交历史与提交图"
 )
 
@@ -57,5 +58,3 @@ if [[ "$failed" == true ]]; then
 fi
 
 echo "Feature matrix check passed."
-
-
