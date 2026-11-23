@@ -486,6 +486,12 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
             VcsMenuCommand::GitClient,
             enabled,
         ),
+        menu_item(
+            "合并与冲突解决…",
+            IconName::GitBranch,
+            VcsMenuCommand::GitMerge,
+            enabled,
+        ),
         ContextMenuNode::Separator,
         menu_item("添加", IconName::GitBranch, VcsMenuCommand::GitAdd, enabled),
         menu_item(
@@ -919,6 +925,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClient)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitMerge)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitAdd)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitUnstage)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitCommit)));

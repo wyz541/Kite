@@ -183,6 +183,13 @@ struct KiteMacApp: App {
                 }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
 
+                Button("合并与冲突解决…") {
+                    KiteGitMergeWindowController.shared.show(
+                        model: model,
+                        path: model.currentPath
+                    )
+                }
+
                 Divider()
 
                 Button("聚焦路径栏") {

@@ -662,6 +662,29 @@ impl GitClientWindow {
                         )
                     })
                     .child(
+                        Button::new("git-client-merge")
+                            .ghost()
+                            .compact()
+                            .label(
+                                if changes.is_some_and(|changes| {
+                                    changes.count(GitChangeGroup::Conflicted) > 0
+                                }) {
+                                    "解决冲突…"
+                                } else {
+                                    "合并…"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Err(error) = crate::git_merge_window::open_git_merge_window(
+                                    this.repository_root.clone(),
+                                    cx,
+                                ) {
+                                    this.error = Some(error.into());
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(
                         Button::new("git-client-refresh")
                             .ghost()
                             .compact()

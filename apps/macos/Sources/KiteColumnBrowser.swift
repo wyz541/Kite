@@ -1739,6 +1739,17 @@ private struct KiteEntryMenu: View {
             } label: {
                 Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
             }
+
+            Button {
+                KiteGitMergeWindowController.shared.show(
+                    model: model,
+                    path: entry.isDirectory
+                        ? entry.path
+                        : (entry.path as NSString).deletingLastPathComponent
+                )
+            } label: {
+                Label("合并与冲突解决…", systemImage: "arrow.triangle.merge")
+            }
         }
 
         Button {
@@ -1958,6 +1969,15 @@ private struct KiteDirectoryMenu: View {
                 )
             } label: {
                 Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
+            }
+
+            Button {
+                KiteGitMergeWindowController.shared.show(
+                    model: model,
+                    path: column.path
+                )
+            } label: {
+                Label("合并与冲突解决…", systemImage: "arrow.triangle.merge")
             }
         }
 

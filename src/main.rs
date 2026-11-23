@@ -19,6 +19,8 @@ mod git_branches_window;
 mod git_client_window;
 mod git_log_window;
 #[cfg(windows)]
+mod git_merge_window;
+#[cfg(windows)]
 mod git_tools_window;
 #[cfg(windows)]
 mod global_search_window;

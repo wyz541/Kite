@@ -20,6 +20,7 @@ required_features=(
   "预览 Git 状态"
   "Git 分支与标签"
   "Git 客户端变更与行级暂存"
+  "Git 合并与冲突解决"
   "提交历史与提交图"
   "Blame、Worktree 与 Submodule"
 )

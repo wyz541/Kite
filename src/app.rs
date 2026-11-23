@@ -3328,6 +3328,19 @@ impl KiteApp {
                 }
                 cx.notify();
             }
+            VcsMenuCommand::GitMerge => {
+                match crate::git_merge_window::open_git_merge_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开 Git 合并窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitTools => {
                 match git_tools_window::open_git_tools_window(cx.entity(), path.clone(), cx) {
                     Ok(()) => {

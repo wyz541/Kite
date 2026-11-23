@@ -291,6 +291,122 @@ pub struct GitDiffLineDto {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitMergeStrategyDto {
+    Merge,
+    NoFastForward,
+    FastForwardOnly,
+    Squash,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitMergeRequestDto {
+    pub target: String,
+    pub strategy: GitMergeStrategyDto,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitConflictKindDto {
+    BothModified,
+    ModifyDeleteOurs,
+    ModifyDeleteTheirs,
+    AddAdd,
+    Rename,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitConflictEntryDto {
+    pub path: String,
+    pub base_path: Option<String>,
+    pub ours_path: Option<String>,
+    pub theirs_path: Option<String>,
+    pub kind: GitConflictKindDto,
+    pub base_present: bool,
+    pub ours_present: bool,
+    pub theirs_present: bool,
+    pub binary: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitConflictStateDto {
+    pub repository_root: String,
+    pub operation: Option<String>,
+    pub entries: Vec<GitConflictEntryDto>,
+    pub can_continue: bool,
+    pub can_abort: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitMergeOutcomeDto {
+    pub message: String,
+    pub conflicts: Option<GitConflictStateDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitConflictSideDto {
+    Ours,
+    Theirs,
+    Both,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitConflictSidesDto {
+    pub base_text: Option<String>,
+    pub ours_text: Option<String>,
+    pub theirs_text: Option<String>,
+    pub base_present: bool,
+    pub ours_present: bool,
+    pub theirs_present: bool,
+    pub binary: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitMergeLineKindDto {
+    Context,
+    Ours,
+    Base,
+    Theirs,
+    Marker,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitMergeLineDto {
+    pub kind: GitMergeLineKindDto,
+    pub text: String,
+    pub conflict_index: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitMergeConflictHunkDto {
+    pub index: u32,
+    pub base_text: String,
+    pub ours_text: String,
+    pub theirs_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitThreeWayMergeDto {
+    pub merged_text: String,
+    pub lines: Vec<GitMergeLineDto>,
+    pub conflicts: Vec<GitMergeConflictHunkDto>,
+    pub binary: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitConflictChoiceSideDto {
+    Ours,
+    Theirs,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitConflictChoiceDto {
+    pub index: u32,
+    pub side: GitConflictChoiceSideDto,
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct GitBlameLineDto {
     pub line_number: u32,
@@ -1323,6 +1439,127 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    pub fn git_merge(
+        &self,
+        path: String,
+        request: GitMergeRequestDto,
+    ) -> Result<GitMergeOutcomeDto, KiteError> {
+        let strategy = match request.strategy {
+            GitMergeStrategyDto::Merge => git::GitMergeStrategy::Merge,
+            GitMergeStrategyDto::NoFastForward => git::GitMergeStrategy::NoFastForward,
+            GitMergeStrategyDto::FastForwardOnly => git::GitMergeStrategy::FastForwardOnly,
+            GitMergeStrategyDto::Squash => git::GitMergeStrategy::Squash,
+        };
+        git::GitService::shared()
+            .merge(
+                &PathBuf::from(path),
+                &git::GitMergeSpec {
+                    target: request.target,
+                    strategy,
+                    message: request.message,
+                },
+            )
+            .map(git_merge_outcome_dto)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_conflicts(&self, path: String) -> Result<Option<GitConflictStateDto>, KiteError> {
+        git::GitService::shared()
+            .conflicts(&PathBuf::from(path))
+            .map(|state| state.map(git_conflict_state_dto))
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_conflict_sides(
+        &self,
+        path: String,
+        conflict: GitConflictEntryDto,
+    ) -> Result<GitConflictSidesDto, KiteError> {
+        git::GitService::shared()
+            .conflict_sides(&PathBuf::from(path), &git_conflict_entry(conflict))
+            .map(git_conflict_sides_dto)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_three_way_merge(
+        &self,
+        path: String,
+        conflict: GitConflictEntryDto,
+    ) -> Result<GitThreeWayMergeDto, KiteError> {
+        git::GitService::shared()
+            .three_way_merge(&PathBuf::from(path), &git_conflict_entry(conflict))
+            .map(git_three_way_merge_dto)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_apply_conflict_choices(
+        &self,
+        merged_text: String,
+        choices: Vec<GitConflictChoiceDto>,
+    ) -> String {
+        let choices = choices
+            .into_iter()
+            .map(|choice| git::GitConflictChoice {
+                index: choice.index,
+                side: match choice.side {
+                    GitConflictChoiceSideDto::Ours => git::GitConflictChoiceSide::Ours,
+                    GitConflictChoiceSideDto::Theirs => git::GitConflictChoiceSide::Theirs,
+                    GitConflictChoiceSideDto::Both => git::GitConflictChoiceSide::Both,
+                },
+            })
+            .collect::<Vec<_>>();
+        git::apply_conflict_choices(&merged_text, &choices)
+    }
+
+    pub fn git_resolve_conflict(
+        &self,
+        path: String,
+        relative_path: String,
+        content: Option<String>,
+    ) -> Result<(), KiteError> {
+        git::GitService::shared()
+            .resolve_conflict(&PathBuf::from(path), &relative_path, content.as_deref())
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_choose_conflict_side(
+        &self,
+        path: String,
+        conflict: GitConflictEntryDto,
+        side: GitConflictSideDto,
+    ) -> Result<(), KiteError> {
+        let side = match side {
+            GitConflictSideDto::Ours => git::GitConflictSide::Ours,
+            GitConflictSideDto::Theirs => git::GitConflictSide::Theirs,
+            GitConflictSideDto::Both => git::GitConflictSide::Both,
+        };
+        git::GitService::shared()
+            .choose_conflict_side(&PathBuf::from(path), &git_conflict_entry(conflict), side)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_continue_operation(&self, path: String) -> Result<String, KiteError> {
+        git::GitService::shared()
+            .continue_operation(&PathBuf::from(path))
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_abort_operation(&self, path: String) -> Result<String, KiteError> {
+        git::GitService::shared()
+            .abort_operation(&PathBuf::from(path))
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_open_merge_tool(
+        &self,
+        path: String,
+        conflict: GitConflictEntryDto,
+    ) -> Result<String, KiteError> {
+        git::GitService::shared()
+            .open_merge_tool(&PathBuf::from(path), &git_conflict_entry(conflict))
+            .map_err(KiteError::from_git)
+    }
+
     pub fn git_blame(
         &self,
         path: String,
@@ -2104,6 +2341,115 @@ fn vcs_operation(operation: VcsOperationDto) -> VcsOperation {
         VcsOperationDto::Lock => VcsOperation::Lock,
         VcsOperationDto::Unlock => VcsOperation::Unlock,
         VcsOperationDto::Cleanup => VcsOperation::Cleanup,
+    }
+}
+
+fn git_merge_outcome_dto(outcome: git::GitMergeOutcome) -> GitMergeOutcomeDto {
+    GitMergeOutcomeDto {
+        message: outcome.message,
+        conflicts: outcome.conflicts.map(git_conflict_state_dto),
+    }
+}
+
+fn git_conflict_state_dto(state: git::GitConflictState) -> GitConflictStateDto {
+    GitConflictStateDto {
+        repository_root: state.repository_root.to_string_lossy().into_owned(),
+        operation: state
+            .operation
+            .map(|operation| operation.label().to_string()),
+        entries: state
+            .entries
+            .into_iter()
+            .map(git_conflict_entry_dto)
+            .collect(),
+        can_continue: state.can_continue,
+        can_abort: state.can_abort,
+    }
+}
+
+fn git_conflict_entry_dto(entry: git::GitConflictEntry) -> GitConflictEntryDto {
+    GitConflictEntryDto {
+        path: entry.path,
+        base_path: entry.base_path,
+        ours_path: entry.ours_path,
+        theirs_path: entry.theirs_path,
+        kind: match entry.kind {
+            git::GitConflictKind::BothModified => GitConflictKindDto::BothModified,
+            git::GitConflictKind::ModifyDeleteOurs => GitConflictKindDto::ModifyDeleteOurs,
+            git::GitConflictKind::ModifyDeleteTheirs => GitConflictKindDto::ModifyDeleteTheirs,
+            git::GitConflictKind::AddAdd => GitConflictKindDto::AddAdd,
+            git::GitConflictKind::Rename => GitConflictKindDto::Rename,
+            git::GitConflictKind::Other => GitConflictKindDto::Other,
+        },
+        base_present: entry.base_present,
+        ours_present: entry.ours_present,
+        theirs_present: entry.theirs_present,
+        binary: entry.binary,
+    }
+}
+
+fn git_conflict_entry(entry: GitConflictEntryDto) -> git::GitConflictEntry {
+    git::GitConflictEntry {
+        path: entry.path,
+        base_path: entry.base_path,
+        ours_path: entry.ours_path,
+        theirs_path: entry.theirs_path,
+        kind: match entry.kind {
+            GitConflictKindDto::BothModified => git::GitConflictKind::BothModified,
+            GitConflictKindDto::ModifyDeleteOurs => git::GitConflictKind::ModifyDeleteOurs,
+            GitConflictKindDto::ModifyDeleteTheirs => git::GitConflictKind::ModifyDeleteTheirs,
+            GitConflictKindDto::AddAdd => git::GitConflictKind::AddAdd,
+            GitConflictKindDto::Rename => git::GitConflictKind::Rename,
+            GitConflictKindDto::Other => git::GitConflictKind::Other,
+        },
+        base_present: entry.base_present,
+        ours_present: entry.ours_present,
+        theirs_present: entry.theirs_present,
+        binary: entry.binary,
+    }
+}
+
+fn git_conflict_sides_dto(sides: git::GitConflictSides) -> GitConflictSidesDto {
+    GitConflictSidesDto {
+        base_text: sides.base_text,
+        ours_text: sides.ours_text,
+        theirs_text: sides.theirs_text,
+        base_present: sides.base_present,
+        ours_present: sides.ours_present,
+        theirs_present: sides.theirs_present,
+        binary: sides.binary,
+    }
+}
+
+fn git_three_way_merge_dto(merge: git::GitThreeWayMerge) -> GitThreeWayMergeDto {
+    GitThreeWayMergeDto {
+        merged_text: merge.merged_text,
+        lines: merge
+            .lines
+            .into_iter()
+            .map(|line| GitMergeLineDto {
+                kind: match line.kind {
+                    git::GitMergeLineKind::Context => GitMergeLineKindDto::Context,
+                    git::GitMergeLineKind::Ours => GitMergeLineKindDto::Ours,
+                    git::GitMergeLineKind::Base => GitMergeLineKindDto::Base,
+                    git::GitMergeLineKind::Theirs => GitMergeLineKindDto::Theirs,
+                    git::GitMergeLineKind::Marker => GitMergeLineKindDto::Marker,
+                },
+                text: line.text,
+                conflict_index: line.conflict_index,
+            })
+            .collect(),
+        conflicts: merge
+            .conflicts
+            .into_iter()
+            .map(|conflict| GitMergeConflictHunkDto {
+                index: conflict.index,
+                base_text: conflict.base_text,
+                ours_text: conflict.ours_text,
+                theirs_text: conflict.theirs_text,
+            })
+            .collect(),
+        binary: merge.binary,
     }
 }
 

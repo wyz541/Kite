@@ -154,14 +154,19 @@ struct KiteGitPreviewSection: View {
 
     private func actions(_ summary: GitPathSummaryDto) -> some View {
         let changed = summary.stagedStatus != nil || summary.unstagedStatus != nil
+        let conflicted = summary.stagedCode == "C" || summary.unstagedCode == "C"
         return HStack(spacing: 6) {
             if changed {
                 actionButton(diffVisible ? "隐藏差异" : "查看差异") { toggleDiff() }
             }
-            if summary.unstagedStatus != nil {
+            if conflicted {
+                actionButton("解决冲突") {
+                    KiteGitMergeWindowController.shared.show(model: model, path: entry.path)
+                }
+            } else if summary.unstagedStatus != nil {
                 actionButton("暂存") { run(.add) }
             }
-            if summary.stagedStatus != nil {
+            if !conflicted && summary.stagedStatus != nil {
                 actionButton("取消暂存") { run(.unstage) }
             }
             actionButton(blameVisible ? "隐藏 Blame" : "Blame") { toggleBlame() }

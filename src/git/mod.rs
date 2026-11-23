@@ -9,6 +9,7 @@ mod command;
 mod error;
 mod events;
 mod external;
+mod merge;
 mod operation;
 mod repository;
 mod status;
@@ -38,6 +39,11 @@ pub use events::{
     GitCredentialKind, GitCredentialProvider, GitCredentialRequest, GitEvent, GitEventSink,
     GitOperationState, GitOutputStream, NoopGitCredentialProvider, NoopGitEventSink,
     SharedCredentialProvider, SharedEventSink,
+};
+pub use merge::{
+    GitConflictChoice, GitConflictChoiceSide, GitConflictEntry, GitConflictKind, GitConflictSide,
+    GitConflictSides, GitConflictState, GitMergeConflictHunk, GitMergeLine, GitMergeLineKind,
+    GitMergeOutcome, GitMergeSpec, GitMergeStrategy, GitThreeWayMerge, apply_conflict_choices,
 };
 pub use operation::{GitOperation, GitOperationResult, GitQuery, execute_operation, execute_query};
 pub use preview::{
@@ -87,6 +93,10 @@ impl GitService {
 
     pub fn console(&self) -> Arc<GitConsole> {
         self.executor.console()
+    }
+
+    pub(crate) fn executor(&self) -> &GitExecutor {
+        &self.executor
     }
 
     pub fn console_entries(&self) -> Vec<GitConsoleEntry> {

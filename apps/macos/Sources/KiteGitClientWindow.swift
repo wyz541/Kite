@@ -157,6 +157,13 @@ private struct KiteGitClientWindowView: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                Button(changes?.conflictedCount ?? 0 > 0 ? "解决冲突…" : "合并…") {
+                    KiteGitMergeWindowController.shared.show(
+                        model: model,
+                        path: repositoryPath
+                    )
+                }
+                .controlSize(.small)
                 Button {
                     Task { await loadChanges() }
                 } label: {

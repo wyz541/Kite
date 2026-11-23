@@ -440,3 +440,46 @@ Git Core 测试共享 `src/test_support.rs` 的临时目录和本地仓库工具
 - macOS：`apps/macos/Sources/KiteGitClientWindow.swift`，从文件或目录右键 Git 菜单进入。
 - 两端均可用 `Ctrl+Shift+G` / `Cmd+Shift+G` 从当前目录打开。
 - 两端均支持路径筛选、目录树/平铺切换、文件/目录/Hunk/行级暂存与取消暂存、丢弃、忽略规则和 CRLF 提示。
+
+## 合并与冲突解决
+
+### 合并
+
+`src/git/merge.rs` 在共享 `GitService` 上实现普通、`--no-ff`、`--ff-only` 和 `--squash` 合并。目标分支、标签或提交先通过 `rev-parse --verify <target>^{commit}` 校验；所有参数以独立 argv 元素传递，拒绝以 `-` 开头的目标。
+
+普通合并和保留合并提交可传入自定义说明。压缩合并只有填写说明时才创建提交；说明留空时只暂存结果。
+
+### 冲突模型
+
+`GitService::conflicts(path)` 使用 `git ls-files -u -z` 返回 stage、OID、路径和冲突类型：
+
+- 双方修改、双方新增、自己删除、对方删除、重命名和其他冲突。
+- 每个冲突的基线、自己、对方路径及是否存在。
+- 二进制标记；检测到 NUL 或非 UTF-8 内容时只允许整文件选择。
+- 进行中的 merge、rebase、cherry-pick、revert 或 bisect 状态。
+- 是否可继续或中止。
+
+重命名冲突通过 stage 1/2/3 的独立路径分组；状态输出只用于恢复重命名组顺序，普通冲突记录不会干扰分组。
+
+### 三方合并
+
+`three_way_merge(path, conflict)` 将三方内容写入临时文件并调用 `git merge-file --diff3`。结果包含：
+
+- 带冲突标记的完整合并文本。
+- 按行标记的上下文、自己、基线、对方和标记行。
+- 每个冲突块的基线与双方版本。
+
+UI 可逐块选择自己、对方或两边，也可切换到手动编辑。`apply_conflict_choices` 生成最终文本；`resolve_conflict` 拒绝仍含冲突标记的内容，写回后执行 `git add -A -- <path>`。删除型选择会移除文件并暂存删除。
+
+### 继续、中止与外部工具
+
+- `continue_operation` 对 merge、rebase、cherry-pick 和 revert 使用非交互编辑器设置继续。
+- `abort_operation` 支持 merge、rebase、cherry-pick、revert 和 bisect。
+- `open_merge_tool` 只启动用户配置的 `merge.tool`，未配置时返回可操作错误。
+
+### 界面
+
+- Windows：`src/git_merge_window.rs`，从 Git 客户端“合并…”或“解决冲突…”进入。
+- macOS：`apps/macos/Sources/KiteGitMergeWindow.swift`，从 Git 菜单、文件/目录右键菜单或 Git 客户端进入。
+- 冲突文件列表使用红色状态，文本冲突显示自己、对方和合并结果三列；当前冲突块高亮并可前后跳转。
+- 二进制和重命名冲突提供整文件选择；文本冲突支持逐块选择与手动编辑。

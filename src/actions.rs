@@ -123,6 +123,7 @@ pub struct ColumnPaneAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VcsMenuCommand {
     GitClient,
+    GitMerge,
     GitTools,
     GitAdd,
     GitUnstage,
