@@ -287,7 +287,7 @@ final class KiteGitLogWindowController: NSWindowController, NSWindowDelegate {
                 defer: false
             )
             historyWindow.titlebarAppearsTransparent = true
-            historyWindow.minSize = NSSize(width: 1120, height: 600)
+            historyWindow.minSize = NSSize(width: 1240, height: 600)
             historyWindow.isReleasedWhenClosed = false
             historyWindow.delegate = self
             historyWindow.center()
@@ -329,6 +329,10 @@ private struct KiteGitLogWindowView: View {
                     .fill(Color.primary.opacity(0.08))
                     .frame(height: 0.5)
                 HStack(spacing: 0) {
+                    branchSidebar
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 0.5)
                     commitList
                     Rectangle()
                         .fill(Color.primary.opacity(0.08))
@@ -343,7 +347,7 @@ private struct KiteGitLogWindowView: View {
                 statusBar
             }
         }
-        .frame(minWidth: 1120, minHeight: 600)
+        .frame(minWidth: 1240, minHeight: 600)
         .task {
             await viewModel.reload()
         }
@@ -572,6 +576,141 @@ private struct KiteGitLogWindowView: View {
 }
 
 private extension KiteGitLogWindowView {
+    var branchSidebar: some View {
+        let references = viewModel.context?.refs ?? []
+        let localBranches = references.filter { $0.kind == .localBranch }
+        let remoteBranches = references.filter { $0.kind == .remoteBranch }
+        let tags = references.filter { $0.kind == .tag }
+
+        return VStack(spacing: 0) {
+            HStack(spacing: 7) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("分支树")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("\(references.count)")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    referenceRow(
+                        label: "全部分支",
+                        fullName: nil,
+                        icon: "square.stack.3d.up",
+                        isHead: false
+                    )
+                    referenceGroup(
+                        title: "本地分支",
+                        references: localBranches,
+                        icon: "arrow.triangle.branch"
+                    )
+                    referenceGroup(
+                        title: "远程分支",
+                        references: remoteBranches,
+                        icon: "cloud"
+                    )
+                    referenceGroup(
+                        title: "标签",
+                        references: tags,
+                        icon: "tag"
+                    )
+                }
+                .padding(8)
+            }
+        }
+        .frame(width: 218)
+        .background(Color.primary.opacity(0.025))
+    }
+
+    func referenceGroup(
+        title: String,
+        references: [GitRefDto],
+        icon: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(references.count)")
+            }
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+
+            if references.isEmpty {
+                Text("无")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 30)
+                    .frame(height: 22)
+            } else {
+                ForEach(references, id: \.fullName) { reference in
+                    referenceRow(
+                        label: reference.name,
+                        fullName: reference.fullName,
+                        icon: icon,
+                        isHead: reference.isHead
+                    )
+                }
+            }
+        }
+    }
+
+    func referenceRow(
+        label: String,
+        fullName: String?,
+        icon: String,
+        isHead: Bool
+    ) -> some View {
+        let selected = viewModel.branch == fullName
+        return Button {
+            chooseBranch(fullName)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .frame(width: 14)
+                Text(label)
+                    .font(.system(size: 11.5))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                if isHead {
+                    Text("HEAD")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selected ? Color.accentColor.opacity(0.14) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+    }
+
+    func chooseBranch(_ fullName: String?) {
+        guard viewModel.branch != fullName else { return }
+        viewModel.branch = fullName
+        Task { await viewModel.reload() }
+    }
+
     var commitList: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {

@@ -1152,6 +1152,15 @@ mod tests {
         };
         let branch_page = git_log_page(&root, branch_filter, None, 10).expect("branch filter");
         assert_eq!(branch_page.commits.len(), 2);
+
+        git_ok(&root, &["tag", "v1.0"]);
+        let tag_filter = GitLogFilter {
+            branch: Some("refs/tags/v1.0".to_string()),
+            ..GitLogFilter::default()
+        };
+        let tag_page = git_log_page(&root, tag_filter, None, 10).expect("tag filter");
+        assert_eq!(tag_page.commits.len(), 2);
+
         let context = git_log_context(&root).expect("context");
         assert_eq!(context.current_branch.as_deref(), Some("main"));
         assert!(
@@ -1159,6 +1168,12 @@ mod tests {
                 .refs
                 .iter()
                 .any(|item| item.name == "main" && item.is_head)
+        );
+        assert!(
+            context
+                .refs
+                .iter()
+                .any(|item| item.name == "v1.0" && item.kind == GitRefKind::Tag)
         );
 
         let first = git_log_page(&root, GitLogFilter::default(), None, 1).expect("first page");
