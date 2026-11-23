@@ -257,10 +257,7 @@ struct KiteGitPreviewSection: View {
     }
 
     private func showLog() {
-        let path = entry.path
-        Task {
-            await model.openVcsLog(tool: .git, path: path)
-        }
+        model.openGitLog(path: entry.path)
     }
 
     private func branchLine(_ summary: GitPathSummaryDto) -> String {

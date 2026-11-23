@@ -11,6 +11,10 @@ use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, transfer_entry};
 use crate::git::GitEventSink as _;
+use crate::git::log::{
+    self as git_log, GitChangedFile, GitCommitDetails, GitGraphRow, GitLogCommit, GitLogFilter,
+    GitLogPage, GitRef, GitRefKind as GitLogRefKind, GitSignature, GitTreeEntry,
+};
 use crate::git::{self, GitDiffLine, GitDiffLineKind, GitPathSummary};
 use crate::git_branches::{
     self, GitBranch, GitBranchSnapshot, GitCompareCommit, GitCompareFile, GitCompareResult,
@@ -299,6 +303,7 @@ pub enum GitRefKindDto {
     RemoteBranch,
     Tag,
     Commit,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
@@ -528,6 +533,109 @@ pub trait GitEventCallback: Send + Sync {
 #[uniffi::export(callback_interface)]
 pub trait GitCredentialCallback: Send + Sync {
     fn request_credential(&self, request: GitCredentialRequestDto) -> Option<String>;
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRefDto {
+    pub name: String,
+    pub full_name: String,
+    pub kind: GitRefKindDto,
+    pub is_head: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitLogContextDto {
+    pub repository_root: String,
+    pub current_branch: Option<String>,
+    pub head_hash: Option<String>,
+    pub head_short_hash: Option<String>,
+    pub refs: Vec<GitRefDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitLogFilterDto {
+    pub branch: Option<String>,
+    pub author: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub path: Option<String>,
+    pub text: Option<String>,
+    pub regex: bool,
+    pub hash: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitGraphEdgeDto {
+    pub from_lane: u32,
+    pub to_lane: u32,
+    pub color_index: u32,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitGraphRowDto {
+    pub lane: u32,
+    pub lane_count: u32,
+    pub color_index: u32,
+    pub edges: Vec<GitGraphEdgeDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitLogCommitDto {
+    pub hash: String,
+    pub short_hash: String,
+    pub parents: Vec<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub authored_at: i64,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub committed_at: i64,
+    pub subject: String,
+    pub refs: Vec<GitRefDto>,
+    pub graph: GitGraphRowDto,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitLogPageDto {
+    pub repository_root: String,
+    pub commits: Vec<GitLogCommitDto>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub loaded_count: u64,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitSignatureDto {
+    pub status_code: String,
+    pub status_label: String,
+    pub signer: Option<String>,
+    pub key: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitChangedFileDto {
+    pub status: String,
+    pub path: String,
+    pub old_path: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCommitDetailsDto {
+    pub commit: GitLogCommitDto,
+    pub body: String,
+    pub signature: GitSignatureDto,
+    pub branches_containing: Vec<String>,
+    pub changed_files: Vec<GitChangedFileDto>,
+    pub cherry_picked: Option<bool>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitTreeEntryDto {
+    pub path: String,
+    pub name: String,
+    pub mode: String,
+    pub object_hash: String,
+    pub size: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -1215,6 +1323,66 @@ impl KiteCore {
             }
         }
     }
+
+    pub fn git_log_context(&self, path: String) -> Result<GitLogContextDto, KiteError> {
+        git_log::git_log_context(&PathBuf::from(path))
+            .map(git_log_context_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_log_page(
+        &self,
+        path: String,
+        filter: GitLogFilterDto,
+        cursor: Option<String>,
+        page_size: u32,
+    ) -> Result<GitLogPageDto, KiteError> {
+        git_log::git_log_page(
+            &PathBuf::from(path),
+            git_log_filter(filter),
+            cursor.as_deref(),
+            page_size,
+        )
+        .map(git_log_page_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_commit_details(
+        &self,
+        path: String,
+        hash: String,
+    ) -> Result<GitCommitDetailsDto, KiteError> {
+        git_log::git_commit_details(&PathBuf::from(path), &hash)
+            .map(git_commit_details_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_commit_tree(
+        &self,
+        path: String,
+        hash: String,
+    ) -> Result<Vec<GitTreeEntryDto>, KiteError> {
+        git_log::git_commit_tree(&PathBuf::from(path), &hash)
+            .map(|entries| entries.into_iter().map(git_tree_entry_dto).collect())
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_file_history(
+        &self,
+        path: String,
+        relative_path: String,
+        cursor: Option<String>,
+        page_size: u32,
+    ) -> Result<GitLogPageDto, KiteError> {
+        git_log::git_file_history(
+            &PathBuf::from(path),
+            &relative_path,
+            cursor.as_deref(),
+            page_size,
+        )
+        .map(git_log_page_dto)
+        .map_err(KiteError::operation)
+    }
 }
 
 struct CallbackEventSink(Box<dyn GitEventCallback>);
@@ -1620,6 +1788,7 @@ fn git_ref_kind(kind: GitRefKindDto) -> GitRefKind {
         GitRefKindDto::RemoteBranch => GitRefKind::RemoteBranch,
         GitRefKindDto::Tag => GitRefKind::Tag,
         GitRefKindDto::Commit => GitRefKind::Commit,
+        GitRefKindDto::Other => GitRefKind::Commit,
     }
 }
 
@@ -1668,6 +1837,41 @@ fn git_branch_snapshot_dto(snapshot: GitBranchSnapshot) -> GitBranchSnapshotDto 
             .worktrees
             .into_iter()
             .map(git_worktree_dto)
+            .collect(),
+    }
+}
+
+fn git_ref_kind_dto(kind: GitLogRefKind) -> GitRefKindDto {
+    match kind {
+        GitLogRefKind::LocalBranch => GitRefKindDto::LocalBranch,
+        GitLogRefKind::RemoteBranch => GitRefKindDto::RemoteBranch,
+        GitLogRefKind::Tag => GitRefKindDto::Tag,
+        GitLogRefKind::Other => GitRefKindDto::Other,
+    }
+}
+
+fn git_ref_dto(reference: GitRef) -> GitRefDto {
+    GitRefDto {
+        name: reference.name,
+        full_name: reference.full_name,
+        kind: git_ref_kind_dto(reference.kind),
+        is_head: reference.is_head,
+    }
+}
+
+fn git_graph_row_dto(row: GitGraphRow) -> GitGraphRowDto {
+    GitGraphRowDto {
+        lane: row.lane,
+        lane_count: row.lane_count,
+        color_index: row.color_index,
+        edges: row
+            .edges
+            .into_iter()
+            .map(|edge| GitGraphEdgeDto {
+                from_lane: edge.from_lane,
+                to_lane: edge.to_lane,
+                color_index: edge.color_index,
+            })
             .collect(),
     }
 }
@@ -1744,6 +1948,99 @@ fn git_compare_file_dto(file: GitCompareFile) -> GitCompareFileDto {
         deletions: file.deletions,
     }
 }
+
+fn git_log_commit_dto(commit: GitLogCommit) -> GitLogCommitDto {
+    GitLogCommitDto {
+        hash: commit.hash,
+        short_hash: commit.short_hash,
+        parents: commit.parents,
+        author_name: commit.author_name,
+        author_email: commit.author_email,
+        authored_at: commit.authored_at,
+        committer_name: commit.committer_name,
+        committer_email: commit.committer_email,
+        committed_at: commit.committed_at,
+        subject: commit.subject,
+        refs: commit.refs.into_iter().map(git_ref_dto).collect(),
+        graph: git_graph_row_dto(commit.graph),
+    }
+}
+
+fn git_log_context_dto(context: git_log::GitLogContext) -> GitLogContextDto {
+    GitLogContextDto {
+        repository_root: context.repository_root.to_string_lossy().into_owned(),
+        current_branch: context.current_branch,
+        head_hash: context.head_hash,
+        head_short_hash: context.head_short_hash,
+        refs: context.refs.into_iter().map(git_ref_dto).collect(),
+    }
+}
+
+fn git_log_filter(filter: GitLogFilterDto) -> GitLogFilter {
+    GitLogFilter {
+        branch: filter.branch,
+        author: filter.author,
+        since: filter.since,
+        until: filter.until,
+        path: filter.path,
+        text: filter.text,
+        regex: filter.regex,
+        hash: filter.hash,
+    }
+}
+
+fn git_log_page_dto(page: GitLogPage) -> GitLogPageDto {
+    GitLogPageDto {
+        repository_root: page.repository_root.to_string_lossy().into_owned(),
+        commits: page.commits.into_iter().map(git_log_commit_dto).collect(),
+        has_more: page.has_more,
+        next_cursor: page.next_cursor,
+        loaded_count: page.loaded_count,
+    }
+}
+
+fn git_signature_dto(signature: GitSignature) -> GitSignatureDto {
+    GitSignatureDto {
+        status_label: signature.status_label().to_string(),
+        status_code: signature.status_code,
+        signer: signature.signer,
+        key: signature.key,
+    }
+}
+
+fn git_changed_file_dto(file: GitChangedFile) -> GitChangedFileDto {
+    GitChangedFileDto {
+        status: file.status,
+        path: file.path,
+        old_path: file.old_path,
+    }
+}
+
+fn git_commit_details_dto(details: GitCommitDetails) -> GitCommitDetailsDto {
+    GitCommitDetailsDto {
+        commit: git_log_commit_dto(details.commit),
+        body: details.body,
+        signature: git_signature_dto(details.signature),
+        branches_containing: details.branches_containing,
+        changed_files: details
+            .changed_files
+            .into_iter()
+            .map(git_changed_file_dto)
+            .collect(),
+        cherry_picked: details.cherry_picked,
+    }
+}
+
+fn git_tree_entry_dto(entry: GitTreeEntry) -> GitTreeEntryDto {
+    GitTreeEntryDto {
+        path: entry.path,
+        name: entry.name,
+        mode: entry.mode,
+        object_hash: entry.object_hash,
+        size: entry.size,
+    }
+}
+
 fn text_document_dto(document: TextDocument) -> TextDocumentDto {
     TextDocumentDto {
         path: document.path.to_string_lossy().into_owned(),
@@ -2131,5 +2428,51 @@ mod tests {
         assert_eq!(progress.downloaded_bytes, 0);
         assert_eq!(progress.total_bytes, 0);
         assert!(!progress.active);
+    }
+
+    #[test]
+    fn git_log_dto_preserves_shared_graph_contract() {
+        let page = crate::git::log::GitLogPage {
+            repository_root: PathBuf::from(r"C:\repo"),
+            commits: vec![GitLogCommit {
+                hash: "abcdef".to_string(),
+                short_hash: "abcdef".to_string(),
+                parents: vec!["123456".to_string()],
+                author_name: "Author".to_string(),
+                author_email: "author@example.test".to_string(),
+                authored_at: 1,
+                committer_name: "Committer".to_string(),
+                committer_email: "committer@example.test".to_string(),
+                committed_at: 2,
+                subject: "subject".to_string(),
+                refs: vec![GitRef {
+                    name: "main".to_string(),
+                    full_name: "refs/heads/main".to_string(),
+                    kind: GitLogRefKind::LocalBranch,
+                    is_head: true,
+                }],
+                graph: GitGraphRow {
+                    lane: 1,
+                    lane_count: 2,
+                    color_index: 3,
+                    edges: vec![crate::git::log::GitGraphEdge {
+                        from_lane: 0,
+                        to_lane: 1,
+                        color_index: 2,
+                    }],
+                },
+            }],
+            has_more: true,
+            next_cursor: Some("cursor".to_string()),
+            loaded_count: 1,
+        };
+        let dto = git_log_page_dto(page);
+        assert_eq!(dto.commits[0].graph.lane, 1);
+        assert_eq!(dto.commits[0].graph.lane_count, 2);
+        assert_eq!(dto.commits[0].graph.color_index, 3);
+        assert_eq!(dto.commits[0].graph.edges[0].from_lane, 0);
+        assert_eq!(dto.commits[0].graph.edges[0].to_lane, 1);
+        assert_eq!(dto.commits[0].refs[0].kind, GitRefKindDto::LocalBranch);
+        assert_eq!(dto.next_cursor.as_deref(), Some("cursor"));
     }
 }

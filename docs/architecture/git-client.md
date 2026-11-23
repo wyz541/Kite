@@ -7,16 +7,16 @@ Kite 的 Git 能力分两层交付：
 - 预览层：文件预览显示所选文件的 Git 状态、最近提交、增删行数和工作区差异。
 - 客户端层：独立 Git 客户端窗口，能力参照 DetachHead/rebased。
 
-本文件记录当前已实现的 Core Git 服务、FFI 事件边界、仓库模型和后续客户端拆分。客户端层的其余拆分见 #115 的子 issue #116–#129。
+本文件记录当前已实现的 Core Git 服务、FFI 事件边界、仓库模型、预览层、提交历史视图和后续客户端拆分。客户端层的其余拆分见 #115 的子 issue #116–#129。
 
 ## 跨平台边界
 
 Git 逻辑只在 Rust Core 实现一次。
 
-- Core：`src/git/` 提供命令执行器、仓库发现、状态、操作、凭据桥、控制台和仓库监听。`src/vcs.rs` 只保留 SVN 实现及共享的 VCS 枚举。
-- FFI：`src/ffi.rs` 导出 `GitService`、同步操作、后台 `GitOperationHandle`、`GitRepositoryWatchHandle`，以及进度、凭据、错误和仓库状态事件回调。
-- Windows：GPUI 的 Git 菜单写入和查询委托给 `kite_core::git::GitService`。SVN 继续走 `vcs.rs`。
-- macOS：现有 `run_vcs_operation` / `run_vcs_query` 已补齐并委托给同一 Git 服务；SwiftUI 预览继续使用 `git_path_summary` 和 `git_file_diff`。
+- Core：`src/git/` 提供命令执行器、仓库发现、状态、操作、凭据桥、控制台和仓库监听；`src/git/log.rs` 负责分页日志、提交图、提交详情、文件树和文件历史。`src/vcs.rs` 只保留 SVN 实现及共享的 VCS 枚举。
+- FFI：`src/ffi.rs` 导出 `GitService`、同步操作、后台 `GitOperationHandle`、`GitRepositoryWatchHandle`、提交历史 API，以及进度、凭据、错误和仓库状态事件回调。
+- Windows：GPUI 的 Git 菜单写入和查询委托给 `kite_core::git::GitService`，提交历史窗口直接调用 `kite_core::git::log`。SVN 继续走 `vcs.rs`。
+- macOS：SwiftUI `KiteGitPreviewSection` 与 `KiteGitLogWindowView` 通过 `KiteModel` 调用同一组 FFI。
 
 ## 服务边界
 
@@ -133,6 +133,15 @@ Windows UI 和 FFI 都读取同一个 `GitService` 控制台快照。
 - `GitService.console_entries()`
 - `GitService.clear_console()`
 
+### 提交历史
+
+- `git_log_context(path)`
+- `git_log_page(path, filter, cursor, page_size)`
+- `git_commit_details(path, hash)`
+- `git_commit_tree(path, hash)`
+- `git_file_history(path, relative_path, cursor, page_size)`
+
+这些接口由 `src/git/log.rs` 生成，底层命令统一经过 `GitService` 的共享执行器。
 ### 同步与后台写入
 
 - `GitService.run_operation(path, operation, events, credentials)`
@@ -199,6 +208,66 @@ Windows UI 和 FFI 都读取同一个 `GitService` 控制台快照。
 
 状态颜色沿用分栏徽标的配色：冲突、删除为红色；新增、重命名为绿色；修改为橙色；未跟踪为青色。
 
+## 提交历史与提交图
+
+### 分页
+
+`git_log_page(path, filter, cursor, page_size)` 每页最多返回 1,000 条，UI 默认使用 200 条。游标是 Core 生成的 JSON 字符串，包含：
+
+- 当前筛选条件；
+- 已读取的提交数量；
+- 活跃泳道的待处理父提交哈希；
+- 泳道颜色序号。
+
+筛选条件或仓库变化后，旧游标会被拒绝。两端都不解析游标内容，只在下一次请求时原样传回。
+
+### 排序与首屏
+
+查询使用 Git 默认倒序，而不是 `--topo-order`。100,000 提交夹具上，默认倒序约 134 ms，`--topo-order` 约 1,024 ms；后者必须扫描完整历史，无法满足首屏预算。提交图仍然只根据 `%P` 父提交哈希计算，因此两端使用同一份泳道与连边数据。
+
+首屏加载第一页后，UI 立即后台预取第二页。Windows 使用 `uniform_list`，macOS 使用 `LazyVStack`，仅渲染可见行。
+
+性能数据见 [Git 提交历史性能](../performance/git-log-v0.6.88.md)。
+
+### 图布局
+
+`layout_commit` 维护一组活跃泳道。每个泳道保存待处理父提交和颜色序号：
+
+- 首个匹配泳道成为提交节点；
+- 多个泳道等待同一提交时，额外泳道合并到节点并绘制连边；
+- 第一父提交沿用节点泳道和颜色；
+- 额外父提交复用已有泳道，或分配新泳道和颜色；
+- 根提交关闭泳道；
+- 所有存活泳道生成跨行竖线。
+
+布局状态写入游标，因此跨页读取与一次读取相同提交序列得到完全相同的图。快照测试覆盖线性历史、普通合并、多父合并、多个根提交、长分支和跨页稳定性。
+
+### 提交详情
+
+`git_commit_details(path, hash)` 返回：
+
+- 完整提交说明；
+- 作者、提交者、父提交和引用；
+- Git `%G?` 签名状态、签名者和 key；
+- 包含该提交的本地和远程分支；
+- 相对第一父提交的变更文件；
+- 上游补丁等价检测结果。
+
+`git_commit_tree(path, hash)` 返回该提交的扁平文件树；`git_file_history(path, relative_path, cursor, page_size)` 使用路径筛选复用日志分页。
+
+### 界面
+
+两端提供相同能力：
+
+- 提交图、引用标签、标题、作者、日期、哈希；
+- 分支、作者、日期、路径、文本/正则和哈希筛选；
+- 提交详情、签名、父提交、包含分支、变更文件；
+- 提交时文件树和单文件历史；
+- 右键复制哈希和在提交时浏览文件；
+- 分页懒加载与下一页预取。
+
+引用颜色由类型决定：当前分支使用强调色，本地分支绿色，远程分支紫色，标签黄色。泳道颜色在提交之间保持稳定，并由 Core 的 `color_index` 决定。
+
 ## 后端选型
 
 P0 采用 **git CLI 作为唯一读写后端**。
@@ -248,6 +317,6 @@ Core 测试覆盖：
 
 - hunk/行级暂存：#119。
 - 并排差异和语法高亮：#121。
-- 提交图和完整日志：#122。
 - blame：#128。
 - 预览打开时延和 gix/CLI 对比：#129。
+
