@@ -524,7 +524,7 @@ pub(crate) fn vcs_badge(icon: IconName, status: VcsStatus) -> AnyElement {
         .into_any_element()
 }
 
-fn vcs_status_color(status: VcsStatus) -> Hsla {
+pub(crate) fn vcs_status_color(status: VcsStatus) -> Hsla {
     match status {
         VcsStatus::Modified | VcsStatus::PropertyModified => rgb(0xe5a84b).into(),
         VcsStatus::Added | VcsStatus::Renamed => rgb(0x55b978).into(),

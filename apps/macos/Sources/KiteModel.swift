@@ -1690,6 +1690,199 @@ final class KiteModel: ObservableObject {
         volumes = core.devices().volumes
     }
 
+    // MARK: - Git
+
+    func isGitAvailable(forEntryPath path: String) -> Bool {
+        let parent = (path as NSString).deletingLastPathComponent
+        return columns.contains { $0.gitAvailable && $0.path == parent }
+    }
+
+    func gitPathSummary(path: String) async -> GitPathSummaryDto? {
+        let core = self.core
+        return try? await Task.detached(priority: .utility) {
+            try core.gitPathSummary(path: path)
+        }.value
+    }
+
+    func gitFileDiff(path: String) async throws -> [GitDiffLineDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitFileDiff(path: path)
+        }.value
+    }
+
+    func gitRepositoryChanges(
+        path: String,
+        includeIgnored: Bool
+    ) async throws -> GitRepositoryChangesDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRepositoryChanges(path: path, includeIgnored: includeIgnored)
+        }.value
+    }
+
+    func gitChangesDiff(
+        repositoryRoot: String,
+        path: String,
+        scope: GitDiffScopeDto
+    ) async throws -> GitFileChangesDiffDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitChangesDiff(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                scope: scope
+            )
+        }.value
+    }
+
+    func gitStageLines(
+        repositoryRoot: String,
+        path: String,
+        selections: [GitLineSelectionDto]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitStageLines(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                selections: selections
+            )
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitUnstageLines(
+        repositoryRoot: String,
+        path: String,
+        selections: [GitLineSelectionDto]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitUnstageLines(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                selections: selections
+            )
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitDiscardLines(
+        repositoryRoot: String,
+        path: String,
+        selections: [GitLineSelectionDto]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitDiscardLines(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                selections: selections
+            )
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitStagePaths(
+        repositoryRoot: String,
+        paths: [String]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitStagePaths(repositoryRoot: repositoryRoot, paths: paths)
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitUnstagePaths(
+        repositoryRoot: String,
+        paths: [String]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitUnstagePaths(repositoryRoot: repositoryRoot, paths: paths)
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitDiscardPaths(
+        repositoryRoot: String,
+        paths: [String]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitDiscardPaths(repositoryRoot: repositoryRoot, paths: paths)
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitAddToGitignore(
+        repositoryRoot: String,
+        path: String,
+        pattern: String?,
+        localExclude: Bool
+    ) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitAddToGitignore(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                pattern: pattern,
+                localExclude: localExclude
+            )
+        }.value
+        refresh()
+        return message
+    }
+
+    /// Runs a Git or SVN operation, refreshes the columns, and returns the
+    /// status message for the caller to show.
+    @discardableResult
+    func runVcsOperation(
+        tool: VcsToolDto,
+        operation: VcsOperationDto,
+        path: String
+    ) async -> String {
+        let core = self.core
+        do {
+            let message = try await Task.detached(priority: .userInitiated) {
+                try core.runVcsOperation(tool: tool, operation: operation, path: path)
+            }.value
+            errorMessage = nil
+            refresh()
+            return message
+        } catch {
+            errorMessage = error.localizedDescription
+            return error.localizedDescription
+        }
+    }
+
+    /// Writes the log to a temporary file and opens it, matching the Windows
+    /// fallback when no external log viewer is installed.
+    func openVcsLog(tool: VcsToolDto, path: String) async {
+        let core = self.core
+        do {
+            let text = try await Task.detached(priority: .userInitiated) {
+                try core.runVcsQuery(tool: tool, query: .log, path: path)
+            }.value
+            let label = tool == .git ? "git" : "svn"
+            let file = FileManager.default.temporaryDirectory
+                .appendingPathComponent("kite-\(label)-log-\(UUID().uuidString).txt")
+            try "\(label.uppercased()) 日志\n目标：\(path)\n\n\(text)\n"
+                .write(to: file, atomically: true, encoding: .utf8)
+            KitePlatform.open(file.path)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func copyFile(_ path: String) {
         copyFiles([path])
     }

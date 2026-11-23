@@ -16,6 +16,7 @@ struct KitePreviewPane: View {
                     previewSurface
                     identity
                     actionGrid
+                    KiteGitPreviewSection(model: model, entry: entry)
                     metadata
                 }
                 .padding(.bottom, 4)

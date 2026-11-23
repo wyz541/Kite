@@ -18,10 +18,11 @@ use crate::devices::{DeviceSnapshot, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::file_clipboard::{self, ClipboardMode, FileClipboard};
 use crate::fs::{
-    DirectorySnapshot, FileEntry, SortKey, SortSpec, create_file, create_folder, format_size,
-    load_directory, open_file, recycle_entry, rename_entry, search_directory, sort_entries,
-    transfer_entry, validate_name, worse_status,
+    DirectorySnapshot, FileEntry, SortKey, SortSpec, VcsStatus, create_file, create_folder,
+    format_size, load_directory, open_file, recycle_entry, rename_entry, search_directory,
+    sort_entries, transfer_entry, validate_name, worse_status,
 };
+use crate::git_client_window::open_git_client_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -29,7 +30,7 @@ use crate::settings_window;
 use crate::shell_fs;
 use crate::table::{
     FileIconKind, FileTableDelegate, column_icon_for, folder_icon_color, icon_color, icon_for,
-    vcs_icon_badge,
+    vcs_icon_badge, vcs_status_color,
 };
 use crate::text_editor;
 use crate::ui_preferences::{
@@ -58,6 +59,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
+use kite_core::git::{
+    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, git_file_diff, git_path_summary,
+};
 pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
 
@@ -782,6 +786,17 @@ struct ColumnPreviewState {
     markdown_scroll: ScrollHandle,
 }
 
+/// Git section of the column preview. Loaded after the content preview so
+/// the git CLI never delays the file itself.
+#[derive(Clone)]
+struct ColumnGitPreview {
+    path: PathBuf,
+    summary: Option<GitPathSummary>,
+    loading: bool,
+    diff_visible: bool,
+    diff: Option<Result<Arc<Vec<GitDiffLine>>, SharedString>>,
+}
+
 enum PreviewScrollbar {
     Lines(UniformListScrollHandle),
     Markdown(ScrollHandle),
@@ -872,6 +887,8 @@ pub struct KiteApp {
     preview_generation: u64,
     preview_image_cache: PreviewImageCache,
     _preview_task: Task<()>,
+    column_git_preview: Option<ColumnGitPreview>,
+    _git_preview_task: Task<()>,
     path_bar_scroll: ScrollHandle,
     path_bar_scroll_pending: bool,
     column_generation: u64,
@@ -1136,6 +1153,8 @@ impl KiteApp {
             preview_generation: 0,
             preview_image_cache: PreviewImageCache::new(),
             _preview_task: Task::ready(()),
+            column_git_preview: None,
+            _git_preview_task: Task::ready(()),
             path_bar_scroll: ScrollHandle::new(),
             path_bar_scroll_pending: false,
             column_generation: 0,
@@ -1435,6 +1454,7 @@ impl KiteApp {
             KeyBinding::new("secondary-l", FocusAddress, Some("Kite")),
             KeyBinding::new("secondary-f", FocusSearch, Some("Kite")),
             KeyBinding::new("secondary-shift-f", OpenGlobalSearch, Some("Kite")),
+            KeyBinding::new("secondary-shift-g", OpenGitClient, Some("Kite")),
             KeyBinding::new("secondary-1", ShowListView, Some("Kite")),
             KeyBinding::new("secondary-2", ShowColumnsView, Some("Kite")),
             KeyBinding::new("secondary-t", NewTab, Some("Kite")),
@@ -1467,6 +1487,7 @@ impl KiteApp {
                 MenuItem::action("聚焦路径栏", FocusAddress),
                 MenuItem::separator(),
                 MenuItem::action("全局搜索…", OpenGlobalSearch),
+                MenuItem::action("打开 Git 客户端", OpenGitClient),
             ]),
             Menu::new("显示").items([
                 MenuItem::action("列表视图", ShowListView),
@@ -3209,6 +3230,19 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         match command {
+            VcsMenuCommand::GitClient => {
+                match open_git_client_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开 Git 客户端窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitAdd => {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Add, path, window, cx)
             }
@@ -3594,6 +3628,89 @@ impl KiteApp {
         self.preview_generation = self.preview_generation.wrapping_add(1);
         self._preview_task = Task::ready(());
         self.column_preview = None;
+        self._git_preview_task = Task::ready(());
+        self.column_git_preview = None;
+    }
+
+    fn start_column_git_preview(&mut self, entry: &FileEntry, cx: &mut Context<Self>) {
+        // Paths without a Git status from the directory snapshot are outside a
+        // work tree or ignored; skip the extra git processes for them.
+        let path = entry.path.clone();
+        let keep_diff = self
+            .column_git_preview
+            .as_ref()
+            .is_some_and(|preview| preview.diff_visible && same_path(&preview.path, &path));
+        if entry.git_status.is_none() && !self.git_available_for(&path) {
+            self._git_preview_task = Task::ready(());
+            self.column_git_preview = None;
+            return;
+        }
+        let generation = self.preview_generation;
+        self.column_git_preview = Some(ColumnGitPreview {
+            path: path.clone(),
+            summary: None,
+            loading: true,
+            diff_visible: false,
+            diff: None,
+        });
+        self._git_preview_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PREVIEW_LOAD_DEBOUNCE).await;
+            let summary_path = path.clone();
+            let summary = cx
+                .background_spawn(async move { git_path_summary(&summary_path).ok().flatten() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.preview_generation != generation {
+                    return;
+                }
+                if let Some(preview) = this.column_git_preview.as_mut() {
+                    preview.loading = false;
+                    preview.summary = summary;
+                }
+                if keep_diff {
+                    this.toggle_column_git_diff(cx);
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    fn git_available_for(&self, path: &Path) -> bool {
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        self.column_panes
+            .iter()
+            .any(|pane| pane.git_available && same_path(&pane.path, parent))
+    }
+
+    fn toggle_column_git_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.column_git_preview.as_mut() else {
+            return;
+        };
+        preview.diff_visible = !preview.diff_visible;
+        if !preview.diff_visible || preview.diff.is_some() {
+            cx.notify();
+            return;
+        }
+        let path = preview.path.clone();
+        let generation = self.preview_generation;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { git_file_diff(&path) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.preview_generation != generation {
+                    return;
+                }
+                if let Some(preview) = this.column_git_preview.as_mut() {
+                    preview.diff = Some(result.map(Arc::new).map_err(SharedString::from));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn start_column_preview(&mut self, entry: FileEntry, cx: &mut Context<Self>) {
@@ -3627,6 +3744,7 @@ impl KiteApp {
             scroll: UniformListScrollHandle::new(),
             markdown_scroll: ScrollHandle::new(),
         });
+        self.start_column_git_preview(&entry, cx);
         if !load_text && !load_image {
             return;
         }
@@ -5012,6 +5130,20 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn open_git_client(&mut self, _: &OpenGitClient, _window: &mut Window, cx: &mut Context<Self>) {
+        match open_git_client_window(self.current_dir.clone(), cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("已打开 Git 客户端窗口".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
+
     fn open_settings_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let initial_update_state = self.settings_update_state();
         match settings_window::open_settings_window(cx.entity(), initial_update_state, cx) {
@@ -6027,6 +6159,12 @@ impl KiteApp {
         if !vcs.is_empty() {
             properties = properties.child(preview_property("版本控制", vcs.join("\n"), cx));
         }
+        let git_section = self
+            .column_git_preview
+            .as_ref()
+            .filter(|preview| same_path(&preview.path, &entry.path))
+            .cloned()
+            .map(|preview| self.render_column_git_section(preview, cx));
 
         v_flex()
             .w(px(PREVIEW_WIDTH))
@@ -6116,10 +6254,207 @@ impl KiteApp {
                     .p(px(COMPACT_ISLAND_PADDING))
                     .gap_2()
                     .child(preview_area)
+                    .when_some(git_section, |this, section| this.child(section))
                     .child(properties),
             )
             .into_any_element()
     }
+
+    fn render_column_git_section(
+        &self,
+        preview: ColumnGitPreview,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let mut section = v_flex()
+            .id("column-preview-git")
+            .w_full()
+            .gap_1p5()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(Icon::new(IconName::GitBranch).size_3p5().text_color(muted))
+                    .child(div().text_xs().font_medium().text_color(muted).child("Git")),
+            );
+        let Some(summary) = preview.summary.as_ref() else {
+            let message = if preview.loading {
+                "正在读取 Git 信息…"
+            } else {
+                "无法读取 Git 信息"
+            };
+            return section
+                .child(div().text_xs().text_color(muted).child(message))
+                .into_any_element();
+        };
+
+        let mut branch_line = summary
+            .branch
+            .clone()
+            .or_else(|| {
+                summary
+                    .head_short_hash
+                    .as_ref()
+                    .map(|hash| format!("分离 HEAD {hash}"))
+            })
+            .unwrap_or_else(|| "无分支".to_string());
+        if summary.ahead > 0 || summary.behind > 0 {
+            branch_line.push_str(&format!("  ↑{} ↓{}", summary.ahead, summary.behind));
+        }
+        section = section.child(div().text_sm().truncate().child(branch_line));
+        if let Some(operation) = summary.operation {
+            section = section.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child(operation.label()),
+            );
+        }
+
+        if summary.is_directory {
+            let counts = &summary.changes;
+            let text = if counts.total() == 0 {
+                "没有未提交的变更".to_string()
+            } else {
+                git_change_counts_text(counts)
+            };
+            section = section.child(div().text_xs().text_color(muted).child(text));
+        } else {
+            let mut chips = h_flex().gap_2().flex_wrap();
+            for (label, status) in [
+                ("已暂存", summary.staged_status),
+                ("工作区", summary.unstaged_status),
+            ] {
+                if let Some(status) = status {
+                    chips = chips.child(
+                        div()
+                            .text_xs()
+                            .text_color(vcs_status_color(status))
+                            .child(format!("{label} {}", status.label())),
+                    );
+                }
+            }
+            if summary.ignored {
+                chips = chips.child(div().text_xs().text_color(muted).child("已忽略"));
+            } else if summary.staged_status.is_none() && summary.unstaged_status.is_none() {
+                chips = chips.child(div().text_xs().text_color(muted).child("无变更"));
+            }
+            if summary.lines_added > 0 || summary.lines_removed > 0 {
+                chips = chips
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(vcs_status_color(VcsStatus::Added))
+                            .child(format!("+{}", summary.lines_added)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(vcs_status_color(VcsStatus::Deleted))
+                            .child(format!("-{}", summary.lines_removed)),
+                    );
+            }
+            section = section.child(chips);
+        }
+
+        if let Some(commit) = summary.last_commit.as_ref() {
+            section = section.child(
+                v_flex()
+                    .gap_0p5()
+                    .child(div().text_xs().text_color(muted).child(format!(
+                        "{}  {}  {}",
+                        commit.short_hash,
+                        commit.author,
+                        git_commit_time_label(commit.unix_seconds)
+                    )))
+                    .child(div().text_xs().truncate().child(commit.subject.clone())),
+            );
+        }
+
+        if !summary.is_directory && !summary.ignored {
+            let changed = summary.staged_status.is_some() || summary.unstaged_status.is_some();
+            let path = preview.path.clone();
+            let mut actions = h_flex().gap_1().flex_wrap();
+            if changed {
+                actions = actions.child(
+                    Button::new("column-preview-git-diff")
+                        .ghost()
+                        .compact()
+                        .label(if preview.diff_visible {
+                            "隐藏差异"
+                        } else {
+                            "查看差异"
+                        })
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.toggle_column_git_diff(cx);
+                        })),
+                );
+            }
+            if summary.unstaged_status.is_some() {
+                let path = path.clone();
+                actions = actions.child(
+                    Button::new("column-preview-git-stage")
+                        .ghost()
+                        .compact()
+                        .label("暂存")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run_vcs_task(
+                                VcsTool::Git,
+                                VcsOperation::Add,
+                                path.clone(),
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+            }
+            if summary.staged_status.is_some() {
+                let path = path.clone();
+                actions = actions.child(
+                    Button::new("column-preview-git-unstage")
+                        .ghost()
+                        .compact()
+                        .label("取消暂存")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run_vcs_task(
+                                VcsTool::Git,
+                                VcsOperation::Unstage,
+                                path.clone(),
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+            }
+            actions = actions.child(
+                Button::new("column-preview-git-log")
+                    .ghost()
+                    .compact()
+                    .label("历史")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.run_vcs_query_task(
+                            VcsTool::Git,
+                            VcsQuery::Log,
+                            path.clone(),
+                            window,
+                            cx,
+                        );
+                    })),
+            );
+            section = section.child(actions);
+        }
+
+        if preview.diff_visible {
+            section = section.child(render_git_diff(preview.diff.as_ref(), cx));
+        }
+        section.into_any_element()
+    }
+
     fn sync_column_list_scrolls(&mut self) {
         self.column_vertical_scrolls
             .truncate(self.column_panes.len());
@@ -7475,6 +7810,81 @@ fn resolve_location_input(value: &str, current_dir: &Path) -> Result<PathBuf, St
     }
 }
 
+fn git_change_counts_text(counts: &GitChangeCounts) -> String {
+    [
+        ("修改", counts.modified),
+        ("新增", counts.added),
+        ("删除", counts.deleted),
+        ("重命名", counts.renamed),
+        ("未跟踪", counts.untracked),
+        ("冲突", counts.conflicted),
+    ]
+    .iter()
+    .filter(|(_, count)| *count > 0)
+    .map(|(label, count)| format!("{label} {count}"))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+fn git_commit_time_label(unix_seconds: i64) -> String {
+    chrono::DateTime::from_timestamp(unix_seconds, 0)
+        .map(|value| {
+            value
+                .with_timezone(&chrono::Local)
+                .format("%Y/%m/%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn render_git_diff(
+    diff: Option<&Result<Arc<Vec<GitDiffLine>>, SharedString>>,
+    cx: &App,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let body = v_flex()
+        .id("column-preview-git-diff")
+        .w_full()
+        .max_h(px(320.))
+        .overflow_y_scroll()
+        .rounded_sm()
+        .bg(cx.theme().muted.opacity(0.25))
+        .p_1()
+        .text_xs();
+    match diff {
+        None => body.child(div().text_color(muted).child("正在读取差异…")),
+        Some(Err(error)) => body.child(div().text_color(cx.theme().danger).child(error.clone())),
+        Some(Ok(lines)) if lines.is_empty() => {
+            body.child(div().text_color(muted).child("没有可显示的差异"))
+        }
+        Some(Ok(lines)) => body.children(lines.iter().map(|line| {
+            let (prefix, color, background) = match line.kind {
+                GitDiffLineKind::Added => (
+                    "+",
+                    vcs_status_color(VcsStatus::Added),
+                    Some(vcs_status_color(VcsStatus::Added).opacity(0.12)),
+                ),
+                GitDiffLineKind::Removed => (
+                    "-",
+                    vcs_status_color(VcsStatus::Deleted),
+                    Some(vcs_status_color(VcsStatus::Deleted).opacity(0.12)),
+                ),
+                GitDiffLineKind::Hunk => ("", muted, None),
+                GitDiffLineKind::Context => (" ", cx.theme().foreground, None),
+            };
+            div()
+                .w_full()
+                .px_1()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_color(color)
+                .when_some(background, |this, background| this.bg(background))
+                .child(format!("{prefix}{}", line.text))
+        })),
+    }
+    .into_any_element()
+}
+
 fn preview_property(label: &str, value: String, cx: &App) -> AnyElement {
     v_flex()
         .w_full()
@@ -8187,6 +8597,9 @@ impl Render for KiteApp {
             )
             .on_action(cx.listener(|this, action: &OpenGlobalSearch, window, cx| {
                 this.open_global_search(action, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &OpenGitClient, window, cx| {
+                this.open_git_client(action, window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &CreateFolder, window, cx| this.begin_new_folder(window, cx)),
