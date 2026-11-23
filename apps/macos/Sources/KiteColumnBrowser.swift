@@ -1716,6 +1716,19 @@ private struct KiteEntryMenu: View {
 
         Divider()
 
+        if entry.gitStatus != nil || model.isGitAvailable(forEntryPath: entry.path) {
+            Button {
+                KiteGitClientWindowController.shared.show(
+                    model: model,
+                    repositoryPath: entry.isDirectory
+                        ? entry.path
+                        : (entry.path as NSString).deletingLastPathComponent
+                )
+            } label: {
+                Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
+            }
+        }
+
         Button {
             KitePlatform.open(entry.path)
         } label: {
@@ -1916,6 +1929,17 @@ private struct KiteDirectoryMenu: View {
         }
 
         Divider()
+
+        if column.gitAvailable {
+            Button {
+                KiteGitClientWindowController.shared.show(
+                    model: model,
+                    repositoryPath: column.path
+                )
+            } label: {
+                Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
+            }
+        }
 
         Button {
             KitePlatform.open(column.path)

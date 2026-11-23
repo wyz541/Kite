@@ -18,6 +18,7 @@ required_features=(
   "列宽预设与布局恢复"
   "设备浏览与写入"
   "预览 Git 状态"
+  "Git 客户端变更与行级暂存"
 )
 
 failed=false

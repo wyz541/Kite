@@ -11,6 +11,7 @@ use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, transfer_entry};
 use crate::git::{self, GitDiffLine, GitDiffLineKind, GitPathSummary};
+use crate::git_changes::{self, GitChangeGroup, GitDiffScope, GitHunkLineKind};
 use crate::platform::{HostPlatform, default_root_path, host_platform};
 use crate::session::{self as session_store, SessionStateDto};
 use crate::text_editor::{self, TextDocument, TextLineEnding};
@@ -274,6 +275,100 @@ pub enum GitDiffLineKindDto {
 pub struct GitDiffLineDto {
     pub kind: GitDiffLineKindDto,
     pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitChangeGroupDto {
+    Staged,
+    Unstaged,
+    Untracked,
+    Conflicted,
+    Ignored,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitChangeFileDto {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub group: GitChangeGroupDto,
+    pub status: String,
+    pub status_code: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRepositoryChangesDto {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub head_short_hash: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub operation: Option<String>,
+    pub files: Vec<GitChangeFileDto>,
+    pub staged_count: u32,
+    pub unstaged_count: u32,
+    pub untracked_count: u32,
+    pub conflicted_count: u32,
+    pub ignored_count: u32,
+    pub crlf_warning: Option<String>,
+    pub includes_ignored: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitDiffScopeDto {
+    Unstaged,
+    Staged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitHunkLineKindDto {
+    Context,
+    Added,
+    Removed,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitHunkLineDto {
+    pub kind: GitHunkLineKindDto,
+    pub text: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitDiffHunkDto {
+    pub index: u32,
+    pub header: String,
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    pub lines: Vec<GitHunkLineDto>,
+    pub selections: Vec<GitLineSelectionDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitFileChangesDiffDto {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub scope: GitDiffScopeDto,
+    pub hunks: Vec<GitDiffHunkDto>,
+    pub binary: bool,
+    pub truncated: bool,
+    pub line_ending_warning: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitLineSelectionDto {
+    pub hunk_index: u32,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitChangeOperationResultDto {
+    pub message: String,
+    pub changes: GitRepositoryChangesDto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -750,6 +845,123 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    /// Flat repository change list used by the Git client window.
+    pub fn git_repository_changes(
+        &self,
+        path: String,
+        include_ignored: bool,
+    ) -> Result<GitRepositoryChangesDto, KiteError> {
+        git_changes::repository_changes(&PathBuf::from(path), include_ignored)
+            .map(git_repository_changes_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_changes_diff(
+        &self,
+        repository_root: String,
+        path: String,
+        scope: GitDiffScopeDto,
+    ) -> Result<GitFileChangesDiffDto, KiteError> {
+        git_changes::file_changes_diff(
+            &PathBuf::from(repository_root),
+            &path,
+            git_diff_scope(scope),
+        )
+        .map(git_file_changes_diff_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_stage_lines(
+        &self,
+        repository_root: String,
+        path: String,
+        selections: Vec<GitLineSelectionDto>,
+    ) -> Result<GitChangeOperationResultDto, KiteError> {
+        git_changes::stage_lines(
+            &PathBuf::from(repository_root),
+            &path,
+            &git_line_selections(selections),
+        )
+        .map(git_change_operation_result_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_unstage_lines(
+        &self,
+        repository_root: String,
+        path: String,
+        selections: Vec<GitLineSelectionDto>,
+    ) -> Result<GitChangeOperationResultDto, KiteError> {
+        git_changes::unstage_lines(
+            &PathBuf::from(repository_root),
+            &path,
+            &git_line_selections(selections),
+        )
+        .map(git_change_operation_result_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_discard_lines(
+        &self,
+        repository_root: String,
+        path: String,
+        selections: Vec<GitLineSelectionDto>,
+    ) -> Result<GitChangeOperationResultDto, KiteError> {
+        git_changes::discard_lines(
+            &PathBuf::from(repository_root),
+            &path,
+            &git_line_selections(selections),
+        )
+        .map(git_change_operation_result_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_stage_paths(
+        &self,
+        repository_root: String,
+        paths: Vec<String>,
+    ) -> Result<GitChangeOperationResultDto, KiteError> {
+        git_changes::stage_paths(&PathBuf::from(repository_root), &paths)
+            .map(git_change_operation_result_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_unstage_paths(
+        &self,
+        repository_root: String,
+        paths: Vec<String>,
+    ) -> Result<GitChangeOperationResultDto, KiteError> {
+        git_changes::unstage_paths(&PathBuf::from(repository_root), &paths)
+            .map(git_change_operation_result_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_discard_paths(
+        &self,
+        repository_root: String,
+        paths: Vec<String>,
+    ) -> Result<GitChangeOperationResultDto, KiteError> {
+        git_changes::discard_paths(&PathBuf::from(repository_root), &paths)
+            .map(git_change_operation_result_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_add_to_gitignore(
+        &self,
+        repository_root: String,
+        path: String,
+        pattern: Option<String>,
+        local_exclude: bool,
+    ) -> Result<String, KiteError> {
+        git_changes::add_to_gitignore(
+            &PathBuf::from(repository_root),
+            &path,
+            pattern.as_deref(),
+            local_exclude,
+        )
+        .map_err(KiteError::operation)
+    }
+
     pub fn run_vcs_operation(
         &self,
         tool: VcsToolDto,
@@ -856,6 +1068,140 @@ fn git_diff_line_dto(line: GitDiffLine) -> GitDiffLineDto {
         },
         text: line.text,
     }
+}
+
+fn git_repository_changes_dto(
+    changes: git_changes::GitRepositoryChanges,
+) -> GitRepositoryChangesDto {
+    let staged_count = changes.count(GitChangeGroup::Staged) as u32;
+    let unstaged_count = changes.count(GitChangeGroup::Unstaged) as u32;
+    let untracked_count = changes.count(GitChangeGroup::Untracked) as u32;
+    let conflicted_count = changes.count(GitChangeGroup::Conflicted) as u32;
+    let ignored_count = changes.count(GitChangeGroup::Ignored) as u32;
+    GitRepositoryChangesDto {
+        repository_root: changes.repository_root.to_string_lossy().into_owned(),
+        branch: changes.branch,
+        head_short_hash: changes.head_short_hash,
+        upstream: changes.upstream,
+        ahead: changes.ahead,
+        behind: changes.behind,
+        operation: changes.operation.map(|state| state.label().to_string()),
+        files: changes
+            .files
+            .into_iter()
+            .map(|file| GitChangeFileDto {
+                path: file.path,
+                old_path: file.old_path,
+                group: git_change_group_dto(file.group),
+                status: file.status.label().to_string(),
+                status_code: file.status.code().to_string(),
+            })
+            .collect(),
+        staged_count,
+        unstaged_count,
+        untracked_count,
+        conflicted_count,
+        ignored_count,
+        crlf_warning: changes.crlf_warning,
+        includes_ignored: changes.includes_ignored,
+    }
+}
+
+fn git_file_changes_diff_dto(diff: git_changes::GitFileChangesDiff) -> GitFileChangesDiffDto {
+    let hunk_selections = diff
+        .hunks
+        .iter()
+        .map(|hunk| {
+            diff.selection_units_for_hunk(hunk.index)
+                .into_iter()
+                .map(git_line_selection_dto)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    GitFileChangesDiffDto {
+        path: diff.path,
+        old_path: diff.old_path,
+        scope: match diff.scope {
+            GitDiffScope::Unstaged => GitDiffScopeDto::Unstaged,
+            GitDiffScope::Staged => GitDiffScopeDto::Staged,
+        },
+        hunks: diff
+            .hunks
+            .into_iter()
+            .zip(hunk_selections)
+            .map(|(hunk, selections)| GitDiffHunkDto {
+                index: hunk.index,
+                header: hunk.header,
+                old_start: hunk.old_start,
+                old_count: hunk.old_count,
+                new_start: hunk.new_start,
+                new_count: hunk.new_count,
+                lines: hunk
+                    .lines
+                    .into_iter()
+                    .map(|line| GitHunkLineDto {
+                        kind: match line.kind {
+                            GitHunkLineKind::Context => GitHunkLineKindDto::Context,
+                            GitHunkLineKind::Added => GitHunkLineKindDto::Added,
+                            GitHunkLineKind::Removed => GitHunkLineKindDto::Removed,
+                        },
+                        text: line.text,
+                        old_line: line.old_line,
+                        new_line: line.new_line,
+                    })
+                    .collect(),
+                selections,
+            })
+            .collect(),
+        binary: diff.binary,
+        truncated: diff.truncated,
+        line_ending_warning: diff.line_ending_warning,
+    }
+}
+
+fn git_line_selection_dto(selection: git_changes::GitLineSelection) -> GitLineSelectionDto {
+    GitLineSelectionDto {
+        hunk_index: selection.hunk_index,
+        old_line: selection.old_line,
+        new_line: selection.new_line,
+    }
+}
+
+fn git_change_operation_result_dto(
+    result: git_changes::GitChangeOperationResult,
+) -> GitChangeOperationResultDto {
+    GitChangeOperationResultDto {
+        message: result.message,
+        changes: git_repository_changes_dto(result.changes),
+    }
+}
+
+fn git_change_group_dto(group: GitChangeGroup) -> GitChangeGroupDto {
+    match group {
+        GitChangeGroup::Staged => GitChangeGroupDto::Staged,
+        GitChangeGroup::Unstaged => GitChangeGroupDto::Unstaged,
+        GitChangeGroup::Untracked => GitChangeGroupDto::Untracked,
+        GitChangeGroup::Conflicted => GitChangeGroupDto::Conflicted,
+        GitChangeGroup::Ignored => GitChangeGroupDto::Ignored,
+    }
+}
+
+fn git_diff_scope(scope: GitDiffScopeDto) -> GitDiffScope {
+    match scope {
+        GitDiffScopeDto::Unstaged => GitDiffScope::Unstaged,
+        GitDiffScopeDto::Staged => GitDiffScope::Staged,
+    }
+}
+
+fn git_line_selections(selections: Vec<GitLineSelectionDto>) -> Vec<git_changes::GitLineSelection> {
+    selections
+        .into_iter()
+        .map(|selection| git_changes::GitLineSelection {
+            hunk_index: selection.hunk_index,
+            old_line: selection.old_line,
+            new_line: selection.new_line,
+        })
+        .collect()
 }
 
 fn text_document_dto(document: TextDocument) -> TextDocumentDto {
