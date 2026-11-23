@@ -5,7 +5,8 @@
 ## 1. 来源
 
 - 基准工具：`src/bin/kite-perf.rs`
-- 主结果 commit：`ac58249`
+- 主结果 commit：`33e5418`
+- 顺序控制 commit：`dc60418`
 - 配置：`smoke`
 - 构建：`release`
 - Git：`git 2.54.0`
