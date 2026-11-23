@@ -532,6 +532,12 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
             VcsMenuCommand::GitLog,
             enabled,
         ),
+        menu_item(
+            "交互式 Rebase…",
+            IconName::GitBranch,
+            VcsMenuCommand::GitRebase,
+            enabled,
+        ),
         ContextMenuNode::Separator,
         menu_item(
             "还原…",
@@ -921,6 +927,7 @@ mod tests {
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitFetch)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitDiff)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitLog)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRebase)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRevert)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClean)));
     }

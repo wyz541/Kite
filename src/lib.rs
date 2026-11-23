@@ -11,6 +11,7 @@ pub mod fs;
 pub mod git;
 pub mod git_changes;
 pub mod git_ops;
+pub mod git_rebase;
 pub mod global_name_search;
 pub mod indexed_search;
 pub mod name_index;

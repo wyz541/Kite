@@ -1761,6 +1761,12 @@ private struct KiteEntryMenu: View {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
         }
 
+        Button {
+            KiteGitRebaseWindowController.show(path: entry.path, model: model)
+        } label: {
+            Label("交互式 Rebase…", systemImage: "arrow.triangle.branch")
+        }
+
         Divider()
 
         Button {
@@ -1963,6 +1969,12 @@ private struct KiteDirectoryMenu: View {
             KitePlatform.copyPath(column.path)
         } label: {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+        }
+
+        Button {
+            KiteGitRebaseWindowController.show(path: column.path, model: model)
+        } label: {
+            Label("交互式 Rebase…", systemImage: "arrow.triangle.branch")
         }
 
         Divider()
