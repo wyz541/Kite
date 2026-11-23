@@ -1722,6 +1722,14 @@ private struct KiteEntryMenu: View {
             Label("打开", systemImage: "arrow.up.forward.app")
         }
 
+        if model.isGitAvailable(forEntryPath: entry.path) {
+            Button {
+                model.openGitLog(path: entry.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
+        }
+
         if KitePlatform.isEditableTextFile(entry.path) {
             Button {
                 KitePlatform.openTextEditor(entry.path)
@@ -1941,6 +1949,14 @@ private struct KiteDirectoryMenu: View {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
         }
 
+        if column.gitAvailable {
+            Divider()
+            Button {
+                model.openGitLog(path: column.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
+        }
         Divider()
 
         Button {

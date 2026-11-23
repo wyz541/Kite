@@ -13,6 +13,7 @@ mod repository;
 mod status;
 mod watch;
 
+pub mod log;
 pub mod preview;
 
 use std::ffi::OsString;
@@ -269,6 +270,20 @@ impl GitService {
         })
     }
 
+    pub(crate) fn run_log_command(
+        &self,
+        current_dir: &Path,
+        args: &[&str],
+    ) -> Result<GitCommandResult, GitError> {
+        self.executor.run(
+            current_dir,
+            args.iter().map(OsString::from).collect::<Vec<_>>(),
+            GitCommandOptions::new("Git 历史"),
+            &CancellationToken::default(),
+            &NoopGitEventSink,
+            None,
+        )
+    }
     pub(crate) fn run_preview_command(
         &self,
         current_dir: &Path,

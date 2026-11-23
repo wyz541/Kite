@@ -1816,6 +1816,30 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
+    func gitLogContext(path: String) async throws -> GitLogContextDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitLogContext(path: path)
+        }.value
+    }
+
+    func gitLogPage(
+        path: String,
+        filter: GitLogFilterDto,
+        cursor: String?,
+        pageSize: UInt32
+    ) async throws -> GitLogPageDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitLogPage(
+                path: path,
+                filter: filter,
+                cursor: cursor,
+                pageSize: pageSize
+            )
+        }.value
+    }
+
     func gitDeleteTag(path: String, name: String) async throws -> String {
         let core = self.core
         return try await Task.detached(priority: .userInitiated) {
@@ -1843,6 +1867,42 @@ final class KiteModel: ObservableObject {
             try core.gitCreateWorktree(path: path, destination: destination, branch: branch)
         }.value
     }
+
+    func gitCommitDetails(path: String, hash: String) async throws -> GitCommitDetailsDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCommitDetails(path: path, hash: hash)
+        }.value
+    }
+
+    func gitCommitTree(path: String, hash: String) async throws -> [GitTreeEntryDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCommitTree(path: path, hash: hash)
+        }.value
+    }
+
+    func gitFileHistory(
+        path: String,
+        relativePath: String,
+        cursor: String?,
+        pageSize: UInt32
+    ) async throws -> GitLogPageDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitFileHistory(
+                path: path,
+                relativePath: relativePath,
+                cursor: cursor,
+                pageSize: pageSize
+            )
+        }.value
+    }
+
+    func openGitLog(path: String) {
+        KiteGitLogWindowController.shared.show(model: self, path: path)
+    }
+
     /// Runs a Git or SVN operation, refreshes the columns, and returns the
     /// status message for the caller to show.
     @discardableResult
@@ -2659,3 +2719,4 @@ final class KiteModel: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 }
+
