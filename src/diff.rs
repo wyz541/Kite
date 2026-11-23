@@ -662,10 +662,12 @@ impl DiffParser {
                     line.missing_newline = true;
                 } else if let Some(line) = self.added.last_mut() {
                     line.missing_newline = true;
-                } else if let Some(row) = self.rows.last_mut() {
-                    if let Some(line) = row.right.as_mut().or(row.left.as_mut()) {
-                        line.missing_newline = true;
-                    }
+                } else if let Some(line) = self
+                    .rows
+                    .last_mut()
+                    .and_then(|row| row.right.as_mut().or(row.left.as_mut()))
+                {
+                    line.missing_newline = true;
                 }
             }
             _ => self.push_preamble(line),
@@ -1434,9 +1436,7 @@ fn utf16_byte_offsets(text: &str) -> Vec<u32> {
     for (byte, character) in text.char_indices() {
         offsets[byte] = utf16;
         utf16 = utf16.saturating_add(character.len_utf16() as u32);
-        for offset in byte + 1..=byte + character.len_utf8() {
-            offsets[offset] = utf16;
-        }
+        offsets[byte + 1..=byte + character.len_utf8()].fill(utf16);
     }
     offsets
 }
@@ -1512,7 +1512,7 @@ fn large_file_preview(
     if is_image_path(relative_path) {
         parsed.binary = true;
     }
-    if bytes.iter().any(|byte| *byte == 0) || String::from_utf8(bytes.clone()).is_err() {
+    if bytes.contains(&0) || String::from_utf8(bytes.clone()).is_err() {
         parsed.binary = true;
         parsed.rows.push(DiffRow {
             kind: DiffRowKind::Hunk,
@@ -1563,10 +1563,15 @@ fn synthetic_addition_diff(
         return Ok(ParsedDiff::default());
     }
     let bytes = read_file_limited(&path, max_bytes as u64 * 2)?;
-    if bytes.iter().any(|byte| *byte == 0) || String::from_utf8(bytes.clone()).is_err() {
-        let mut parsed = ParsedDiff::default();
-        parsed.binary = true;
-        parsed.stats.files = 1;
+    if bytes.contains(&0) || String::from_utf8(bytes.clone()).is_err() {
+        let parsed = ParsedDiff {
+            binary: true,
+            stats: DiffStats {
+                files: 1,
+                ..DiffStats::default()
+            },
+            ..ParsedDiff::default()
+        };
         return Ok(parsed);
     }
     let text = String::from_utf8_lossy(&bytes);

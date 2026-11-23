@@ -964,7 +964,7 @@ fn render_image_from_bytes(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     let width = decoded.width();
     let height = decoded.height();
     let mut bgra = decoded.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Some(preview_render_image(PreviewImageData {
