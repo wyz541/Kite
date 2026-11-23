@@ -33,7 +33,7 @@ mod macos {
 
     use super::GlobalNameSearchSnapshot;
     use crate::fs::{
-        FileEntry, SEARCH_RESULT_LIMIT, file_entry_from_metadata, has_generated_parent,
+        SEARCH_RESULT_LIMIT, file_entry_from_metadata, has_generated_parent,
         is_generated_search_directory, is_hidden, sort_global_name_entries,
     };
     use crate::search_filters::SearchFilters;

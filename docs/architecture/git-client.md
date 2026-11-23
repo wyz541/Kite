@@ -299,3 +299,54 @@ Windows 的 Git 操作窗口位于 `src/git_tools_window.rs`，macOS 对应
 - macOS：`apps/macos/Sources/KiteGitClientWindow.swift`，从文件或目录右键 Git 菜单进入。
 - 两端均可用 `Ctrl+Shift+G` / `Cmd+Shift+G` 从当前目录打开。
 - 两端均支持路径筛选、目录树/平铺切换、文件/目录/Hunk/行级暂存与取消暂存、丢弃、忽略规则和 CRLF 提示。
+
+## 交互式 Rebase 与历史改写
+
+`src/git_rebase.rs` 为 Windows 和 macOS 共用同一套 Rebase 计划、todo 编辑和内存改写逻辑。
+
+### 计划与 todo
+
+`git_rebase_plan(path)` 读取当前分支、上游、onto、提交列表（从旧到新）、是否受保护、是否存在合并提交，以及哪些提交已经推送到远程。
+
+UI 将计划映射为 todo 表。每一行包含：
+
+- 动作：`pick`、`reword`、`edit`、`squash`、`fixup`、`drop`
+- 短哈希和标题
+- 正在 reword 或 squash 时使用的提交信息
+
+todo 可以调整顺序。Windows 使用上下按钮，macOS 使用列表拖动。提交按从旧到新的顺序执行。
+
+### 内存改写
+
+线性历史通过 Git plumbing 在内存中重写，不切换工作区：
+
+1. `git merge-tree --write-tree --merge-base=<旧父提交>` 把提交应用到新的父提交。
+2. `git commit-tree` 使用合并后的文件树创建替换提交，并保留作者姓名、邮箱和作者时间。
+3. 所有提交成功后，用 `git update-ref` 原子更新当前分支。
+
+因此 reword、squash、fixup 和 drop 不会 checkout、reset 或改动工作区和暂存区。`--update-refs` 会额外更新指向被改写提交的本地分支和轻量标签。
+
+“把当前改动并入历史”通过 `git stash create` 读取工作树快照，创建 `fixup! <目标标题>` 提交，再以 autosquash 内存改写。已跟踪的暂存和未暂存改动都会并入；未跟踪文件不会进入 fixup 提交。根提交暂不支持这一操作。
+
+### 流程控制
+
+`edit` 会在创建替换提交后暂停，并保存状态到 Git 目录的 `kite-rebase-state.json`。窗口中的“继续”“跳过”“中止”分别调用：
+
+- `git_rebase_continue`
+- `git_rebase_skip`
+- `git_rebase_abort`
+
+中止会把当前分支恢复到 Rebase 前的 HEAD。
+
+### 安全检查
+
+- 默认保护 `main`、`master`、`trunk`、`release/*`、`hotfix/*`。可用 `KITE_PROTECTED_BRANCHES` 覆盖逗号分隔的规则。
+- 提交已经出现在远程跟踪分支时，UI 显示警告，核心在 `allow_rewrite_pushed` 为 false 时拒绝执行。
+- 有合并提交时默认使用 `git rebase --rebase-merges`，此时只允许 `pick`。完整 merge/conflict 编辑属于 #127。
+- 已经存在 merge、rebase、cherry-pick、revert 或 bisect 时拒绝开始新的改写。
+
+### 已知边界
+
+- 合并提交的 reword/squash/fixup 暂不支持；会明确报错，而不是悄悄降级。
+- 冲突处理依赖 #127 的三方合并视图。当前发生冲突时不会更新分支引用。
+- 未运行 Git hooks 的内存改写和 `git commit-tree` 语义一致；GPG 签名未强制开启。
