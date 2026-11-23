@@ -16,6 +16,8 @@ mod file_clipboard;
 #[cfg(windows)]
 mod git_client_window;
 #[cfg(windows)]
+mod git_tools_window;
+#[cfg(windows)]
 mod global_search_window;
 #[cfg(windows)]
 mod preview_window;

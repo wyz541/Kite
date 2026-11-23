@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::os::windows::process::CommandExt;
 
 use crate::fs::{FileEntry, VcsStatus, worse_status};
+use crate::git::{CancellationToken, GitService};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -92,7 +93,7 @@ pub enum VcsQuery {
 /// runner to terminate the child and return an explicit cancellation error.
 #[derive(Debug, uniffi::Object)]
 pub struct VcsCancellation {
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
 }
 
 #[uniffi::export]
@@ -100,7 +101,7 @@ impl VcsCancellation {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            cancelled: AtomicBool::new(false),
+            cancelled: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -385,54 +386,29 @@ fn run_vcs_operation_with_cancel(
     tool: VcsTool,
     operation: VcsOperation,
     target: &Path,
-    cancellation: Option<&AtomicBool>,
+    cancellation: Option<&Arc<AtomicBool>>,
 ) -> Result<String, String> {
     match tool {
-        VcsTool::Git => run_git_operation(operation, target, cancellation),
-        VcsTool::Svn => run_svn_operation(operation, target, cancellation),
+        VcsTool::Git => {
+            let cancellation = cancellation
+                .cloned()
+                .map(CancellationToken::from_shared)
+                .unwrap_or_default();
+            GitService::shared()
+                .run_legacy_operation_cancellable(target, &operation, &cancellation)
+                .map_err(|error| error.to_string())
+        }
+        VcsTool::Svn => {
+            run_svn_operation(operation, target, cancellation.map(|flag| flag.as_ref()))
+        }
     }
 }
 
 pub fn run_vcs_query(tool: VcsTool, query: VcsQuery, target: &Path) -> Result<String, String> {
     match tool {
-        VcsTool::Git => {
-            let (root, target) = git_context(target)?;
-            let relative = if target.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                target.as_path()
-            };
-
-            match query {
-                VcsQuery::Diff => {
-                    let mut command = configured_command("git", &root);
-                    command.args(["diff", "--no-ext-diff", "--"]).arg(relative);
-                    let working = run_query_command("Git 差异", command)?;
-                    if working != "没有可显示内容。" {
-                        return Ok(working);
-                    }
-                    let mut command = configured_command("git", &root);
-                    command
-                        .args(["diff", "--cached", "--no-ext-diff", "--"])
-                        .arg(relative);
-                    run_query_command("Git 暂存差异", command)
-                }
-                VcsQuery::Log => {
-                    let mut command = configured_command("git", &root);
-                    command
-                        .args([
-                            "log",
-                            "-n",
-                            "100",
-                            "--date=short",
-                            "--pretty=format:%h  %ad  %an  %s",
-                            "--",
-                        ])
-                        .arg(relative);
-                    run_query_command("Git 日志", command)
-                }
-            }
-        }
+        VcsTool::Git => GitService::shared()
+            .run_legacy_query(target, query)
+            .map_err(|error| error.to_string()),
         VcsTool::Svn => {
             let start = working_directory(target);
             let mut command = configured_command("svn", start);
@@ -571,90 +547,6 @@ fn run_query_command(label: &str, mut command: Command) -> Result<String, String
     }
 }
 
-fn run_git_operation(
-    operation: VcsOperation,
-    target: &Path,
-    cancellation: Option<&AtomicBool>,
-) -> Result<String, String> {
-    if matches!(
-        &operation,
-        VcsOperation::Update | VcsOperation::Lock | VcsOperation::Unlock | VcsOperation::Cleanup
-    ) {
-        return Err("Git 不支持更新操作".to_string());
-    }
-
-    let start = working_directory(target);
-    let root_output = run_command("git", start, &["rev-parse", "--show-toplevel"])
-        .ok_or_else(|| "未找到 Git。请确认 Git 已安装并位于 PATH 中。".to_string())?;
-    if !root_output.status.success() {
-        return Err(output_error("Git", &root_output));
-    }
-    let root_text = String::from_utf8_lossy(&root_output.stdout)
-        .trim()
-        .to_string();
-    let root = dunce::canonicalize(&root_text).unwrap_or_else(|_| PathBuf::from(root_text));
-    let target = dunce::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    let relative = target
-        .strip_prefix(&root)
-        .map_err(|_| "所选项目不在 Git 工作区中".to_string())?;
-    let relative = if relative.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        relative
-    };
-    let mut command = configured_command("git", &root);
-
-    let label = match operation {
-        VcsOperation::Add => {
-            command.args(["add", "--"]).arg(relative);
-            "Git 添加"
-        }
-        VcsOperation::Unstage => {
-            command.args(["restore", "--staged", "--"]).arg(relative);
-            "Git 取消暂存"
-        }
-        VcsOperation::Commit(message) => {
-            command
-                .args(["commit", "-m"])
-                .arg(message)
-                .arg("--")
-                .arg(relative);
-            "Git 提交"
-        }
-        VcsOperation::Pull => {
-            command.args(["pull", "--no-edit", "--progress"]);
-            "Git 拉取"
-        }
-        VcsOperation::Push => {
-            command.args(["push", "--progress"]);
-            "Git 推送"
-        }
-        VcsOperation::Fetch => {
-            command.args(["fetch", "--prune", "--progress"]);
-            "Git 获取"
-        }
-        VcsOperation::Stash => {
-            command.args(["stash", "push", "--include-untracked"]);
-            "Git 暂存"
-        }
-        VcsOperation::Revert => {
-            command
-                .args(["restore", "--source=HEAD", "--staged", "--worktree", "--"])
-                .arg(relative);
-            "Git 还原"
-        }
-        VcsOperation::Clean => {
-            command.args(["clean", "-fd", "--"]).arg(relative);
-            "Git 清理"
-        }
-        VcsOperation::Update
-        | VcsOperation::Lock
-        | VcsOperation::Unlock
-        | VcsOperation::Cleanup => unreachable!(),
-    };
-    run_operation_command(label, command, cancellation)
-}
-
 fn run_svn_operation(
     operation: VcsOperation,
     target: &Path,
@@ -724,7 +616,7 @@ fn working_directory(target: &Path) -> &Path {
     }
 }
 
-fn configured_command(program: &str, current_dir: &Path) -> Command {
+pub(crate) fn configured_command(program: &str, current_dir: &Path) -> Command {
     let mut command = Command::new(program);
     command
         .current_dir(current_dir)

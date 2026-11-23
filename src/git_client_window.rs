@@ -8,6 +8,7 @@ use crate::actions::{
     GitClientSkip, GitClientStash, GitClientToggleConsole,
 };
 
+use crate::git_tools_window::open_git_tools_window;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -746,6 +747,20 @@ impl GitClientWindow {
         cx.notify();
     }
 
+    fn open_stash_and_history_tools(&mut self, cx: &mut Context<Self>) {
+        let selected_paths = self
+            .selected
+            .as_ref()
+            .map(|selection| vec![self.repository_root.join(&selection.path)])
+            .unwrap_or_default();
+        self.error = None;
+        match open_git_tools_window(self.repository_root.clone(), selected_paths, cx) {
+            Ok(()) => self.notice = Some("已打开 Stash 与历史操作窗口".into()),
+            Err(error) => self.error = Some(error.into()),
+        }
+        cx.notify();
+    }
+
     fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
         self.show_ignored = !self.show_ignored;
         self.start_load(cx);
@@ -1186,6 +1201,15 @@ impl GitClientWindow {
                                 .child(operation),
                         )
                     })
+                    .child(
+                        Button::new("git-client-stash-tools")
+                            .ghost()
+                            .compact()
+                            .label("Stash / 操作")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.open_stash_and_history_tools(cx)
+                            })),
+                    )
                     .child(
                         Button::new("git-client-refresh")
                             .ghost()

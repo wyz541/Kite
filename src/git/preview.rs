@@ -5,15 +5,14 @@
 //! a work tree returns `None` after one `rev-parse` probe.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+#[cfg(test)]
+use std::process::Command;
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
+use super::GitService;
+use super::command::GitCommandResult;
+use super::error::GitError;
+use super::events::GitOperationState;
 use crate::fs::VcsStatus;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Text larger than this is not diffed for the preview.
 const DIFF_PREVIEW_MAX_BYTES: usize = 256 * 1024;
@@ -53,27 +52,6 @@ impl GitChangeCounts {
             VcsStatus::Untracked => self.untracked += 1,
             VcsStatus::Conflicted => self.conflicted += 1,
             VcsStatus::Ignored | VcsStatus::External => {}
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitOperationState {
-    Rebasing,
-    Merging,
-    CherryPicking,
-    Reverting,
-    Bisecting,
-}
-
-impl GitOperationState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Rebasing => "正在变基",
-            Self::Merging => "正在合并",
-            Self::CherryPicking => "正在拣选",
-            Self::Reverting => "正在还原提交",
-            Self::Bisecting => "正在二分查找",
         }
     }
 }
@@ -155,16 +133,13 @@ pub fn git_path_summary(path: &Path) -> Result<Option<GitPathSummary>, String> {
     } else {
         path.parent().unwrap_or(path)
     };
-    let Some(probe) = run_git(
+    let Ok(probe) = run_git(
         start,
         &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
     ) else {
         return Ok(None);
     };
-    if !probe.status.success() {
-        return Ok(None);
-    }
-    let text = String::from_utf8_lossy(&probe.stdout).into_owned();
+    let text = probe.stdout;
     let mut lines = text.lines();
     let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
         return Ok(None);
@@ -180,13 +155,10 @@ pub fn git_repository_root(path: &Path) -> Result<Option<PathBuf>, String> {
     } else {
         path.parent().unwrap_or(path)
     };
-    let Some(output) = run_git(start, &["rev-parse", "--show-toplevel"]) else {
+    let Ok(output) = run_git(start, &["rev-parse", "--show-toplevel"]) else {
         return Ok(None);
     };
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let root = output.stdout.trim().to_string();
     if root.is_empty() {
         return Ok(None);
     }
@@ -203,16 +175,13 @@ pub fn git_repository_snapshot(path: &Path) -> Result<Option<GitRepositorySnapsh
     } else {
         path.parent().unwrap_or(path)
     };
-    let Some(probe) = run_git(
+    let Ok(probe) = run_git(
         start,
         &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
     ) else {
         return Ok(None);
     };
-    if !probe.status.success() {
-        return Ok(None);
-    }
-    let text = String::from_utf8_lossy(&probe.stdout).into_owned();
+    let text = probe.stdout;
     let mut lines = text.lines();
     let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
         return Ok(None);
@@ -238,7 +207,7 @@ pub fn git_repository_snapshot(path: &Path) -> Result<Option<GitRepositorySnapsh
         is_directory: true,
     };
     let mut changed_files = Vec::new();
-    if let Some(output) = run_git(
+    if let Ok(output) = run_git(
         &root,
         &[
             "status",
@@ -247,10 +216,9 @@ pub fn git_repository_snapshot(path: &Path) -> Result<Option<GitRepositorySnapsh
             "-z",
             "--untracked-files=all",
         ],
-    ) && output.status.success()
-    {
-        apply_status_v2(&mut summary, &output.stdout);
-        changed_files = parse_changed_files(&output.stdout);
+    ) {
+        apply_status_v2(&mut summary, output.stdout.as_bytes());
+        changed_files = parse_changed_files(output.stdout.as_bytes());
     }
 
     let recent_commits = recent_commits(&root, 100);
@@ -266,98 +234,6 @@ pub fn git_repository_snapshot(path: &Path) -> Result<Option<GitRepositorySnapsh
         changed_files,
         recent_commits,
     }))
-}
-
-/// Continue, skip, or abort the operation currently recorded in the Git
-/// directory. The command is chosen from the marker files rather than trusting
-/// a stale UI value.
-pub fn run_git_operation_control(
-    path: &Path,
-    action: GitOperationAction,
-) -> Result<String, String> {
-    let start = if path.is_dir() {
-        path
-    } else {
-        path.parent().unwrap_or(path)
-    };
-    let probe = run_git(
-        start,
-        &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
-    )
-    .ok_or_else(|| "未找到 Git。请确认 Git 已安装并位于 PATH 中。".to_string())?;
-    if !probe.status.success() {
-        return Err(output_error(&probe));
-    }
-    let text = String::from_utf8_lossy(&probe.stdout).into_owned();
-    let mut lines = text.lines();
-    let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
-        return Err("无法确定 Git 仓库".to_string());
-    };
-    let root = dunce::canonicalize(root.trim()).unwrap_or_else(|_| PathBuf::from(root.trim()));
-    let operation = operation_state(Path::new(git_dir.trim()))
-        .ok_or_else(|| "当前没有进行中的 Git 操作".to_string())?;
-    let args = operation_control_args(operation, action)?;
-
-    let mut command = Command::new("git");
-    command
-        .current_dir(&root)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never")
-        .env("GIT_EDITOR", "true")
-        .env("LC_ALL", "C");
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let output = command
-        .output()
-        .map_err(|error| format!("无法继续 Git 操作：{error}"))?;
-    if output.status.success() {
-        let verb = match action {
-            GitOperationAction::Continue => "继续",
-            GitOperationAction::Skip => "跳过",
-            GitOperationAction::Abort => "中止",
-        };
-        Ok(format!("已{verb}{}", operation.label()))
-    } else {
-        Err(output_error(&output))
-    }
-}
-
-fn operation_control_args(
-    operation: GitOperationState,
-    action: GitOperationAction,
-) -> Result<&'static [&'static str], String> {
-    match (operation, action) {
-        (GitOperationState::Rebasing, GitOperationAction::Continue) => {
-            Ok(&["rebase", "--continue"])
-        }
-        (GitOperationState::Rebasing, GitOperationAction::Skip) => Ok(&["rebase", "--skip"]),
-        (GitOperationState::Rebasing, GitOperationAction::Abort) => Ok(&["rebase", "--abort"]),
-        (GitOperationState::Merging, GitOperationAction::Continue) => Ok(&["merge", "--continue"]),
-        (GitOperationState::Merging, GitOperationAction::Abort) => Ok(&["merge", "--abort"]),
-        (GitOperationState::CherryPicking, GitOperationAction::Continue) => {
-            Ok(&["cherry-pick", "--continue"])
-        }
-        (GitOperationState::CherryPicking, GitOperationAction::Skip) => {
-            Ok(&["cherry-pick", "--skip"])
-        }
-        (GitOperationState::CherryPicking, GitOperationAction::Abort) => {
-            Ok(&["cherry-pick", "--abort"])
-        }
-        (GitOperationState::Reverting, GitOperationAction::Continue) => {
-            Ok(&["revert", "--continue"])
-        }
-        (GitOperationState::Reverting, GitOperationAction::Skip) => Ok(&["revert", "--skip"]),
-        (GitOperationState::Reverting, GitOperationAction::Abort) => Ok(&["revert", "--abort"]),
-        (GitOperationState::Bisecting, GitOperationAction::Abort) => Ok(&["bisect", "reset"]),
-        (GitOperationState::Merging, GitOperationAction::Skip) => {
-            Err("合并操作不支持跳过".to_string())
-        }
-        (GitOperationState::Bisecting, _) => {
-            Err("二分查找需要明确标记 good 或 bad 提交".to_string())
-        }
-    }
 }
 
 fn summary_in(
@@ -396,7 +272,7 @@ fn summary_in(
         is_directory,
     };
 
-    if let Some(output) = run_git(
+    if let Ok(output) = run_git(
         &root,
         &[
             "status",
@@ -408,12 +284,11 @@ fn summary_in(
             "--",
             &relative_arg,
         ],
-    ) && output.status.success()
-    {
-        apply_status_v2(&mut summary, &output.stdout);
+    ) {
+        apply_status_v2(&mut summary, output.stdout.as_bytes());
     }
 
-    if let Some(output) = run_git(
+    if let Ok(output) = run_git(
         &root,
         &[
             "log",
@@ -422,13 +297,12 @@ fn summary_in(
             "--",
             &relative_arg,
         ],
-    ) && output.status.success()
-    {
-        summary.last_commit = parse_commit_line(&String::from_utf8_lossy(&output.stdout));
+    ) {
+        summary.last_commit = parse_commit_line(&output.stdout);
     }
 
     if summary.head_short_hash.is_some()
-        && let Some(output) = run_git(
+        && let Ok(output) = run_git(
             &root,
             &[
                 "diff",
@@ -439,9 +313,8 @@ fn summary_in(
                 &relative_arg,
             ],
         )
-        && output.status.success()
     {
-        let (added, removed) = parse_numstat(&String::from_utf8_lossy(&output.stdout));
+        let (added, removed) = parse_numstat(&output.stdout);
         summary.lines_added = added;
         summary.lines_removed = removed;
     }
@@ -452,12 +325,8 @@ fn summary_in(
 /// Returns the working-tree diff of a file against HEAD, bounded for preview.
 pub fn git_file_diff(path: &Path) -> Result<Vec<GitDiffLine>, String> {
     let start = path.parent().unwrap_or(path);
-    let probe = run_git(start, &["rev-parse", "--show-toplevel"])
-        .ok_or_else(|| "未找到 Git。请确认 Git 已安装并位于 PATH 中。".to_string())?;
-    if !probe.status.success() {
-        return Err("所选项目不在 Git 工作区中".to_string());
-    }
-    let root_text = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    let probe = run_git(start, &["rev-parse", "--show-toplevel"]).map_err(|error| error.message)?;
+    let root_text = probe.stdout.trim().to_string();
     let root = dunce::canonicalize(&root_text).unwrap_or_else(|_| PathBuf::from(root_text));
     let target = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let relative = target
@@ -466,8 +335,7 @@ pub fn git_file_diff(path: &Path) -> Result<Vec<GitDiffLine>, String> {
         .to_string_lossy()
         .replace('\\', "/");
 
-    let has_head = run_git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"])
-        .is_some_and(|output| output.status.success());
+    let has_head = run_git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok();
     let mut args = vec!["diff", "--no-ext-diff", "--no-color", "-U3"];
     if has_head {
         args.push("HEAD");
@@ -476,14 +344,84 @@ pub fn git_file_diff(path: &Path) -> Result<Vec<GitDiffLine>, String> {
     }
     args.push("--");
     args.push(&relative);
-    let output = run_git(&root, &args).ok_or_else(|| "无法运行 git diff".to_string())?;
-    if !output.status.success() {
-        return Err(output_error(&output));
-    }
+    let output = run_git(&root, &args).map_err(|error| error.message)?;
     if output.stdout.len() > DIFF_PREVIEW_MAX_BYTES {
         return Err("差异过大，未在预览中显示".to_string());
     }
-    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_unified_diff(&output.stdout))
+}
+
+/// Continue, skip, or abort the operation currently recorded in the Git
+/// directory. The command is chosen from the marker files rather than trusting
+/// a stale UI value.
+pub fn run_git_operation_control(
+    path: &Path,
+    action: GitOperationAction,
+) -> Result<String, String> {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let probe = run_git(
+        start,
+        &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
+    )
+    .map_err(|error| error.message)?;
+    let text = probe.stdout;
+    let mut lines = text.lines();
+    let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
+        return Err("无法确定 Git 仓库".to_string());
+    };
+    let root = dunce::canonicalize(root.trim()).unwrap_or_else(|_| PathBuf::from(root.trim()));
+    let operation = operation_state(Path::new(git_dir.trim()))
+        .ok_or_else(|| "当前没有进行中的 Git 操作".to_string())?;
+    let args = operation_control_args(operation, action)?;
+    GitService::shared()
+        .run_preview_command(&root, args)
+        .map_err(|error| error.message)?;
+    let verb = match action {
+        GitOperationAction::Continue => "继续",
+        GitOperationAction::Skip => "跳过",
+        GitOperationAction::Abort => "中止",
+    };
+    Ok(format!("已{verb}{}", operation.label()))
+}
+
+fn operation_control_args(
+    operation: GitOperationState,
+    action: GitOperationAction,
+) -> Result<&'static [&'static str], String> {
+    match (operation, action) {
+        (GitOperationState::Rebasing, GitOperationAction::Continue) => {
+            Ok(&["rebase", "--continue"])
+        }
+        (GitOperationState::Rebasing, GitOperationAction::Skip) => Ok(&["rebase", "--skip"]),
+        (GitOperationState::Rebasing, GitOperationAction::Abort) => Ok(&["rebase", "--abort"]),
+        (GitOperationState::Merging, GitOperationAction::Continue) => Ok(&["merge", "--continue"]),
+        (GitOperationState::Merging, GitOperationAction::Abort) => Ok(&["merge", "--abort"]),
+        (GitOperationState::CherryPicking, GitOperationAction::Continue) => {
+            Ok(&["cherry-pick", "--continue"])
+        }
+        (GitOperationState::CherryPicking, GitOperationAction::Skip) => {
+            Ok(&["cherry-pick", "--skip"])
+        }
+        (GitOperationState::CherryPicking, GitOperationAction::Abort) => {
+            Ok(&["cherry-pick", "--abort"])
+        }
+        (GitOperationState::Reverting, GitOperationAction::Continue) => {
+            Ok(&["revert", "--continue"])
+        }
+        (GitOperationState::Reverting, GitOperationAction::Skip) => Ok(&["revert", "--skip"]),
+        (GitOperationState::Reverting, GitOperationAction::Abort) => Ok(&["revert", "--abort"]),
+        (GitOperationState::Bisecting, GitOperationAction::Abort) => Ok(&["bisect", "reset"]),
+        (GitOperationState::Merging, GitOperationAction::Skip) => {
+            Err("合并操作不支持跳过".to_string())
+        }
+        (GitOperationState::Bisecting, _) => {
+            Err("二分查找需要明确标记 good 或 bad 提交".to_string())
+        }
+    }
 }
 
 fn parse_changed_files(output: &[u8]) -> Vec<GitChangedFile> {
@@ -509,7 +447,6 @@ fn parse_changed_files(output: &[u8]) -> Vec<GitChangedFile> {
             "2" => {
                 let fields = rest.splitn(9, ' ').collect::<Vec<_>>();
                 let (staged, unstaged) = status_pair(fields.first().copied());
-                // The original path follows the new path as its own NUL record.
                 let _ = records.next();
                 (fields.get(8).copied().unwrap_or_default(), staged, unstaged)
             }
@@ -550,7 +487,7 @@ fn status_pair(xy: Option<&str>) -> (Option<VcsStatus>, Option<VcsStatus>) {
 
 fn recent_commits(root: &Path, limit: usize) -> Vec<GitCommitSummary> {
     let limit = limit.clamp(1, 500).to_string();
-    let Some(output) = run_git(
+    let Ok(output) = run_git(
         root,
         &[
             "log",
@@ -561,10 +498,8 @@ fn recent_commits(root: &Path, limit: usize) -> Vec<GitCommitSummary> {
     ) else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
+    output
+        .stdout
         .lines()
         .filter_map(parse_commit_line)
         .collect()
@@ -735,37 +670,8 @@ fn parse_unified_diff(text: &str) -> Vec<GitDiffLine> {
     lines
 }
 
-fn run_git(current_dir: &Path, args: &[&str]) -> Option<Output> {
-    let mut command = Command::new("git");
-    command
-        .current_dir(current_dir)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never")
-        .env("LC_ALL", "C");
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.output().ok()
-}
-
-fn output_error(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        format!(
-            "Git 操作失败，退出码 {}",
-            output.status.code().unwrap_or(-1)
-        )
-    } else {
-        format!(
-            "Git 操作失败：{}",
-            stderr
-                .replace(['\r', '\n'], " ")
-                .chars()
-                .take(300)
-                .collect::<String>()
-        )
-    }
+fn run_git(current_dir: &Path, args: &[&str]) -> Result<GitCommandResult, GitError> {
+    GitService::shared().run_preview_command(current_dir, args)
 }
 
 #[cfg(test)]
@@ -870,6 +776,107 @@ mod tests {
     }
 
     #[test]
+    fn parses_unified_diff_lines() {
+        let diff = "diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n";
+        let lines = parse_unified_diff(diff);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].kind, GitDiffLineKind::Hunk);
+        assert_eq!(
+            lines[1],
+            GitDiffLine {
+                kind: GitDiffLineKind::Context,
+                text: "keep".into()
+            }
+        );
+        assert_eq!(lines[2].kind, GitDiffLineKind::Removed);
+        assert_eq!(lines[3].kind, GitDiffLineKind::Added);
+    }
+
+    #[test]
+    fn parses_numstat_and_ignores_binary_counts() {
+        assert_eq!(
+            parse_numstat("3\t1\ta.rs\n-\t-\timg.png\n2\t0\tb.rs\n"),
+            (5, 1)
+        );
+    }
+
+    #[test]
+    fn returns_none_outside_a_work_tree() {
+        if !git_available() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("kite-git-none-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("create plain dir");
+        // The temp directory itself may sit inside a repository on CI hosts.
+        if let Ok(Some(summary)) = git_path_summary(&root) {
+            assert!(!root.starts_with(&summary.repository_root) || summary.relative_path != ".");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn summarizes_a_file_and_directory_in_a_real_repository() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("summary");
+        std::fs::create_dir_all(root.join("src")).expect("create src");
+        std::fs::write(root.join("src").join("a.txt"), "one\ntwo\n").expect("write a");
+        git_ok(&root, &["add", "."]);
+        git_ok(&root, &["commit", "--quiet", "-m", "initial commit"]);
+        std::fs::write(root.join("src").join("a.txt"), "one\nTWO\nthree\n").expect("edit a");
+        std::fs::write(root.join("src").join("new.txt"), "fresh\n").expect("write new");
+
+        let file = git_path_summary(&root.join("src").join("a.txt"))
+            .expect("file summary")
+            .expect("inside repo");
+        assert_eq!(file.branch.as_deref(), Some("main"));
+        assert_eq!(file.unstaged_status, Some(VcsStatus::Modified));
+        assert_eq!(file.staged_status, None);
+        assert_eq!((file.lines_added, file.lines_removed), (2, 1));
+        let commit = file.last_commit.expect("last commit");
+        assert_eq!(commit.subject, "initial commit");
+        assert_eq!(commit.author, "Kite Test");
+
+        let directory = git_path_summary(&root.join("src"))
+            .expect("dir summary")
+            .expect("inside repo");
+        assert!(directory.is_directory);
+        assert_eq!(directory.changes.modified, 1);
+        assert_eq!(directory.changes.untracked, 1);
+
+        let diff = git_file_diff(&root.join("src").join("a.txt")).expect("diff");
+        assert!(
+            diff.iter()
+                .any(|line| line.kind == GitDiffLineKind::Removed && line.text == "two")
+        );
+        assert!(
+            diff.iter()
+                .any(|line| line.kind == GitDiffLineKind::Added && line.text == "three")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handles_an_unborn_branch() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("unborn");
+        std::fs::write(root.join("a.txt"), "x\n").expect("write");
+        git_ok(&root, &["add", "a.txt"]);
+        let file = git_path_summary(&root.join("a.txt"))
+            .expect("summary")
+            .expect("inside repo");
+        assert_eq!(file.staged_status, Some(VcsStatus::Added));
+        assert_eq!(file.branch.as_deref(), Some("main"));
+        assert!(file.last_commit.is_none());
+        let diff = git_file_diff(&root.join("a.txt")).expect("diff");
+        assert!(diff.iter().any(|line| line.kind == GitDiffLineKind::Added));
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
     fn parses_changed_file_paths_and_statuses() {
         let output = b"# branch.oid 0123456789abcdef\0# branch.head main\0\
 1 .M N... 100644 100644 100644 a b src/a file.rs\0\
@@ -955,89 +962,6 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
     }
 
     #[test]
-    fn parses_unified_diff_lines() {
-        let diff = "diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n";
-        let lines = parse_unified_diff(diff);
-        assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].kind, GitDiffLineKind::Hunk);
-        assert_eq!(
-            lines[1],
-            GitDiffLine {
-                kind: GitDiffLineKind::Context,
-                text: "keep".into()
-            }
-        );
-        assert_eq!(lines[2].kind, GitDiffLineKind::Removed);
-        assert_eq!(lines[3].kind, GitDiffLineKind::Added);
-    }
-
-    #[test]
-    fn parses_numstat_and_ignores_binary_counts() {
-        assert_eq!(
-            parse_numstat("3\t1\ta.rs\n-\t-\timg.png\n2\t0\tb.rs\n"),
-            (5, 1)
-        );
-    }
-
-    #[test]
-    fn returns_none_outside_a_work_tree() {
-        if !git_available() {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("kite-git-none-{}", std::process::id()));
-        std::fs::create_dir_all(&root).expect("create plain dir");
-        // The temp directory itself may sit inside a repository on CI hosts.
-        if let Ok(Some(summary)) = git_path_summary(&root) {
-            assert!(!root.starts_with(&summary.repository_root) || summary.relative_path != ".");
-        }
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn summarizes_a_file_and_directory_in_a_real_repository() {
-        if !git_available() {
-            return;
-        }
-        let root = temp_repo("summary");
-        std::fs::create_dir_all(root.join("src")).expect("create src");
-        std::fs::write(root.join("src").join("a.txt"), "one\ntwo\n").expect("write a");
-        git_ok(&root, &["add", "."]);
-        git_ok(&root, &["commit", "--quiet", "-m", "initial commit"]);
-        std::fs::write(root.join("src").join("a.txt"), "one\nTWO\nthree\n").expect("edit a");
-        std::fs::write(root.join("src").join("new.txt"), "fresh\n").expect("write new");
-
-        let file = git_path_summary(&root.join("src").join("a.txt"))
-            .expect("file summary")
-            .expect("inside repo");
-        assert_eq!(file.branch.as_deref(), Some("main"));
-        assert_eq!(file.unstaged_status, Some(VcsStatus::Modified));
-        assert_eq!(file.staged_status, None);
-        assert_eq!((file.lines_added, file.lines_removed), (2, 1));
-        let commit = file.last_commit.expect("last commit");
-        assert_eq!(commit.subject, "initial commit");
-        assert_eq!(commit.author, "Kite Test");
-
-        let directory = git_path_summary(&root.join("src"))
-            .expect("dir summary")
-            .expect("inside repo");
-        assert!(directory.is_directory);
-        assert_eq!(directory.changes.modified, 1);
-        assert_eq!(directory.changes.untracked, 1);
-
-        let diff = git_file_diff(&root.join("src").join("a.txt")).expect("diff");
-        assert!(
-            diff.iter()
-                .any(|line| line.kind == GitDiffLineKind::Removed && line.text == "two")
-        );
-        assert!(
-            diff.iter()
-                .any(|line| line.kind == GitDiffLineKind::Added && line.text == "three")
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn reads_repository_snapshot_for_the_git_client() {
         if !git_available() {
             return;
@@ -1091,25 +1015,6 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
             assert_eq!(operation_state(&root), Some(expected));
             std::fs::remove_file(root.join(marker)).expect("remove marker");
         }
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn handles_an_unborn_branch() {
-        if !git_available() {
-            return;
-        }
-        let root = temp_repo("unborn");
-        std::fs::write(root.join("a.txt"), "x\n").expect("write");
-        git_ok(&root, &["add", "a.txt"]);
-        let file = git_path_summary(&root.join("a.txt"))
-            .expect("summary")
-            .expect("inside repo");
-        assert_eq!(file.staged_status, Some(VcsStatus::Added));
-        assert_eq!(file.branch.as_deref(), Some("main"));
-        assert!(file.last_commit.is_none());
-        let diff = git_file_diff(&root.join("a.txt")).expect("diff");
-        assert!(diff.iter().any(|line| line.kind == GitDiffLineKind::Added));
         let _ = std::fs::remove_dir_all(root);
     }
 }

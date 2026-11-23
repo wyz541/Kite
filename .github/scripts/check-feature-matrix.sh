@@ -20,6 +20,7 @@ required_features=(
   "预览 Git 状态"
   "Git 客户端"
   "Git 客户端变更与行级暂存"
+  "Git Stash、Reset、Revert 与 Cherry-pick"
 )
 
 failed=false

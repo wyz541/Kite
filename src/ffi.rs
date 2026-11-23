@@ -10,11 +10,15 @@ use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSea
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, transfer_entry};
+use crate::git::GitEventSink as _;
 use crate::git::{
     self, GitChangedFile, GitDiffLine, GitDiffLineKind, GitOperationAction, GitOperationState,
     GitPathSummary, GitRepositorySnapshot,
 };
 use crate::git_changes::{self, GitChangeGroup, GitDiffScope, GitHunkLineKind};
+use crate::git_ops::{
+    self, GitCommandOutcome, GitRepositoryStatus, GitResetMode, GitStashEntry, GitStashSaveOptions,
+};
 use crate::platform::{HostPlatform, default_root_path, host_platform};
 use crate::session::{self as session_store, GitClientWindowSessionDto, SessionStateDto};
 use crate::text_editor::{self, TextDocument, TextLineEnding};
@@ -319,6 +323,183 @@ pub struct GitDiffLineDto {
     pub text: String,
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitStashEntryDto {
+    pub selector: String,
+    pub commit_hash: String,
+    pub short_hash: String,
+    pub date: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRepositoryStatusDto {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub operation: Option<String>,
+    pub has_conflicts: bool,
+    pub stash_count: u32,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCommandOutcomeDto {
+    pub message: String,
+    pub operation: Option<String>,
+    pub has_conflicts: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitResetModeDto {
+    Soft,
+    Mixed,
+    Hard,
+    Keep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitErrorKindDto {
+    NotInstalled,
+    NotRepository,
+    Authentication,
+    Conflict,
+    Rejected,
+    MissingIdentity,
+    RepositoryLocked,
+    UnsupportedVersion,
+    Cancelled,
+    InvalidOperation,
+    Io,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitCredentialKindDto {
+    Https,
+    SshPassphrase,
+    GpgPinentry,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitCredentialRequestDto {
+    pub kind: GitCredentialKindDto,
+    pub prompt: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitOutputStreamDto {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitEventDto {
+    Started {
+        label: String,
+        repository: String,
+        command: String,
+    },
+    Progress {
+        text: String,
+    },
+    Output {
+        stream: GitOutputStreamDto,
+        text: String,
+    },
+    CredentialRequested {
+        kind: GitCredentialKindDto,
+        prompt: String,
+    },
+    RepositoryChanged {
+        repository: String,
+        branch: Option<String>,
+        head_oid: Option<String>,
+        operation: Option<String>,
+    },
+    Finished {
+        duration_ms: u64,
+        exit_code: Option<i32>,
+    },
+    Failed {
+        kind: GitErrorKindDto,
+        message: String,
+        duration_ms: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitHeadDto {
+    Branch { name: String, oid: Option<String> },
+    Detached { oid: String },
+    Unborn { name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitRepositoryStateDto {
+    pub repository_root: String,
+    pub git_dir: String,
+    pub common_dir: String,
+    pub head: GitHeadDto,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub operation: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitVersionInfoDto {
+    pub raw: String,
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub minimum: String,
+    pub supported: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitConsoleEntryDto {
+    pub recorded_unix_ms: i64,
+    pub label: String,
+    pub command: String,
+    pub repository: String,
+    pub duration_ms: u64,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitOperationDto {
+    Add,
+    Unstage,
+    Commit { message: String },
+    Pull,
+    Push,
+    Fetch,
+    Revert,
+    Clean,
+    Clone { url: String, destination: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitOperationResultDto {
+    pub message: String,
+    pub duration_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+#[uniffi::export(callback_interface)]
+pub trait GitEventCallback: Send + Sync {
+    fn on_event(&self, event: GitEventDto);
+}
+
+#[uniffi::export(callback_interface)]
+pub trait GitCredentialCallback: Send + Sync {
+    fn request_credential(&self, request: GitCredentialRequestDto) -> Option<String>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum GitChangeGroupDto {
     Staged,
@@ -446,12 +627,34 @@ pub enum VcsQueryDto {
 pub enum KiteError {
     #[error("{message}")]
     OperationFailed { message: String },
+    #[error("{message}")]
+    Git {
+        kind: GitErrorKindDto,
+        message: String,
+        detail: Option<String>,
+        exit_code: Option<i32>,
+        command: Option<String>,
+        repository: Option<String>,
+    },
 }
 
 impl KiteError {
     fn operation(message: impl Into<String>) -> Self {
         Self::OperationFailed {
             message: message.into(),
+        }
+    }
+
+    fn from_git(error: git::GitError) -> Self {
+        Self::Git {
+            kind: git_error_kind_dto(error.kind),
+            message: error.message,
+            detail: error.detail,
+            exit_code: error.exit_code,
+            command: error.command,
+            repository: error
+                .repository
+                .map(|path| path.to_string_lossy().into_owned()),
         }
     }
 }
@@ -917,6 +1120,158 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    pub fn git_operation_status(&self, path: String) -> Result<GitRepositoryStatusDto, KiteError> {
+        git_ops::git_operation_status(&PathBuf::from(path))
+            .map(git_repository_status_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_list(&self, path: String) -> Result<Vec<GitStashEntryDto>, KiteError> {
+        git_ops::git_stash_list(&PathBuf::from(path))
+            .map(|entries| entries.into_iter().map(git_stash_entry_dto).collect())
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_diff(
+        &self,
+        path: String,
+        index: u32,
+    ) -> Result<Vec<GitDiffLineDto>, KiteError> {
+        git_ops::git_stash_diff(&PathBuf::from(path), index)
+            .map(|lines| lines.into_iter().map(git_diff_line_dto).collect())
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_save(
+        &self,
+        path: String,
+        message: Option<String>,
+        include_untracked: bool,
+        keep_index: bool,
+        paths: Vec<String>,
+    ) -> Result<String, KiteError> {
+        git_ops::git_stash_save(
+            &PathBuf::from(path),
+            GitStashSaveOptions {
+                message,
+                include_untracked,
+                keep_index,
+                paths: paths.into_iter().map(PathBuf::from).collect(),
+            },
+        )
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_apply(
+        &self,
+        path: String,
+        index: u32,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_stash_apply(&PathBuf::from(path), index)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_pop(
+        &self,
+        path: String,
+        index: u32,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_stash_pop(&PathBuf::from(path), index)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_drop(
+        &self,
+        path: String,
+        index: u32,
+        confirmed: bool,
+    ) -> Result<String, KiteError> {
+        git_ops::git_stash_drop(&PathBuf::from(path), index, confirmed)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_clear(&self, path: String, confirmed: bool) -> Result<String, KiteError> {
+        git_ops::git_stash_clear(&PathBuf::from(path), confirmed).map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_branch(
+        &self,
+        path: String,
+        index: u32,
+        branch: String,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_stash_branch(&PathBuf::from(path), index, &branch)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_reset(
+        &self,
+        path: String,
+        mode: GitResetModeDto,
+        target: String,
+        confirmed: bool,
+    ) -> Result<String, KiteError> {
+        git_ops::git_reset(
+            &PathBuf::from(path),
+            git_reset_mode(mode),
+            &target,
+            confirmed,
+        )
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_revert(
+        &self,
+        path: String,
+        commits: Vec<String>,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_revert(&PathBuf::from(path), &commits)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_revert_continue(&self, path: String) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_revert_continue(&PathBuf::from(path))
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_revert_abort(&self, path: String) -> Result<String, KiteError> {
+        git_ops::git_revert_abort(&PathBuf::from(path)).map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick(
+        &self,
+        path: String,
+        commits: Vec<String>,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_cherry_pick(&PathBuf::from(path), &commits)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick_continue(
+        &self,
+        path: String,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_cherry_pick_continue(&PathBuf::from(path))
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick_skip(&self, path: String) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_cherry_pick_skip(&PathBuf::from(path))
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick_abort(&self, path: String) -> Result<String, KiteError> {
+        git_ops::git_cherry_pick_abort(&PathBuf::from(path)).map_err(KiteError::operation)
+    }
+
     /// Flat repository change list used by the Git client window.
     pub fn git_repository_changes(
         &self,
@@ -1040,12 +1395,16 @@ impl KiteCore {
         operation: VcsOperationDto,
         path: String,
     ) -> Result<String, KiteError> {
-        run_vcs_operation(
-            vcs_tool(tool),
-            vcs_operation(operation),
-            &PathBuf::from(path),
-        )
-        .map_err(KiteError::operation)
+        let operation = vcs_operation(operation);
+        let path = PathBuf::from(path);
+        match tool {
+            VcsToolDto::Git => crate::git::GitService::shared()
+                .run_legacy_operation(&path, &operation)
+                .map_err(KiteError::from_git),
+            VcsToolDto::Svn => {
+                run_vcs_operation(VcsTool::Svn, operation, &path).map_err(KiteError::operation)
+            }
+        }
     }
 
     pub fn run_vcs_operation_cancellable(
@@ -1083,7 +1442,339 @@ impl KiteCore {
             VcsQueryDto::Diff => VcsQuery::Diff,
             VcsQueryDto::Log => VcsQuery::Log,
         };
-        run_vcs_query(vcs_tool(tool), query, &PathBuf::from(path)).map_err(KiteError::operation)
+        let path = PathBuf::from(path);
+        match tool {
+            VcsToolDto::Git => crate::git::GitService::shared()
+                .run_legacy_query(&path, query)
+                .map_err(KiteError::from_git),
+            VcsToolDto::Svn => {
+                run_vcs_query(VcsTool::Svn, query, &path).map_err(KiteError::operation)
+            }
+        }
+    }
+}
+
+struct CallbackEventSink(Box<dyn GitEventCallback>);
+
+impl git::GitEventSink for CallbackEventSink {
+    fn emit(&self, event: git::GitEvent) {
+        self.0.on_event(git_event_dto(event));
+    }
+}
+
+struct CallbackCredentialProvider(Box<dyn GitCredentialCallback>);
+
+impl git::GitCredentialProvider for CallbackCredentialProvider {
+    fn request_credential(&self, request: &git::GitCredentialRequest) -> Option<String> {
+        self.0.request_credential(GitCredentialRequestDto {
+            kind: git_credential_kind_dto(request.kind),
+            prompt: request.prompt.clone(),
+        })
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct GitService {
+    inner: git::GitService,
+}
+
+#[uniffi::export]
+impl GitService {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: git::GitService::shared().clone(),
+        })
+    }
+
+    pub fn version(&self) -> Result<GitVersionInfoDto, KiteError> {
+        self.inner
+            .git_version()
+            .map(git_version_dto)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn repository_state(&self, path: String) -> Result<GitRepositoryStateDto, KiteError> {
+        self.inner
+            .repository_state(&PathBuf::from(path))
+            .map(git_repository_state_dto)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn console_entries(&self) -> Vec<GitConsoleEntryDto> {
+        self.inner
+            .console_entries()
+            .into_iter()
+            .map(git_console_entry_dto)
+            .collect()
+    }
+
+    pub fn clear_console(&self) {
+        self.inner.clear_console();
+    }
+
+    pub fn run_operation(
+        &self,
+        path: String,
+        operation: GitOperationDto,
+        events: Box<dyn GitEventCallback>,
+        credentials: Box<dyn GitCredentialCallback>,
+    ) -> Result<GitOperationResultDto, KiteError> {
+        let events = CallbackEventSink(events);
+        let credentials = CallbackCredentialProvider(credentials);
+        self.inner
+            .run_operation(
+                &PathBuf::from(path),
+                git_operation(operation),
+                &git::CancellationToken::default(),
+                &events,
+                Some(&credentials),
+            )
+            .map(git_operation_result_dto)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn start_operation(
+        &self,
+        path: String,
+        operation: GitOperationDto,
+        events: Box<dyn GitEventCallback>,
+        credentials: Box<dyn GitCredentialCallback>,
+    ) -> Arc<GitOperationHandle> {
+        let events: git::SharedEventSink = Arc::new(CallbackEventSink(events));
+        let credentials: git::SharedCredentialProvider =
+            Arc::new(CallbackCredentialProvider(credentials));
+        Arc::new(GitOperationHandle {
+            inner: self.inner.start_operation(
+                PathBuf::from(path),
+                git_operation(operation),
+                events,
+                Some(credentials),
+            ),
+        })
+    }
+
+    pub fn watch_repository(
+        &self,
+        path: String,
+        events: Box<dyn GitEventCallback>,
+    ) -> Result<Arc<GitRepositoryWatchHandle>, KiteError> {
+        let events = Arc::new(CallbackEventSink(events));
+        let watcher = self
+            .inner
+            .watch_repository(&PathBuf::from(path), move |event| match event {
+                git::GitRepositoryEvent::Changed(state) => {
+                    events.emit(git::GitEvent::RepositoryChanged {
+                        repository: state.repository.work_tree.clone(),
+                        branch: state.branch().map(str::to_string),
+                        head_oid: state.head_oid().map(str::to_string),
+                        operation: state.operation,
+                    });
+                }
+                git::GitRepositoryEvent::Error(error) => {
+                    events.emit(git::GitEvent::Failed {
+                        kind: error.kind,
+                        message: error.message,
+                        duration_ms: 0,
+                    });
+                }
+            })
+            .map_err(KiteError::from_git)?;
+        Ok(Arc::new(GitRepositoryWatchHandle {
+            watcher: Mutex::new(Some(watcher)),
+        }))
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct GitOperationHandle {
+    inner: Arc<git::GitOperationTask>,
+}
+
+#[uniffi::export]
+impl GitOperationHandle {
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+
+    pub fn wait(&self) -> Result<GitOperationResultDto, KiteError> {
+        self.inner
+            .wait()
+            .map(git_operation_result_dto)
+            .map_err(KiteError::from_git)
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct GitRepositoryWatchHandle {
+    watcher: Mutex<Option<git::GitRepositoryWatcher>>,
+}
+
+#[uniffi::export]
+impl GitRepositoryWatchHandle {
+    pub fn stop(&self) {
+        if let Ok(mut watcher) = self.watcher.lock()
+            && let Some(mut watcher) = watcher.take()
+        {
+            watcher.stop();
+        }
+    }
+}
+
+fn git_operation(operation: GitOperationDto) -> git::GitOperation {
+    match operation {
+        GitOperationDto::Add => git::GitOperation::Add,
+        GitOperationDto::Unstage => git::GitOperation::Unstage,
+        GitOperationDto::Commit { message } => git::GitOperation::Commit(message),
+        GitOperationDto::Pull => git::GitOperation::Pull,
+        GitOperationDto::Push => git::GitOperation::Push,
+        GitOperationDto::Fetch => git::GitOperation::Fetch,
+        GitOperationDto::Revert => git::GitOperation::Revert,
+        GitOperationDto::Clean => git::GitOperation::Clean,
+        GitOperationDto::Clone { url, destination } => git::GitOperation::Clone {
+            url,
+            destination: PathBuf::from(destination),
+        },
+    }
+}
+
+fn git_operation_result_dto(result: git::GitOperationResult) -> GitOperationResultDto {
+    GitOperationResultDto {
+        message: result.message,
+        duration_ms: result.command.duration_ms,
+        stdout: result.command.stdout,
+        stderr: result.command.stderr,
+        exit_code: result.command.exit_code,
+    }
+}
+
+fn git_repository_state_dto(state: git::GitRepositoryState) -> GitRepositoryStateDto {
+    GitRepositoryStateDto {
+        repository_root: state.repository.work_tree.to_string_lossy().into_owned(),
+        git_dir: state.repository.git_dir.to_string_lossy().into_owned(),
+        common_dir: state.repository.common_dir.to_string_lossy().into_owned(),
+        head: match state.head {
+            git::GitHead::Branch { name, oid } => GitHeadDto::Branch { name, oid },
+            git::GitHead::Detached { oid } => GitHeadDto::Detached { oid },
+            git::GitHead::Unborn { name } => GitHeadDto::Unborn { name },
+        },
+        upstream: state.upstream,
+        ahead: state.ahead,
+        behind: state.behind,
+        operation: state
+            .operation
+            .map(|operation| operation.label().to_string()),
+    }
+}
+
+fn git_version_dto(version: git::GitVersion) -> GitVersionInfoDto {
+    GitVersionInfoDto {
+        supported: version.is_supported(),
+        raw: version.raw,
+        major: version.major,
+        minor: version.minor,
+        patch: version.patch,
+        minimum: git::MIN_GIT_VERSION.display(),
+    }
+}
+
+fn git_console_entry_dto(entry: git::GitConsoleEntry) -> GitConsoleEntryDto {
+    GitConsoleEntryDto {
+        recorded_unix_ms: entry.recorded_unix_ms,
+        label: entry.label,
+        command: entry.command,
+        repository: entry.repository.to_string_lossy().into_owned(),
+        duration_ms: entry.duration_ms,
+        exit_code: entry.exit_code,
+        stdout: entry.stdout,
+        stderr: entry.stderr,
+    }
+}
+
+fn git_event_dto(event: git::GitEvent) -> GitEventDto {
+    match event {
+        git::GitEvent::Started {
+            label,
+            repository,
+            command,
+        } => GitEventDto::Started {
+            label,
+            repository: repository.to_string_lossy().into_owned(),
+            command,
+        },
+        git::GitEvent::Progress { text } => GitEventDto::Progress { text },
+        git::GitEvent::Output { stream, text } => GitEventDto::Output {
+            stream: match stream {
+                git::GitOutputStream::Stdout => GitOutputStreamDto::Stdout,
+                git::GitOutputStream::Stderr => GitOutputStreamDto::Stderr,
+            },
+            text,
+        },
+        git::GitEvent::CredentialRequested { kind, prompt } => GitEventDto::CredentialRequested {
+            kind: git_credential_kind_dto(kind),
+            prompt,
+        },
+        git::GitEvent::RepositoryChanged {
+            repository,
+            branch,
+            head_oid,
+            operation,
+        } => GitEventDto::RepositoryChanged {
+            repository: repository.to_string_lossy().into_owned(),
+            branch,
+            head_oid,
+            operation: operation.map(|operation| operation.label().to_string()),
+        },
+        git::GitEvent::Finished {
+            duration_ms,
+            exit_code,
+        } => GitEventDto::Finished {
+            duration_ms,
+            exit_code,
+        },
+        git::GitEvent::Failed {
+            kind,
+            message,
+            duration_ms,
+        } => GitEventDto::Failed {
+            kind: git_error_kind_dto(kind),
+            message,
+            duration_ms,
+        },
+    }
+}
+
+fn git_credential_kind_dto(kind: git::GitCredentialKind) -> GitCredentialKindDto {
+    match kind {
+        git::GitCredentialKind::Https => GitCredentialKindDto::Https,
+        git::GitCredentialKind::SshPassphrase => GitCredentialKindDto::SshPassphrase,
+        git::GitCredentialKind::GpgPinentry => GitCredentialKindDto::GpgPinentry,
+        git::GitCredentialKind::Unknown => GitCredentialKindDto::Unknown,
+    }
+}
+
+fn git_error_kind_dto(kind: git::GitErrorKind) -> GitErrorKindDto {
+    match kind {
+        git::GitErrorKind::NotInstalled => GitErrorKindDto::NotInstalled,
+        git::GitErrorKind::NotRepository => GitErrorKindDto::NotRepository,
+        git::GitErrorKind::Authentication => GitErrorKindDto::Authentication,
+        git::GitErrorKind::Conflict => GitErrorKindDto::Conflict,
+        git::GitErrorKind::Rejected => GitErrorKindDto::Rejected,
+        git::GitErrorKind::MissingIdentity => GitErrorKindDto::MissingIdentity,
+        git::GitErrorKind::RepositoryLocked => GitErrorKindDto::RepositoryLocked,
+        git::GitErrorKind::UnsupportedVersion => GitErrorKindDto::UnsupportedVersion,
+        git::GitErrorKind::Cancelled => GitErrorKindDto::Cancelled,
+        git::GitErrorKind::InvalidOperation => GitErrorKindDto::InvalidOperation,
+        git::GitErrorKind::Io => GitErrorKindDto::Io,
+        git::GitErrorKind::Other => GitErrorKindDto::Other,
     }
 }
 
@@ -1364,6 +2055,43 @@ fn git_line_selections(selections: Vec<GitLineSelectionDto>) -> Vec<git_changes:
             new_line: selection.new_line,
         })
         .collect()
+}
+
+fn git_stash_entry_dto(entry: GitStashEntry) -> GitStashEntryDto {
+    GitStashEntryDto {
+        selector: entry.selector,
+        commit_hash: entry.commit_hash,
+        short_hash: entry.short_hash,
+        date: entry.date,
+        message: entry.message,
+    }
+}
+
+fn git_repository_status_dto(status: GitRepositoryStatus) -> GitRepositoryStatusDto {
+    GitRepositoryStatusDto {
+        repository_root: status.repository_root.to_string_lossy().into_owned(),
+        branch: status.branch,
+        operation: status.operation.map(|state| state.label().to_string()),
+        has_conflicts: status.has_conflicts,
+        stash_count: status.stash_count,
+    }
+}
+
+fn git_command_outcome_dto(outcome: GitCommandOutcome) -> GitCommandOutcomeDto {
+    GitCommandOutcomeDto {
+        message: outcome.message,
+        operation: outcome.operation.map(|state| state.label().to_string()),
+        has_conflicts: outcome.has_conflicts,
+    }
+}
+
+fn git_reset_mode(mode: GitResetModeDto) -> GitResetMode {
+    match mode {
+        GitResetModeDto::Soft => GitResetMode::Soft,
+        GitResetModeDto::Mixed => GitResetMode::Mixed,
+        GitResetModeDto::Hard => GitResetMode::Hard,
+        GitResetModeDto::Keep => GitResetMode::Keep,
+    }
 }
 
 fn text_document_dto(document: TextDocument) -> TextDocumentDto {
