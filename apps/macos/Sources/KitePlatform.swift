@@ -510,5 +510,3 @@ private final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLP
         currentURL as NSURL?
     }
 }
-
-

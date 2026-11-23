@@ -1,50 +1,11 @@
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::command::{CancellationToken, GitCommandOptions, GitExecutor};
-use super::events::NoopGitEventSink;
-use super::repository::{discover_repository, working_directory};
 use crate::fs::VcsStatus;
 
 #[derive(Clone, Debug)]
 pub(crate) struct GitPathStatus {
     pub path: PathBuf,
     pub status: VcsStatus,
-}
-
-pub(crate) fn git_statuses(view_root: &Path) -> (bool, Vec<GitPathStatus>) {
-    let executor = GitExecutor::new();
-    let start = working_directory(view_root);
-    let Ok(repository) = discover_repository(&executor, start) else {
-        return (false, Vec::new());
-    };
-    let args = [
-        "status",
-        "--porcelain=v1",
-        "-z",
-        "--untracked-files=all",
-        "--ignored=matching",
-        "--",
-        ".",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect::<Vec<_>>();
-    let result = executor.run(
-        start,
-        args,
-        GitCommandOptions::new("读取 Git 状态"),
-        &CancellationToken::default(),
-        &NoopGitEventSink,
-        None,
-    );
-    let Ok(result) = result else {
-        return (true, Vec::new());
-    };
-    (
-        true,
-        parse_git_status(result.stdout.as_bytes(), &repository.work_tree),
-    )
 }
 
 pub(crate) fn parse_git_status(output: &[u8], root: &Path) -> Vec<GitPathStatus> {

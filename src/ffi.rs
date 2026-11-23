@@ -17,8 +17,9 @@ use crate::git::remote::{
     GitPushOptions,
 };
 use crate::git::{
-    self, GitChangedFile, GitDiffLine, GitDiffLineKind, GitOperationAction, GitOperationState,
-    GitPathSummary, GitRepositorySnapshot,
+    self, GitChangedFile, GitCommitOptions, GitCommitResult, GitCommitState, GitDiffLine,
+    GitDiffLineKind, GitOperationAction, GitOperationState, GitPathSummary, GitRepositorySnapshot,
+    GitSigningMode,
 };
 use crate::git_changes::{self, GitChangeGroup, GitDiffScope, GitHunkLineKind};
 use crate::git_ops::{
@@ -330,6 +331,62 @@ pub enum GitDiffLineKindDto {
 pub struct GitDiffLineDto {
     pub kind: GitDiffLineKindDto,
     pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum GitSigningModeDto {
+    #[default]
+    GitConfig,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCommitOptionsDto {
+    pub repository_path: String,
+    pub message: String,
+    pub amend: bool,
+    pub signoff: bool,
+    pub signing: GitSigningModeDto,
+    pub skip_hooks: bool,
+    pub author: Option<String>,
+    pub push: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCommitStateDto {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub head_short_hash: Option<String>,
+    pub upstream: Option<String>,
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+    pub identity_configured: bool,
+    pub staged_files: Vec<String>,
+    pub staged_lines_added: u32,
+    pub staged_lines_removed: u32,
+    pub amend_files: Vec<String>,
+    pub amend_lines_added: u32,
+    pub amend_lines_removed: u32,
+    pub unresolved_conflicts: Vec<String>,
+    pub commit_template: Option<String>,
+    pub previous_message: Option<String>,
+    pub recent_messages: Vec<String>,
+    pub signing_default: bool,
+    pub signing_format: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCommitResultDto {
+    pub hash: String,
+    pub short_hash: String,
+    pub subject: String,
+    pub amended: bool,
+    pub signed: bool,
+    pub pushed: bool,
+    pub command_output: Option<String>,
+    pub push_error: Option<String>,
+    pub push_output: Option<String>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1342,6 +1399,25 @@ impl KiteCore {
     pub fn git_path_summary(&self, path: String) -> Result<Option<GitPathSummaryDto>, KiteError> {
         git::git_path_summary(&PathBuf::from(path))
             .map(|summary| summary.map(git_path_summary_dto))
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_commit_state(&self, path: String) -> Result<GitCommitStateDto, KiteError> {
+        git::git_commit_state(&PathBuf::from(path))
+            .map(git_commit_state_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_commit_subject_warning(&self, message: String) -> Option<String> {
+        git::commit_subject_warning(&message)
+    }
+
+    pub fn git_commit(
+        &self,
+        options: GitCommitOptionsDto,
+    ) -> Result<GitCommitResultDto, KiteError> {
+        git::commit(git_commit_options(options))
+            .map(git_commit_result_dto)
             .map_err(KiteError::operation)
     }
 
@@ -2628,6 +2704,61 @@ fn git_diff_line_dto(line: GitDiffLine) -> GitDiffLineDto {
             GitDiffLineKind::Hunk => GitDiffLineKindDto::Hunk,
         },
         text: line.text,
+    }
+}
+
+fn git_commit_options(options: GitCommitOptionsDto) -> GitCommitOptions {
+    GitCommitOptions {
+        repository_path: PathBuf::from(options.repository_path),
+        message: options.message,
+        amend: options.amend,
+        signoff: options.signoff,
+        signing: match options.signing {
+            GitSigningModeDto::GitConfig => GitSigningMode::GitConfig,
+            GitSigningModeDto::Enabled => GitSigningMode::Enabled,
+            GitSigningModeDto::Disabled => GitSigningMode::Disabled,
+        },
+        skip_hooks: options.skip_hooks,
+        author: options.author,
+        push: options.push,
+    }
+}
+
+fn git_commit_state_dto(state: GitCommitState) -> GitCommitStateDto {
+    GitCommitStateDto {
+        repository_root: state.repository_root.to_string_lossy().into_owned(),
+        branch: state.branch,
+        head_short_hash: state.head_short_hash,
+        upstream: state.upstream,
+        user_name: state.user_name,
+        user_email: state.user_email,
+        identity_configured: state.identity_configured,
+        staged_files: state.staged_files,
+        staged_lines_added: state.staged_lines_added,
+        staged_lines_removed: state.staged_lines_removed,
+        amend_files: state.amend_files,
+        amend_lines_added: state.amend_lines_added,
+        amend_lines_removed: state.amend_lines_removed,
+        unresolved_conflicts: state.unresolved_conflicts,
+        commit_template: state.commit_template,
+        previous_message: state.previous_message,
+        recent_messages: state.recent_messages,
+        signing_default: state.signing_default,
+        signing_format: state.signing_format,
+    }
+}
+
+fn git_commit_result_dto(result: GitCommitResult) -> GitCommitResultDto {
+    GitCommitResultDto {
+        hash: result.hash,
+        short_hash: result.short_hash,
+        subject: result.subject,
+        amended: result.amended,
+        signed: result.signed,
+        pushed: result.pushed,
+        command_output: result.command_output,
+        push_error: result.push_error,
+        push_output: result.push_output,
     }
 }
 

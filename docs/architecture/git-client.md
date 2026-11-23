@@ -14,7 +14,7 @@ Kite 的 Git 能力分两层交付：
 Git 逻辑只在 Rust Core 实现一次。
 
 - Core：`src/git/` 提供命令执行器、仓库发现、状态、操作、凭据桥、控制台、仓库监听，以及 `remote` 远程同步模块。`src/vcs.rs` 只保留 SVN 实现及共享的 VCS 枚举。
-- FFI：`src/ffi.rs` 导出 `GitService`、同步操作、后台 `GitOperationHandle`、远程同步、进度监视器和仓库事件回调。
+- FFI：`src/ffi.rs` 导出 `GitService`、同步操作、后台 `GitOperationHandle`、远程同步、提交状态与执行、进度监视器和仓库事件回调。
 - Windows：GPUI 的 Git 菜单写入和远程同步委托给 `kite_core::git::GitService`。SVN 继续走 `vcs.rs`。
 - macOS：SwiftUI 通过同一 Git 服务和 UniFFI 调用预览、远程同步与仓库操作。
 
@@ -132,6 +132,8 @@ Windows UI 和 FFI 都读取同一个 `GitService` 控制台快照。
 - `GitService.version()`
 - `GitService.console_entries()`
 - `GitService.clear_console()`
+- `git_commit_state(path)`：读取暂存文件、身份、模板、最近提交信息和签名默认值。
+- `git_commit_subject_warning(message)`：返回非阻塞的提交标题提示。
 
 ### 同步与后台写入
 
@@ -140,6 +142,7 @@ Windows UI 和 FFI 都读取同一个 `GitService` 控制台快照。
 - `GitOperationHandle.cancel()`
 - `GitOperationHandle.is_finished()`
 - `GitOperationHandle.wait()`
+- `git_commit(options)`：创建普通或 amend 提交，支持 sign-off、签名三态、跳过 hooks、指定作者和提交后推送。
 
 `GitOperationDto` 覆盖现有 macOS Git 写操作：Add、Unstage、Commit、Pull、Push、Fetch、Revert、Clean，并预留 Clone。
 
@@ -160,6 +163,24 @@ Windows UI 和 FFI 都读取同一个 `GitService` 控制台快照。
 ### 仓库监听
 
 `GitService.watch_repository(path, events)` 返回 `GitRepositoryWatchHandle`。调用 `stop()` 停止监听。
+
+## 提交
+
+提交工作流由 `src/git/commit.rs` 提供，Windows 和 macOS 共用同一套预检查与执行逻辑：
+
+- `git_commit_state(path)` 读取当前分支、HEAD、上游、`user.name`、`user.email`、暂存文件和增删统计。
+- amend 状态按 `HEAD^` 到索引计算最终文件集；根提交使用空树作为比较基线。
+- 未解决冲突、缺少用户身份、普通提交没有暂存文件时，Core 拒绝提交；界面预检查不是安全边界。
+- `commit.template` 被载入为初始说明，最近 20 条提交信息可供复用。
+- 标题超过 72 个 Unicode 字符时只显示提示，不阻止提交。
+- `amend`、`--signoff`、`-S`、`commit.gpgsign=false`、`--no-verify` 和 `--author` 直接映射到 Git 命令。
+- “跟随 Git”不覆盖 `commit.gpgsign`；GPG、X.509 与 SSH 签名均由用户 Git 配置决定。
+- 提交失败时保留 stdout/stderr，并区分 hook、签名和一般 Git 错误。
+- 提交后推送失败不会丢失已创建的提交；结果同时返回提交哈希和 `push_error`。
+- 提交成功显示短哈希，并可打开历史窗口。
+
+Windows 的 Git 客户端和预览提供“高级…”提交窗口；macOS 对应 `KiteGitCommitSheet`。
+Git 客户端变更列表下方仍保留快速提交区，快捷键为 Windows `Ctrl+K`、macOS `Command+K`。
 
 ## 预览层
 

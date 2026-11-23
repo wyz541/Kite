@@ -1810,6 +1810,23 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
+    func gitCommitState(path: String) async throws -> GitCommitStateDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCommitState(path: path)
+        }.value
+    }
+
+    func gitCommit(options: GitCommitOptionsDto) async throws -> GitCommitResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitCommit(options: options)
+        }.value
+        errorMessage = nil
+        refresh()
+        return result
+    }
+
     func gitRepositoryChanges(
         path: String,
         includeIgnored: Bool

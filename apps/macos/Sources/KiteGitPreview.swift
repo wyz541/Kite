@@ -12,6 +12,7 @@ struct KiteGitPreviewSection: View {
     @State private var diff: [GitDiffLineDto]?
     @State private var diffError: String?
     @State private var actionMessage: String?
+    @State private var commitPresented = false
 
     var body: some View {
         // A VStack always exists in the hierarchy, so `.task` runs even while
@@ -28,6 +29,12 @@ struct KiteGitPreviewSection: View {
             }
         }
         .task(id: entry.path) { await load() }
+        .sheet(isPresented: $commitPresented, onDismiss: {
+            Task { await load() }
+        }) {
+            KiteGitCommitSheet(model: model, path: entry.path)
+                .frame(minWidth: 760, minHeight: 620)
+        }
     }
 
     private func container<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -139,6 +146,7 @@ struct KiteGitPreviewSection: View {
                 actionButton("取消暂存") { run(.unstage) }
             }
             actionButton("历史") { showLog() }
+            actionButton("提交…") { commitPresented = true }
             actionButton("Git 客户端") {
                 KiteGitClientWindowController.show(model: model, repositoryPath: summary.repositoryRoot)
             }
