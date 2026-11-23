@@ -43,6 +43,13 @@ impl VcsSnapshot {
     pub fn svn_status_count(&self) -> usize {
         self.svn.len()
     }
+
+    #[cfg(test)]
+    pub(crate) fn git_entries(&self) -> impl Iterator<Item = (&Path, VcsStatus)> {
+        self.git
+            .iter()
+            .map(|item| (item.path.as_path(), item.status))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

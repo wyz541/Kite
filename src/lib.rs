@@ -1,5 +1,10 @@
 uniffi::setup_scaffolding!();
 
+#[cfg(test)]
+mod git_fixture_tests;
+#[cfg(test)]
+mod test_support;
+
 pub mod archive;
 pub mod content_search;
 pub mod devices;

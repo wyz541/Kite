@@ -212,7 +212,7 @@ P0 采用 **git CLI 作为唯一读写后端**。
 | 大数据性能 | 进程启动成本固定；status/log/diff 在 Git 自身优化下表现稳定 | 理论上有进程内优势，但需要真实仓库基准 |
 | 维护风险 | 语义与 Git 一致 | 版本绑定和 API 变更风险更高 |
 
-读路径的 gix 对比测试保留在 #129 的性能门禁中。引入 gix 前必须满足：
+初次 release smoke 对比见 [Git 后端对比](../performance/git-backends-v0.6.88.md)。单台 macOS 结果中，gix 的 status 更慢，log、blame 和 diff 更快，反向执行顺序保持相同方向；混合后端仍不足以抵消配置、错误分类和测试复杂度，因此当前四类读路径继续使用 Git CLI。引入 gix 前必须满足：
 
 - 同一临时仓库和真实大仓库上的 status/log/diff/blame 输出等价。
 - p95 延迟至少优于 CLI 20%，且内存增量在可接受范围内。
@@ -235,7 +235,25 @@ P0 采用 **git CLI 作为唯一读写后端**。
 - 工具栏显示当前分支及领先/落后箭头，点击打开可搜索、可收藏的分支树。
 ## 验收测试
 
-Core 测试覆盖：
+Git Core 测试共享 `src/test_support.rs` 的临时目录和本地仓库工具。每个测试创建独立仓库，并在测试结束时删除目录。
+
+| 场景 | 夹具 | 当前断言 |
+| --- | --- | --- |
+| 合并历史 | `main` 与 `feature` 分支执行 `--no-ff` 合并 | `run_vcs_query(Log)` 返回合并提交和功能提交 |
+| 冲突 | 两端修改同一文件后执行 merge | 路径摘要显示 `Merging`，文件状态为冲突 |
+| 重命名 | `git add -A` 后读取 porcelain 状态 | 新路径状态为 `Renamed` |
+| submodule | 子仓库加入父仓库的 `modules/child` | 修改子仓库后父仓库报告 submodule 变更 |
+| worktree | `git worktree add -b linked` | 从 linked worktree 读取正确的根和分支 |
+| LFS 指针 | 提交并修改 LFS pointer 文本 | 作为普通文件报告修改和增删行 |
+| 非 UTF-8 文件名 | Unix `OsStringExt` 创建原始字节文件名 | 支持该文件名的文件系统上报告未跟踪状态 |
+| Windows 超长路径 | `core.longpaths=true` 和超过 260 字符的路径 | Windows CI 报告修改状态 |
+| 推送被拒绝 | 本地 bare remote 加两个 clone | 非 fast-forward push 返回失败 |
+| 认证失败 | 回环 HTTP 服务返回 `401` | push 在无交互模式下返回失败 |
+| log 第一屏 | 同一路径连续 100 次真实修改 | `git log -n 100` 返回 100 行 |
+
+非 UTF-8 文件名测试在 APFS 等拒绝原始字节名称的文件系统上跳过。Windows 超长路径测试只在 Windows 编译和运行。
+
+其余 Core 测试覆盖：
 
 - 临时仓库中 add、commit、unstage、revert 和 diff/log。
 - 嵌套仓库与 linked worktree 发现。
@@ -243,6 +261,65 @@ Core 测试覆盖：
 - `.git` 变化监听和防抖。
 - askpass 提示分类、认证失败分类、进度行分帧和取消。
 - 现有 SVN 状态解析和 VCS 聚合测试。
+
+## 两端对照
+
+当前 Core 已提供状态、预览、diff、log 文本和基础写操作。完整 Git 客户端仍未完成，因此下表是当前事实基线，也是后续子 issue 的验收输入。
+
+### 快捷键
+
+| 动作 | Windows | macOS | 结论 |
+| --- | --- | --- | --- |
+| 刷新 | `Ctrl+R` | `Cmd+R` | 一致 |
+| 聚焦路径 | `Ctrl+L` | `Cmd+L` | 一致 |
+| 当前分栏搜索 | `Ctrl+F` | 输入字符或分栏搜索按钮 | macOS 不使用 Git 快捷键 |
+| 下一个页签 | `Ctrl+Tab` | `Ctrl+Tab` | 一致 |
+| 上一个页签 | `Ctrl+Shift+Tab` | `Ctrl+Shift+Tab` | 一致 |
+| Git 专用快捷键 | 无 | 无 | 尚无，客户端窗口落地后补齐 |
+
+### 文件右键菜单
+
+| 动作 | Windows | macOS | 结论 |
+| --- | --- | --- | --- |
+| 添加 / 暂存 | Git > 添加 | 预览区“暂存” | 入口不一致 |
+| 取消暂存 | Git > 取消暂存 | 预览区“取消暂存” | 入口不一致 |
+| 提交 | Git > 提交… | 暂无 | macOS 待补 |
+| 拉取 | Git > 拉取 | 暂无 | macOS 待补 |
+| 推送 | Git > 推送 | 暂无 | macOS 待补 |
+| 获取 | Git > 获取 | 暂无 | macOS 待补 |
+| 显示差异 | Git > 显示差异 | 预览区“查看差异” | 入口不一致 |
+| 显示日志 | Git > 显示日志 | 预览区“历史” | 入口不一致 |
+| 还原 | Git > 还原… | 暂无 | macOS 待补 |
+| 清理工作区 | Git > 清理工作区… | 暂无 | macOS 待补 |
+
+在完整客户端 PR 中，两端应使用同一动作名、同一确认规则和同一快捷键。预览区快捷操作可以保留，但不能替代完整菜单验收。
+
+## 截图与发布验收
+
+以下清单覆盖 #129 要求的五个 UI 面。截图附在对应 PR 的 Visual verification 区；发布证据需要长期保存时再进入 `docs/design/previews/`。
+
+| 界面 | 来源 issue | 必需状态 | 当前状态 |
+| --- | --- | --- | --- |
+| 客户端主窗口 | #118、#122 | 亮色、深色；空仓库和有历史仓库 | 待实现 |
+| 推送对话框 | #124 | 预览、成功、被拒绝、认证失败 | 待实现 |
+| 交互式 rebase | #126 | 正常 todo、冲突、取消 | 待实现 |
+| 三方合并 | #127 | 无冲突、冲突、解决后完成 | 待实现 |
+| 预览中的 Git 区块 | #117 | 干净、修改、目录计数、非仓库；亮色和深色 | 已有实现，证据待补 |
+
+截图记录必须包含日期、设备、系统版本、页面、仓库状态和 commit。不得提交真实用户名、私有路径、凭据或未脱敏仓库数据。
+
+## 发布门槛
+
+问题 #129 的最终关闭条件：
+
+- [ ] 所有 `parity:required` PR 已合并，且发布脚本不再发现打开的 `parity:required` PR。
+- [ ] README 同时包含“预览 Git 状态”和“Git 客户端”两行，两端均不是“开发中”。
+- [ ] `.github/scripts/check-feature-matrix.sh` 的 `required_features` 包含这两个能力。
+- [ ] `kite-perf` 的 Git status、log、blame、diff 场景在 Windows 和 macOS 生成结果。
+- [ ] `gix` 与 Git CLI 的对比结果写入 `docs/performance/`。
+- [ ] 五个 UI 面对照完成，缺少适用界面的条目必须在对应 issue 中说明原因。
+
+当前分支只落地 Core 夹具和性能对比脚手架，不应勾选上述门槛。
 
 ## 后续拆分
 

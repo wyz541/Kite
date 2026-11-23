@@ -254,3 +254,29 @@ python3 scripts/performance/compare.py \
 - 小文件操作受文件系统和杀毒软件影响。
 - 网络结果只用于环境记录，不作为固定应用目标。
 - 移动设备吞吐量取决于设备、线缆、驱动和 Shell。
+
+## 13. Git 后端对比
+
+Git 读路径同时提供 Git CLI 和 `gix` 场景：
+
+```bash
+cargo run --locked --release --features performance --bin kite-perf -- \
+  --profile smoke \
+  --git-only \
+  --gix /path/to/gix \
+  --output target/performance/git-smoke.json \
+  --markdown target/performance/git-smoke.md
+```
+
+也可以设置 `KITE_GIX_BIN`。`--git-only` 跳过其他模块，适合重复生成 Git 专项结果。未提供可执行文件时，报告把对比标记为 `not_automated`，其他 Git 场景仍会运行。
+
+场景边界：
+
+- `status`：Git `status --porcelain=v1 -z` 对 `gix status --no-write`。
+- `log`：`git log -n 100` 对 100 提交夹具上的 `gix log`。
+- `blame`：对同一 64 行文件执行 `git blame --line-porcelain` 和 `gix blame`。
+- `diff`：`git diff --numstat HEAD^ HEAD` 对 `gix diff tree HEAD^ HEAD`。
+
+两者都作为外部进程计时，包含启动、仓库打开和输出生成。结果回答“进程级替换是否值得”，不等同于库内 API 微基准。Markdown 报告会追加 p50/p95 和 gix/CLI 比值；比值小于 1 表示 gix 用时更短。
+
+初次结果见 [Git 后端对比 v0.6.88](git-backends-v0.6.88.md)。
