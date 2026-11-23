@@ -15,6 +15,8 @@ mod explorer_integration;
 mod file_clipboard;
 #[cfg(windows)]
 mod git_client_window;
+#[cfg(all(windows, test))]
+mod git_client_window_tests;
 #[cfg(windows)]
 mod git_rebase_window;
 #[cfg(windows)]
