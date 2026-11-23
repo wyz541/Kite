@@ -17,6 +17,7 @@ on:
       - .gitignore
       - .github/workflows/ci.yml
       - .github/scripts/**
+      - scripts/test-release-parity.py
   pull_request:
     branches:
       - main
@@ -33,6 +34,7 @@ on:
       - .gitignore
       - .github/workflows/ci.yml
       - .github/scripts/**
+      - scripts/test-release-parity.py
   workflow_dispatch:
 
 permissions:
@@ -67,6 +69,9 @@ jobs:
 
       - name: Check feature matrix
         run: bash .github/scripts/check-feature-matrix.sh
+
+      - name: Test release parity gate
+        run: python3 scripts/test-release-parity.py
 
       - name: Run core tests
         run: cargo test --locked --lib

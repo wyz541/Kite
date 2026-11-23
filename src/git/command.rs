@@ -960,9 +960,9 @@ switch ($Mode) {
                 r#"#!/bin/sh
 case "$1" in
   progress)
-    printf 'Receiving objects: 50%%\r\n' >&2
+    printf 'Receiving objects: 50%%\r' >&2
     sleep 0.04
-    printf 'Receiving objects: 100%%\r\n' >&2
+    printf 'Receiving objects: 100%%\r' >&2
     exit 0
     ;;
   auth)

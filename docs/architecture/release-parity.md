@@ -39,6 +39,8 @@ Kite 使用三个自动检查防止 Windows 功能遗漏 macOS 对齐：
 4. 有打开的 parity:required PR 时停止发布。
 5. 功能矩阵检查必须通过。
 
+`python3 scripts/test-release-parity.py` 在 Core CI 中验证打开 `parity:required` PR 时发布检查会失败，且没有打开项时会通过。
+
 ## 例外
 
 平台专用功能可以在发布说明写入以下句子：
