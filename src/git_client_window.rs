@@ -491,6 +491,43 @@ impl GitClientWindow {
         self.start_vcs_operation(VcsOperation::Commit(message), "Git 提交", true, window, cx);
     }
 
+    fn open_commit_window(&mut self, cx: &mut Context<Self>) {
+        let repository_root = self.repository_root.clone();
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some("Kite — Git 提交".into()),
+                ..Default::default()
+            }),
+            window_bounds: Some(WindowBounds::centered(size(px(980.), px(720.)), cx)),
+            window_min_size: Some(size(px(760.), px(600.))),
+            ..Default::default()
+        };
+        match gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| crate::git_commit_window::GitCommitWindow::new(repository_root, window, cx))
+        }) {
+            Ok(_) => {
+                self.error = None;
+                self.notification = Some(GitNotice {
+                    kind: GitNoticeKind::Info,
+                    title: "Git 提交窗口已打开".into(),
+                    message: "可在这里设置 amend、签名、作者和 hooks。".into(),
+                    action: Some(GitNoticeAction::Refresh),
+                    action_label: Some("刷新"),
+                });
+            }
+            Err(error) => {
+                self.notification = Some(GitNotice {
+                    kind: GitNoticeKind::Error,
+                    title: "无法打开 Git 提交窗口".into(),
+                    message: error.to_string().into(),
+                    action: None,
+                    action_label: None,
+                });
+            }
+        }
+        cx.notify();
+    }
+
     fn cancel_task(&mut self, cx: &mut Context<Self>) {
         let Some(task) = self.task.take() else {
             return;
@@ -1335,6 +1372,17 @@ impl GitClientWindow {
                             })),
                     )
                     .child(
+                        Button::new("git-client-commit-options")
+                            .ghost()
+                            .compact()
+                            .label("高级…")
+                            .tooltip("设置 amend、签名、作者和 hooks")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.open_commit_window(cx)
+                            })),
+                    )
+                    .child(
                         Button::new("git-client-stash")
                             .ghost()
                             .compact()
@@ -1523,17 +1571,40 @@ impl GitClientWindow {
                                     .child("Ctrl+K 提交"),
                             )
                             .child(
-                                Button::new("git-client-commit-panel")
-                                    .primary()
-                                    .compact()
-                                    .label("提交")
-                                    .disabled(
-                                        self.busy()
-                                            || self.commit_input.read(cx).value().trim().is_empty(),
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("git-client-commit-options-panel")
+                                            .ghost()
+                                            .compact()
+                                            .label("高级…")
+                                            .disabled(self.busy())
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _, cx| {
+                                                    this.open_commit_window(cx)
+                                                },
+                                            )),
                                     )
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.commit(window, cx)
-                                    })),
+                                    .child(
+                                        Button::new("git-client-commit-panel")
+                                            .primary()
+                                            .compact()
+                                            .label("提交")
+                                            .disabled(
+                                                self.busy()
+                                                    || self
+                                                        .commit_input
+                                                        .read(cx)
+                                                        .value()
+                                                        .trim()
+                                                        .is_empty(),
+                                            )
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, window, cx| {
+                                                    this.commit(window, cx)
+                                                },
+                                            )),
+                                    ),
                             ),
                     ),
             )

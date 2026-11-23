@@ -5,6 +5,7 @@
 //! logging are implemented once.
 
 mod command;
+mod commit;
 mod error;
 mod events;
 #[allow(dead_code)]
@@ -32,6 +33,10 @@ use crate::fs::{FileEntry, VcsStatus};
 pub use command::{
     CancellationToken, GitCommandOptions, GitCommandResult, GitConsole, GitConsoleEntry,
     GitExecutor, GitVersion, MIN_GIT_VERSION, detect_git_version,
+};
+pub use commit::{
+    COMMIT_SUBJECT_WARNING_CHARS, GitCommitOptions, GitCommitResult, GitCommitState,
+    GitSigningMode, commit, commit_subject_warning, git_commit_state,
 };
 pub use error::{GitError, GitErrorKind, classify_git_failure};
 pub use events::{

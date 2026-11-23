@@ -19,6 +19,7 @@ required_features=(
   "设备浏览与写入"
   "预览 Git 状态"
   "Git 客户端"
+  "Git 提交"
   "Git 客户端变更与行级暂存"
   "Git Stash、Reset、Revert 与 Cherry-pick"
   "Git 远程、Fetch/Pull/Push、克隆与初始化"

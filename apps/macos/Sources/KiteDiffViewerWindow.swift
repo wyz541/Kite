@@ -158,6 +158,10 @@ final class KiteDiffViewerModel: ObservableObject {
         }
     }
 
+    private func endpoint(for endpoint: GitDiffEndpointDto) -> GitDiffEndpointDto {
+        endpoint
+    }
+
     private func revisionEndpoint(_ value: String) -> GitDiffEndpointDto {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "工作区" || trimmed.caseInsensitiveCompare("worktree") == .orderedSame {
@@ -761,7 +765,7 @@ private enum DiffSide: Equatable {
     case left, right
 }
 
-private struct VisibleDiffRow: Identifiable {
+struct VisibleDiffRow: Identifiable {
     let index: Int
     let row: DiffRowDto
 

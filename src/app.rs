@@ -3697,6 +3697,31 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(tool, VcsTool::Git) {
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Kite — Git 提交".into()),
+                    ..Default::default()
+                }),
+                window_bounds: Some(WindowBounds::centered(size(px(980.), px(720.)), cx)),
+                window_min_size: Some(size(px(760.), px(600.))),
+                ..Default::default()
+            };
+            match gpui_kit::open_window(options, cx, move |window, cx| {
+                cx.new(|cx| crate::git_commit_window::GitCommitWindow::new(path, window, cx))
+            }) {
+                Ok(_) => {
+                    self.error = None;
+                    self.notice = Some("Git 提交窗口已打开".into());
+                }
+                Err(error) => {
+                    self.notice = None;
+                    self.error = Some(format!("无法打开 Git 提交窗口：{error}").into());
+                }
+            }
+            cx.notify();
+            return;
+        }
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("提交说明")
@@ -6795,6 +6820,16 @@ impl KiteApp {
                         })),
                 );
             }
+            let commit_path = path.clone();
+            actions = actions.child(
+                Button::new("column-preview-git-commit")
+                    .ghost()
+                    .compact()
+                    .label("提交…")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.begin_vcs_commit(VcsTool::Git, commit_path.clone(), window, cx);
+                    })),
+            );
             actions = actions.child(
                 Button::new("column-preview-git-log")
                     .ghost()

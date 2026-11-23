@@ -170,6 +170,7 @@ private struct KiteGitClientWindowView: View {
     @State private var consoleLines = ["Git 客户端已就绪。"]
     @State private var notice: KiteGitNotice?
     @State private var showShortcuts = false
+    @State private var showCommitOptions = false
     @State private var busyTask: String?
     @State private var busyCancellation: VcsCancellation?
     @State private var taskGeneration: UInt64 = 0
@@ -219,6 +220,12 @@ private struct KiteGitClientWindowView: View {
         }
         .sheet(isPresented: $showShortcuts) {
             KiteGitClientShortcutSheet()
+        }
+        .sheet(isPresented: $showCommitOptions, onDismiss: {
+            Task { await loadChanges() }
+        }) {
+            KiteGitCommitSheet(model: model, path: repositoryPath)
+                .frame(minWidth: 760, minHeight: 620)
         }
         .onExitCommand {
             if showShortcuts {
@@ -449,6 +456,12 @@ private struct KiteGitClientWindowView: View {
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
                     Spacer()
+                    Button("高级…") {
+                        showCommitOptions = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isBusy)
                     Button("提交") {
                         commit()
                     }
