@@ -32,6 +32,8 @@ pub struct UiPreferences {
     pub kind_column_visible: bool,
     pub size_column_visible: bool,
     pub column_width: u16,
+    pub git_auto_fetch: bool,
+    pub git_auto_fetch_minutes: u32,
     pub default_column_rule: ColumnViewRule,
     pub column_rules: BTreeMap<String, ColumnViewRule>,
 }
@@ -48,6 +50,8 @@ impl Default for UiPreferences {
             kind_column_visible: true,
             size_column_visible: true,
             column_width: 320,
+            git_auto_fetch: false,
+            git_auto_fetch_minutes: 15,
             default_column_rule: ColumnViewRule::default(),
             column_rules: BTreeMap::new(),
         }
@@ -108,6 +112,10 @@ struct UiPreferencesFile {
     size_column_visible: bool,
     #[serde(default = "default_column_width")]
     column_width: u16,
+    #[serde(default)]
+    git_auto_fetch: bool,
+    #[serde(default = "default_git_auto_fetch_minutes")]
+    git_auto_fetch_minutes: u32,
     #[serde(default)]
     default_column_rule: ColumnViewRule,
     #[serde(default)]
@@ -201,6 +209,8 @@ fn load_ui_preferences_at(path: &Path) -> Option<UiPreferences> {
         kind_column_visible: file.kind_column_visible,
         size_column_visible: file.size_column_visible,
         column_width: file.column_width.clamp(240, 480),
+        git_auto_fetch: file.git_auto_fetch,
+        git_auto_fetch_minutes: file.git_auto_fetch_minutes.clamp(5, 240),
         default_column_rule: file.default_column_rule,
         column_rules,
     })
@@ -217,6 +227,8 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
         kind_column_visible,
         size_column_visible,
         column_width,
+        git_auto_fetch,
+        git_auto_fetch_minutes,
         default_column_rule,
         mut column_rules,
     } = preferences;
@@ -232,6 +244,8 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
         kind_column_visible,
         size_column_visible,
         column_width: column_width.clamp(240, 480),
+        git_auto_fetch,
+        git_auto_fetch_minutes: git_auto_fetch_minutes.clamp(5, 240),
         default_column_rule,
         column_rules,
     };
@@ -254,6 +268,10 @@ fn default_true() -> bool {
 
 fn default_column_width() -> u16 {
     320
+}
+
+fn default_git_auto_fetch_minutes() -> u32 {
+    15
 }
 
 fn prune_column_rules(rules: &mut BTreeMap<String, ColumnViewRule>) {

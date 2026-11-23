@@ -11,6 +11,11 @@ use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, transfer_entry};
 use crate::git::GitEventSink as _;
+use crate::git::remote::{
+    self as git_remote, GitCloneOptions, GitCredentials, GitFailure, GitFailureKind,
+    GitFetchOptions, GitNetworkOperation, GitProgressPhase, GitPullOptions, GitPullStrategy,
+    GitPushOptions,
+};
 use crate::git::{
     self, GitChangedFile, GitDiffLine, GitDiffLineKind, GitOperationAction, GitOperationState,
     GitPathSummary, GitRepositorySnapshot,
@@ -233,7 +238,7 @@ pub struct ContentIndexStatusDto {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct GitCommitSummaryDto {
     pub hash: String,
     pub short_hash: String,
@@ -358,6 +363,153 @@ pub enum GitResetModeDto {
     Mixed,
     Hard,
     Keep,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRemoteDto {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRepositoryDto {
+    pub root: String,
+    pub git_dir: String,
+    pub branch: Option<String>,
+    pub head_oid: Option<String>,
+    pub upstream: Option<String>,
+    pub remotes: Vec<GitRemoteDto>,
+    pub dirty: bool,
+    pub operation: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitFileChangeDto {
+    pub status: String,
+    pub path: String,
+    pub original_path: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum GitProgressPhaseDto {
+    #[default]
+    Idle,
+    Preparing,
+    Transferring,
+    Resolving,
+    Finalizing,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, uniffi::Record)]
+pub struct GitOperationProgressDto {
+    pub operation: Option<String>,
+    pub phase: GitProgressPhaseDto,
+    pub message: String,
+    pub detail: String,
+    pub fraction: Option<f64>,
+    pub active: bool,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, uniffi::Object)]
+pub struct GitProgressMonitor {
+    inner: Arc<git_remote::GitOperationMonitor>,
+}
+
+#[uniffi::export]
+impl GitProgressMonitor {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: git_remote::GitOperationMonitor::new(),
+        })
+    }
+
+    pub fn snapshot(&self) -> GitOperationProgressDto {
+        git_progress_dto(self.inner.snapshot())
+    }
+
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    pub fn reset(&self) {
+        self.inner.reset();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitCredentialsDto {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct GitFetchOptionsDto {
+    pub remote: Option<String>,
+    pub all_remotes: bool,
+    pub prune: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum GitPullStrategyDto {
+    #[default]
+    Merge,
+    Rebase,
+    FastForwardOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitPullOptionsDto {
+    pub strategy: GitPullStrategyDto,
+    pub auto_stash: bool,
+    pub remote: Option<String>,
+    pub branch: Option<String>,
+}
+
+impl Default for GitPullOptionsDto {
+    fn default() -> Self {
+        Self {
+            strategy: GitPullStrategyDto::Merge,
+            auto_stash: true,
+            remote: None,
+            branch: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct GitPushOptionsDto {
+    pub remote: Option<String>,
+    pub branch: Option<String>,
+    pub include_tags: bool,
+    pub force_with_lease: bool,
+    pub up_to_commit: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitPushPreviewDto {
+    pub remote: String,
+    pub branch: String,
+    pub source_oid: Option<String>,
+    pub commits: Vec<GitCommitSummaryDto>,
+    pub tags: Vec<String>,
+    pub protected_branch: bool,
+    pub force_with_lease: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct GitCloneOptionsDto {
+    pub shallow_depth: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitCloneResultDto {
+    pub path: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -714,6 +866,21 @@ pub enum KiteError {
         exit_code: Option<i32>,
         command: Option<String>,
         repository: Option<String>,
+    },
+    #[error("{message}")]
+    GitAuthenticationRequired { message: String },
+    #[error("{message}")]
+    GitPushRejected { message: String },
+    #[error("{message}")]
+    GitProtectedBranch { message: String },
+    #[error("{message}")]
+    GitWorkingTreeDirty { message: String },
+    #[error("{message}")]
+    GitConflict { message: String },
+    #[error("{message}")]
+    GitCancelled {
+        message: String,
+        partial_clone_path: Option<String>,
     },
 }
 
@@ -1618,6 +1785,179 @@ impl KiteCore {
             .map(git_rebase_state_dto)
             .map_err(KiteError::operation)
     }
+
+    pub fn git_repository(&self, path: String) -> Result<GitRepositoryDto, KiteError> {
+        git_remote::repository(&PathBuf::from(path))
+            .map(git_repository_dto)
+            .map_err(git_remote_error)
+    }
+
+    pub fn git_list_remotes(&self, path: String) -> Result<Vec<GitRemoteDto>, KiteError> {
+        git_remote::list_remotes(&PathBuf::from(path))
+            .map(|remotes| remotes.into_iter().map(git_remote_dto).collect())
+            .map_err(git_remote_error)
+    }
+
+    pub fn git_add_remote(&self, path: String, name: String, url: String) -> Result<(), KiteError> {
+        git_remote::add_remote(&PathBuf::from(path), &name, &url).map_err(git_remote_error)
+    }
+
+    pub fn git_rename_remote(
+        &self,
+        path: String,
+        old_name: String,
+        new_name: String,
+    ) -> Result<(), KiteError> {
+        git_remote::rename_remote(&PathBuf::from(path), &old_name, &new_name)
+            .map_err(git_remote_error)
+    }
+
+    pub fn git_remove_remote(&self, path: String, name: String) -> Result<(), KiteError> {
+        git_remote::remove_remote(&PathBuf::from(path), &name).map_err(git_remote_error)
+    }
+
+    pub fn git_set_remote_url(
+        &self,
+        path: String,
+        name: String,
+        fetch_url: String,
+        push_url: Option<String>,
+    ) -> Result<(), KiteError> {
+        git_remote::set_remote_url(&PathBuf::from(path), &name, &fetch_url, push_url.as_deref())
+            .map_err(git_remote_error)
+    }
+
+    pub fn git_fetch(
+        &self,
+        path: String,
+        options: GitFetchOptionsDto,
+        credentials: Option<GitCredentialsDto>,
+        monitor: Arc<GitProgressMonitor>,
+    ) -> Result<String, KiteError> {
+        let credentials = credentials.map(git_credentials);
+        git_remote::fetch(
+            &PathBuf::from(path),
+            &GitFetchOptions {
+                remote: options.remote,
+                all_remotes: options.all_remotes,
+                prune: options.prune,
+            },
+            credentials.as_ref(),
+            &monitor.inner,
+        )
+        .map_err(git_remote_error)
+    }
+
+    pub fn git_pull(
+        &self,
+        path: String,
+        options: GitPullOptionsDto,
+        credentials: Option<GitCredentialsDto>,
+        monitor: Arc<GitProgressMonitor>,
+    ) -> Result<String, KiteError> {
+        let credentials = credentials.map(git_credentials);
+        git_remote::pull(
+            &PathBuf::from(path),
+            &GitPullOptions {
+                strategy: git_pull_strategy(options.strategy),
+                auto_stash: options.auto_stash,
+                remote: options.remote,
+                branch: options.branch,
+            },
+            credentials.as_ref(),
+            &monitor.inner,
+        )
+        .map_err(git_remote_error)
+    }
+
+    pub fn git_push_preview(
+        &self,
+        path: String,
+        options: GitPushOptionsDto,
+    ) -> Result<GitPushPreviewDto, KiteError> {
+        git_remote::push_preview(&PathBuf::from(path), &git_push_options(options))
+            .map(git_push_preview_dto)
+            .map_err(git_remote_error)
+    }
+
+    pub fn git_commit_files(
+        &self,
+        path: String,
+        oid: String,
+    ) -> Result<Vec<GitFileChangeDto>, KiteError> {
+        git_remote::commit_files(&PathBuf::from(path), &oid)
+            .map(|changes| {
+                changes
+                    .into_iter()
+                    .map(|change| GitFileChangeDto {
+                        status: change.status,
+                        path: change.path,
+                        original_path: change.original_path,
+                    })
+                    .collect()
+            })
+            .map_err(git_remote_error)
+    }
+
+    pub fn git_push(
+        &self,
+        path: String,
+        options: GitPushOptionsDto,
+        credentials: Option<GitCredentialsDto>,
+        monitor: Arc<GitProgressMonitor>,
+    ) -> Result<String, KiteError> {
+        let credentials = credentials.map(git_credentials);
+        git_remote::push(
+            &PathBuf::from(path),
+            &git_push_options(options),
+            credentials.as_ref(),
+            &monitor.inner,
+        )
+        .map_err(git_remote_error)
+    }
+
+    pub fn git_clone(
+        &self,
+        url: String,
+        target: String,
+        options: GitCloneOptionsDto,
+        credentials: Option<GitCredentialsDto>,
+        monitor: Arc<GitProgressMonitor>,
+    ) -> Result<GitCloneResultDto, KiteError> {
+        let credentials = credentials.map(git_credentials);
+        git_remote::clone_repository(
+            &url,
+            &PathBuf::from(target),
+            &GitCloneOptions {
+                shallow_depth: options.shallow_depth,
+            },
+            credentials.as_ref(),
+            &monitor.inner,
+        )
+        .map(|result| GitCloneResultDto {
+            path: result.path.to_string_lossy().into_owned(),
+        })
+        .map_err(git_remote_error)
+    }
+
+    pub fn git_init(&self, path: String) -> Result<String, KiteError> {
+        git_remote::init_repository(&PathBuf::from(path))
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(git_remote_error)
+    }
+
+    pub fn git_delete_partial_clone(&self, path: String) -> Result<(), KiteError> {
+        git_remote::delete_partial_clone(&PathBuf::from(path)).map_err(git_remote_error)
+    }
+
+    pub fn git_adopt_partial_clone(
+        &self,
+        partial_path: String,
+        target: String,
+    ) -> Result<(), KiteError> {
+        git_remote::adopt_partial_clone(&PathBuf::from(partial_path), &PathBuf::from(target))
+            .map_err(git_remote_error)
+    }
 }
 
 fn git_rebase_action(action: GitRebaseActionDto) -> GitRebaseAction {
@@ -2119,6 +2459,125 @@ fn git_commit_summary_dto(commit: git::GitCommitSummary) -> GitCommitSummaryDto 
         author: commit.author,
         unix_seconds: commit.unix_seconds,
         subject: commit.subject,
+    }
+}
+
+fn git_credentials(credentials: GitCredentialsDto) -> GitCredentials {
+    GitCredentials {
+        username: credentials.username,
+        password: credentials.password,
+    }
+}
+
+fn git_pull_strategy(strategy: GitPullStrategyDto) -> GitPullStrategy {
+    match strategy {
+        GitPullStrategyDto::Merge => GitPullStrategy::Merge,
+        GitPullStrategyDto::Rebase => GitPullStrategy::Rebase,
+        GitPullStrategyDto::FastForwardOnly => GitPullStrategy::FastForwardOnly,
+    }
+}
+
+fn git_push_options(options: GitPushOptionsDto) -> GitPushOptions {
+    GitPushOptions {
+        remote: options.remote,
+        branch: options.branch,
+        include_tags: options.include_tags,
+        force_with_lease: options.force_with_lease,
+        up_to_commit: options.up_to_commit,
+    }
+}
+
+fn git_remote_dto(remote: git_remote::GitRemote) -> GitRemoteDto {
+    GitRemoteDto {
+        name: remote.name,
+        fetch_url: remote.fetch_url,
+        push_url: remote.push_url,
+    }
+}
+
+fn git_repository_dto(repository: git_remote::GitRepository) -> GitRepositoryDto {
+    GitRepositoryDto {
+        root: repository.root.to_string_lossy().into_owned(),
+        git_dir: repository.git_dir.to_string_lossy().into_owned(),
+        branch: repository.branch,
+        head_oid: repository.head_oid,
+        upstream: repository.upstream,
+        remotes: repository.remotes.into_iter().map(git_remote_dto).collect(),
+        dirty: repository.dirty,
+        operation: repository.operation,
+    }
+}
+
+fn git_push_preview_dto(preview: git_remote::GitPushPreview) -> GitPushPreviewDto {
+    GitPushPreviewDto {
+        remote: preview.remote,
+        branch: preview.branch,
+        source_oid: preview.source_oid,
+        commits: preview
+            .commits
+            .into_iter()
+            .map(|commit| GitCommitSummaryDto {
+                hash: commit.oid,
+                short_hash: commit.short_oid,
+                author: commit.author,
+                unix_seconds: commit.unix_seconds,
+                subject: commit.subject,
+            })
+            .collect(),
+        tags: preview.tags,
+        protected_branch: preview.protected_branch,
+        force_with_lease: preview.force_with_lease,
+    }
+}
+
+fn git_progress_dto(progress: git_remote::GitOperationProgress) -> GitOperationProgressDto {
+    GitOperationProgressDto {
+        operation: progress.operation.map(|operation| {
+            match operation {
+                GitNetworkOperation::Fetch => "fetch",
+                GitNetworkOperation::Pull => "pull",
+                GitNetworkOperation::Push => "push",
+                GitNetworkOperation::Clone => "clone",
+            }
+            .to_string()
+        }),
+        phase: match progress.phase {
+            GitProgressPhase::Idle => GitProgressPhaseDto::Idle,
+            GitProgressPhase::Preparing => GitProgressPhaseDto::Preparing,
+            GitProgressPhase::Transferring => GitProgressPhaseDto::Transferring,
+            GitProgressPhase::Resolving => GitProgressPhaseDto::Resolving,
+            GitProgressPhase::Finalizing => GitProgressPhaseDto::Finalizing,
+            GitProgressPhase::Completed => GitProgressPhaseDto::Completed,
+            GitProgressPhase::Failed => GitProgressPhaseDto::Failed,
+            GitProgressPhase::Cancelled => GitProgressPhaseDto::Cancelled,
+        },
+        message: progress.message,
+        detail: progress.detail,
+        fraction: progress.fraction,
+        active: progress.active,
+        cancelled: progress.cancelled,
+    }
+}
+
+fn git_remote_error(error: GitFailure) -> KiteError {
+    let message = error.message;
+    match error.kind {
+        GitFailureKind::AuthenticationRequired => KiteError::GitAuthenticationRequired { message },
+        GitFailureKind::PushRejected => KiteError::GitPushRejected { message },
+        GitFailureKind::ProtectedBranch => KiteError::GitProtectedBranch { message },
+        GitFailureKind::WorkingTreeDirty => KiteError::GitWorkingTreeDirty { message },
+        GitFailureKind::Conflict => KiteError::GitConflict { message },
+        GitFailureKind::Cancelled => KiteError::GitCancelled {
+            message,
+            partial_clone_path: error
+                .partial_clone_path
+                .map(|path| path.to_string_lossy().into_owned()),
+        },
+        GitFailureKind::NotRepository
+        | GitFailureKind::CommandFailed
+        | GitFailureKind::IdentityMissing
+        | GitFailureKind::RepositoryLocked
+        | GitFailureKind::GitTooOld => KiteError::OperationFailed { message },
     }
 }
 

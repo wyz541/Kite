@@ -501,7 +501,7 @@ impl GitClientWindow {
         self.notification = Some(GitNotice {
             kind: GitNoticeKind::Info,
             title: "任务已取消".into(),
-            message: task.label.into(),
+            message: task.label,
             action: None,
             action_label: None,
         });

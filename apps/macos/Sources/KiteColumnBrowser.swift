@@ -1727,7 +1727,12 @@ private struct KiteEntryMenu: View {
             } label: {
                 Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
             }
+            Divider()
         }
+
+        KiteGitMenu(model: model, path: entry.path)
+
+        Divider()
 
         Button {
             KitePlatform.open(entry.path)
@@ -1954,7 +1959,12 @@ private struct KiteDirectoryMenu: View {
             } label: {
                 Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
             }
+            Divider()
         }
+
+        KiteGitMenu(model: model, path: column.path)
+
+        Divider()
 
         Button {
             KitePlatform.open(column.path)

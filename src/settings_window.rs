@@ -277,8 +277,24 @@ impl SettingsWindow {
                         .into_any_element(),
                     cx,
                 ),
+                self.separator(cx),
+                self.row(
+                    "general-git-auto-fetch",
+                    "定时获取 Git 更新",
+                    Some("每 15 分钟在后台获取当前仓库，不会自动合并。"),
+                    Switch::new("git-auto-fetch")
+                        .checked(self.preferences.git_auto_fetch)
+                        .small()
+                        .accessibility_label("定时获取 Git 更新")
+                        .on_click(cx.listener(|this, checked, window, cx| {
+                            this.preferences.git_auto_fetch = *checked;
+                            this.save_preferences(window, cx);
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
             ],
-            Some("关闭此选项后，Kite 下次启动时打开默认文件夹。"),
+            Some("关闭会话恢复后，Kite 下次启动时打开默认文件夹。定时获取默认关闭。"),
             cx,
         )
     }
