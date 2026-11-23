@@ -5,14 +5,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::fs::VcsStatus;
-use crate::git::git_path_summary;
+use crate::git::{
+    CancellationToken, GitErrorKind, GitOperation, GitService, NoopGitEventSink, git_path_summary,
+};
 use crate::test_support::{
     TempDir, UnauthorizedHttpServer, commit_all, configure_repo, git_available, git_ok, git_output,
     init_bare_repo, init_repo, write_file,
 };
-use crate::vcs::{
-    VcsOperation, VcsQuery, VcsTool, load_vcs_snapshot, run_vcs_operation, run_vcs_query,
-};
+use crate::vcs::{VcsQuery, VcsTool, load_vcs_snapshot, run_vcs_query};
 
 fn git_or_skip(label: &str) -> TempDir {
     assert!(git_available(), "Git is required for {label}");
@@ -87,7 +87,7 @@ fn conflicted_merge_fixture_exposes_operation_and_conflict() {
         .expect("file is inside repository");
     assert_eq!(
         summary.operation,
-        Some(crate::git::GitOperationState::Merging)
+        Some(crate::git::preview::GitOperationState::Merging)
     );
     assert_eq!(summary.staged_status, Some(VcsStatus::Conflicted));
 
@@ -287,9 +287,16 @@ fn local_bare_remote_reports_non_fast_forward_rejection() {
 
     write_file(&clone_b, "tracked.txt", b"from b\n");
     commit_all(&clone_b, "clone b");
-    let error = run_vcs_operation(VcsTool::Git, VcsOperation::Push, &clone_b)
+    let error = GitService::shared()
+        .run_operation(
+            &clone_b,
+            GitOperation::Push,
+            &CancellationToken::default(),
+            &NoopGitEventSink,
+            None,
+        )
         .expect_err("non-fast-forward push must fail");
-    assert!(error.contains("Git 推送"), "{error}");
+    assert_eq!(error.kind, GitErrorKind::Rejected);
 }
 
 #[test]
@@ -303,10 +310,19 @@ fn local_http_401_reports_authentication_failure() {
     let server = UnauthorizedHttpServer::start().expect("start local HTTP server");
     let remote_url = server.url("/repository.git");
     git_ok(root, &["remote", "add", "origin", &remote_url]);
+    git_ok(root, &["config", "branch.main.remote", "origin"]);
+    git_ok(root, &["config", "branch.main.merge", "refs/heads/main"]);
 
-    let error = run_vcs_operation(VcsTool::Git, VcsOperation::Push, root)
+    let error = GitService::shared()
+        .run_operation(
+            root,
+            GitOperation::Push,
+            &CancellationToken::default(),
+            &NoopGitEventSink,
+            None,
+        )
         .expect_err("push against 401 endpoint must fail");
-    assert!(error.contains("Git 推送"), "{error}");
+    assert_eq!(error.kind, GitErrorKind::Authentication, "{error:?}");
 }
 
 #[test]
