@@ -276,6 +276,7 @@ struct ContentView: View {
         let selectedEntries = model.selectedColumnEntries
         let selectedPaths = selectedEntries.map(\.path)
         return HStack(spacing: 2) {
+            KiteGitBranchButton(model: model)
             KiteGitMenu(model: model, path: model.currentPath)
                 .menuStyle(.borderlessButton)
                 .fixedSize()
