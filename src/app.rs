@@ -58,7 +58,8 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
-    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, git_file_diff, git_path_summary,
+    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, GitService, git_file_diff,
+    git_path_summary,
 };
 pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
@@ -3279,7 +3280,7 @@ impl KiteApp {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { run_vcs_operation(tool, operation, &path) })
+                .background_spawn(async move { run_vcs_operation_for_ui(tool, operation, &path) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(message) => {
@@ -3419,9 +3420,9 @@ impl KiteApp {
                 return;
             }
             let result = cx
-                .background_spawn(
-                    async move { run_vcs_operation(tool, VcsOperation::Revert, &path) },
-                )
+                .background_spawn(async move {
+                    run_vcs_operation_for_ui(tool, VcsOperation::Revert, &path)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(message) => {
@@ -3452,7 +3453,7 @@ impl KiteApp {
             }
             let result = cx
                 .background_spawn(async move {
-                    run_vcs_operation(VcsTool::Git, VcsOperation::Clean, &path)
+                    run_vcs_operation_for_ui(VcsTool::Git, VcsOperation::Clean, &path)
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
@@ -7563,9 +7564,31 @@ fn path_after_recycle_paths(current_dir: &Path, removed: &[PathBuf]) -> PathBuf 
         })
 }
 
+fn run_vcs_operation_for_ui(
+    tool: VcsTool,
+    operation: VcsOperation,
+    path: &Path,
+) -> Result<String, String> {
+    match tool {
+        VcsTool::Git => GitService::shared()
+            .run_legacy_operation(path, &operation)
+            .map_err(|error| error.to_string()),
+        VcsTool::Svn => run_vcs_operation(tool, operation, path),
+    }
+}
+
+fn run_vcs_query_for_ui(tool: VcsTool, query: VcsQuery, path: &Path) -> Result<String, String> {
+    match tool {
+        VcsTool::Git => GitService::shared()
+            .run_legacy_query(path, query)
+            .map_err(|error| error.to_string()),
+        VcsTool::Svn => run_vcs_query(tool, query, path),
+    }
+}
+
 fn open_vcs_query_text(tool: VcsTool, query: VcsQuery, path: &Path) -> Result<String, String> {
     let title = format!("{} {}", tool.label(), query.label());
-    let content = run_vcs_query(tool, query, path)?;
+    let content = run_vcs_query_for_ui(tool, query, path)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
