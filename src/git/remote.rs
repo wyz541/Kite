@@ -548,6 +548,20 @@ pub fn pull(
 ) -> Result<String, GitFailure> {
     ensure_supported_git()?;
     let context = repository_context(path)?;
+    let mut args = vec![
+        "pull",
+        "--progress",
+        "--no-edit",
+        options.strategy.argument(),
+    ];
+    if let Some(remote) = options.remote.as_deref() {
+        validate_remote_name(remote)?;
+        args.push(remote);
+        if let Some(branch) = options.branch.as_deref() {
+            validate_branch_name(branch)?;
+            args.push(branch);
+        }
+    }
     let dirty = !command_success(
         &context.root,
         &["status", "--porcelain", "--untracked-files=normal"],
@@ -566,7 +580,7 @@ pub fn pull(
     monitor.begin(operation, format!("正在{}拉取…", options.strategy.label()));
     let stashed = if dirty {
         monitor.update(GitProgressPhase::Preparing, "正在暂存未提交更改…");
-        command_success(
+        match command_success(
             &context.root,
             &[
                 "stash",
@@ -575,51 +589,62 @@ pub fn pull(
                 "-m",
                 "Kite: pull auto-stash",
             ],
-            credentials,
-        )?;
-        true
+            None,
+        ) {
+            Ok(_) => true,
+            Err(error) => {
+                monitor.finish(GitProgressPhase::Failed, "暂存未提交更改失败");
+                return Err(error);
+            }
+        }
     } else {
         false
     };
 
-    let mut args = vec![
-        "pull",
-        "--progress",
-        "--no-edit",
-        options.strategy.argument(),
-    ];
-    if let Some(remote) = options.remote.as_deref() {
-        validate_remote_name(remote)?;
-        args.push(remote);
-        if let Some(branch) = options.branch.as_deref() {
-            validate_branch_name(branch)?;
-            args.push(branch);
-        }
-    }
-    let command = network_command(&context.root, &args, credentials)?;
-    let pull_result = run_streaming(command, operation, monitor, credentials)
-        .and_then(|capture| finish_command(operation, monitor, capture, "拉取完成"));
+    let pull_result = match network_command(&context.root, &args, credentials) {
+        Ok(command) => run_streaming(command, operation, monitor, credentials)
+            .and_then(|capture| finish_command(operation, monitor, capture, "拉取完成")),
+        Err(error) => Err(error),
+    };
 
     if stashed {
         monitor.update(GitProgressPhase::Finalizing, "正在恢复自动暂存的更改…");
-        let restore = command_success(&context.root, &["stash", "pop"], credentials);
-        if let Err(restore_error) = restore {
+        if let Err(restore_error) = command_success(&context.root, &["stash", "pop"], None) {
             monitor.finish(GitProgressPhase::Failed, "拉取完成，但恢复更改失败");
             return Err(GitFailure::new(
                 GitFailureKind::Conflict,
                 format!(
                     "{}；自动暂存的更改未能恢复：{}",
                     pull_result
+                        .as_ref()
                         .err()
-                        .map(|failure| failure.message)
-                        .unwrap_or_else(|| "拉取完成".to_string()),
+                        .map(|failure| failure.message.as_str())
+                        .unwrap_or("拉取完成"),
                     restore_error.message
                 ),
             ));
         }
     }
 
-    pull_result
+    match pull_result {
+        Ok(message) => {
+            if stashed {
+                monitor.finish(GitProgressPhase::Completed, &message);
+            }
+            Ok(message)
+        }
+        Err(error) => {
+            if error.kind == GitFailureKind::Cancelled {
+                monitor.finish(GitProgressPhase::Cancelled, &error.message);
+            } else {
+                monitor.finish(
+                    GitProgressPhase::Failed,
+                    format!("{}：{}", operation.label(), error.message),
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 pub fn push_preview(path: &Path, options: &GitPushOptions) -> Result<GitPushPreview, GitFailure> {
@@ -627,6 +652,9 @@ pub fn push_preview(path: &Path, options: &GitPushOptions) -> Result<GitPushPrev
     let remote = resolve_remote(&context, options.remote.as_deref())?;
     let branch = resolve_push_branch(&context, options.branch.as_deref())?;
     validate_branch_name(&branch)?;
+    if let Some(oid) = options.up_to_commit.as_deref() {
+        validate_object_id(oid)?;
+    }
     let source = options.up_to_commit.as_deref().unwrap_or("HEAD");
     let source_oid = rev_parse_optional(&context.root, source)?;
     let remote_ref = format!("refs/remotes/{remote}/{branch}");
@@ -698,6 +726,9 @@ pub fn push(
     }
     let remote = resolve_remote(&context, options.remote.as_deref())?;
 
+    if let Some(oid) = options.up_to_commit.as_deref() {
+        validate_object_id(oid)?;
+    }
     let source = options.up_to_commit.as_deref().unwrap_or("HEAD");
     let source_oid = rev_parse_optional(&context.root, source)?.ok_or_else(|| {
         GitFailure::new(
@@ -753,6 +784,12 @@ pub fn clone_repository(
             "浅克隆深度必须大于 0。",
         ));
     }
+    let target = std::path::absolute(target).map_err(|error| {
+        GitFailure::new(
+            GitFailureKind::CommandFailed,
+            format!("无法解析克隆目标路径：{error}"),
+        )
+    })?;
     if target.exists() {
         return Err(GitFailure::new(
             GitFailureKind::CommandFailed,
@@ -813,7 +850,7 @@ pub fn clone_repository(
         let failure = command_failure("克隆仓库", &capture, Some(staging.clone()));
         return Err(failure);
     }
-    fs::rename(&staging, target).map_err(|error| {
+    fs::rename(&staging, &target).map_err(|error| {
         GitFailure::new(
             GitFailureKind::CommandFailed,
             format!(
@@ -823,9 +860,7 @@ pub fn clone_repository(
         )
     })?;
     monitor.finish(GitProgressPhase::Completed, "克隆完成");
-    Ok(GitCloneResult {
-        path: target.to_path_buf(),
-    })
+    Ok(GitCloneResult { path: target })
 }
 
 pub fn init_repository(path: &Path) -> Result<PathBuf, GitFailure> {
@@ -842,12 +877,7 @@ pub fn init_repository(path: &Path) -> Result<PathBuf, GitFailure> {
 }
 
 pub fn delete_partial_clone(path: &Path) -> Result<(), GitFailure> {
-    if !is_partial_clone_path(path) {
-        return Err(GitFailure::new(
-            GitFailureKind::CommandFailed,
-            "拒绝删除不是 Kite 克隆临时目录的路径。",
-        ));
-    }
+    validate_partial_clone_path(path)?;
     if path.exists() {
         fs::remove_dir_all(path).map_err(|error| {
             GitFailure::new(
@@ -860,12 +890,7 @@ pub fn delete_partial_clone(path: &Path) -> Result<(), GitFailure> {
 }
 
 pub fn adopt_partial_clone(path: &Path, target: &Path) -> Result<(), GitFailure> {
-    if !is_partial_clone_path(path) {
-        return Err(GitFailure::new(
-            GitFailureKind::CommandFailed,
-            "拒绝移动不是 Kite 克隆临时目录的路径。",
-        ));
-    }
+    validate_partial_clone_path(path)?;
     if target.exists() {
         return Err(GitFailure::new(
             GitFailureKind::CommandFailed,
@@ -878,6 +903,24 @@ pub fn adopt_partial_clone(path: &Path, target: &Path) -> Result<(), GitFailure>
             format!("无法保留未完成的克隆目录：{error}"),
         )
     })
+}
+
+fn validate_partial_clone_path(path: &Path) -> Result<(), GitFailure> {
+    if !path.is_absolute() || !is_partial_clone_path(path) {
+        return Err(GitFailure::new(
+            GitFailureKind::CommandFailed,
+            "拒绝操作不是 Kite 创建的不完整克隆目录。",
+        ));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        return Err(GitFailure::new(
+            GitFailureKind::CommandFailed,
+            "拒绝操作不是普通目录的克隆临时路径。",
+        ));
+    }
+    Ok(())
 }
 
 fn repository_context(path: &Path) -> Result<RepositoryContext, GitFailure> {
@@ -1279,19 +1322,36 @@ fn run_streaming(
     monitor: &GitOperationMonitor,
     credentials: Option<&GitCredentials>,
 ) -> Result<CommandCapture, GitFailure> {
-    let _askpass = configure_askpass(&mut command, credentials)?;
+    if monitor.is_cancelled() {
+        monitor.finish(GitProgressPhase::Cancelled, "操作已取消");
+        return Err(GitFailure::cancelled(None));
+    }
+    let _askpass = match configure_askpass(&mut command, credentials) {
+        Ok(askpass) => askpass,
+        Err(error) => {
+            monitor.finish(GitProgressPhase::Failed, "无法准备 Git 凭据");
+            return Err(error);
+        }
+    };
     #[cfg(unix)]
     command.process_group(0);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| {
-        GitFailure::new(
-            GitFailureKind::CommandFailed,
-            format!("无法启动 {}：{error}", operation.label()),
-        )
-    })?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            monitor.finish(
+                GitProgressPhase::Failed,
+                format!("无法启动 {}…", operation.label()),
+            );
+            return Err(GitFailure::new(
+                GitFailureKind::CommandFailed,
+                format!("无法启动 {}：{error}", operation.label()),
+            ));
+        }
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (sender, receiver) = mpsc::channel::<(bool, Vec<u8>)>();
@@ -1537,11 +1597,12 @@ fn configure_askpass(
             format!("无法创建凭据辅助目录：{error}"),
         )
     })?;
+    let askpass = AskpassScript { directory };
 
     #[cfg(target_os = "windows")]
-    let script = directory.join("askpass.cmd");
+    let script = askpass.directory.join("askpass.cmd");
     #[cfg(not(target_os = "windows"))]
-    let script = directory.join("askpass.sh");
+    let script = askpass.directory.join("askpass.sh");
 
     #[cfg(target_os = "windows")]
     let contents = "@echo off\r\npowershell -NoProfile -NonInteractive -Command \"if ($args[0] -match 'sername') { [Console]::Out.Write($env:KITE_GIT_USERNAME) } else { [Console]::Out.Write($env:KITE_GIT_PASSWORD) }\" -- %*\r\n";
@@ -1578,7 +1639,7 @@ fn configure_askpass(
         .env("SSH_ASKPASS_REQUIRE", "force")
         .env("KITE_GIT_USERNAME", &credentials.username)
         .env("KITE_GIT_PASSWORD", &credentials.password);
-    Ok(Some(AskpassScript { directory }))
+    Ok(Some(askpass))
 }
 
 fn staging_clone_path(parent: &Path, name: &str) -> PathBuf {
@@ -1594,9 +1655,19 @@ fn staging_clone_path(parent: &Path, name: &str) -> PathBuf {
 }
 
 fn is_partial_clone_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with('.') && name.contains(".kite-clone-"))
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some((stem, suffix)) = name.rsplit_once(".kite-clone-") else {
+        return false;
+    };
+    let parts = suffix.split('-').collect::<Vec<_>>();
+    stem.starts_with('.')
+        && stem.len() > 1
+        && parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|value| value.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -1910,6 +1981,9 @@ mod tests {
             fs::read(first.join("local.txt")).expect("local file"),
             b"local\n"
         );
+        let progress = monitor.snapshot();
+        assert_eq!(progress.phase, GitProgressPhase::Completed);
+        assert!(!progress.active);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1989,10 +2063,8 @@ mod tests {
         )
         .expect("clone succeeds");
         assert_eq!(result.path, target);
-        assert_eq!(
-            fs::read(target.join("README.md")).expect("cloned file"),
-            b"hello\n"
-        );
+        let contents = fs::read_to_string(target.join("README.md")).expect("cloned file");
+        assert_eq!(contents.replace("\r\n", "\n"), "hello\n");
         assert!(
             fs::read_dir(&root)
                 .expect("read clone root")
@@ -2003,12 +2075,36 @@ mod tests {
     }
 
     #[test]
+    fn push_target_must_be_a_commit_id() {
+        if !git_available() {
+            return;
+        }
+        let root = configured_repo(&temp_root("push-target"));
+        commit(&root, "a.txt", "one\n", "initial");
+        add_remote(&root, "origin", "https://example.com/repo.git").expect("add remote");
+        let error = push_preview(
+            &root,
+            &GitPushOptions {
+                up_to_commit: Some("--upload-pack=unexpected".to_string()),
+                ..GitPushOptions::default()
+            },
+        )
+        .expect_err("non-object target must be rejected");
+        assert_eq!(error.kind, GitFailureKind::CommandFailed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn partial_clone_delete_is_limited_to_kite_staging_directories() {
         let root = temp_root("partial");
         fs::create_dir_all(&root).expect("create root");
         let unrelated = root.join("important");
         fs::create_dir_all(&unrelated).expect("create unrelated");
         assert!(delete_partial_clone(&unrelated).is_err());
+        let disguised = root.join(".important.kite-clone-keep");
+        fs::create_dir_all(&disguised).expect("create disguised directory");
+        assert!(delete_partial_clone(&disguised).is_err());
+        assert!(disguised.exists());
         let staging = staging_clone_path(&root, "repo");
         fs::create_dir_all(&staging).expect("create staging");
         delete_partial_clone(&staging).expect("delete staging");
