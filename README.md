@@ -317,6 +317,7 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [项目宪法与设计原则](docs/design/manifesto.md)
 - [平台边界](docs/architecture/platforms.md)
 - [右键菜单架构](docs/architecture/context-menu.md)
+- [Git 客户端架构](docs/architecture/git-client.md)
 - [压缩与解压实现](docs/architecture/context-menu.md#压缩菜单)
 - [默认文件管理器](docs/architecture/default-file-manager.md)
 - [更新器架构](docs/architecture/updater.md)
