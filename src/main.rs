@@ -22,6 +22,8 @@ mod git_client_window_tests;
 #[cfg(windows)]
 mod git_commit_window;
 #[cfg(windows)]
+mod git_log_window;
+#[cfg(windows)]
 mod git_rebase_window;
 #[cfg(windows)]
 mod git_tools_window;

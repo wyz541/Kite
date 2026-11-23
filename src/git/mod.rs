@@ -19,6 +19,7 @@ mod watch;
 #[cfg(test)]
 use status::GitPathStatus;
 
+pub mod log;
 pub mod preview;
 pub mod remote;
 
@@ -278,6 +279,21 @@ impl GitService {
             state,
             thread: Mutex::new(Some(thread)),
         })
+    }
+
+    pub(crate) fn run_log_command(
+        &self,
+        current_dir: &Path,
+        args: &[&str],
+    ) -> Result<GitCommandResult, GitError> {
+        self.executor.run(
+            current_dir,
+            args.iter().map(OsString::from).collect::<Vec<_>>(),
+            GitCommandOptions::new("Git 历史"),
+            &CancellationToken::default(),
+            &NoopGitEventSink,
+            None,
+        )
     }
 
     pub(crate) fn run_preview_command(

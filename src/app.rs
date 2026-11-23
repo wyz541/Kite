@@ -24,6 +24,7 @@ use crate::fs::{
     sort_entries, transfer_entry, validate_name, worse_status,
 };
 use crate::git_client_window;
+use crate::git_log_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -3538,7 +3539,19 @@ impl KiteApp {
             VcsMenuCommand::GitDiff => {
                 self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
             }
-            VcsMenuCommand::GitLog => self.open_vcs_log_window_task(VcsTool::Git, path, window, cx),
+            VcsMenuCommand::GitLog => {
+                match git_log_window::open_git_log_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开提交历史窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitRebase => {
                 match crate::git_rebase_window::open_git_rebase_window(path, cx) {
                     Ok(()) => {

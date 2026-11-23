@@ -1740,6 +1740,14 @@ private struct KiteEntryMenu: View {
             Label("打开", systemImage: "arrow.up.forward.app")
         }
 
+        if model.isGitAvailable(forEntryPath: entry.path) {
+            Button {
+                model.openGitLog(path: entry.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
+        }
+
         if KitePlatform.isEditableTextFile(entry.path) {
             Button {
                 KitePlatform.openTextEditor(entry.path)
@@ -2005,6 +2013,14 @@ private struct KiteDirectoryMenu: View {
             Label("交互式 Rebase…", systemImage: "arrow.triangle.branch")
         }
 
+        if column.gitAvailable {
+            Divider()
+            Button {
+                model.openGitLog(path: column.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
+        }
         Divider()
 
         Button {
