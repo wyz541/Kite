@@ -295,6 +295,13 @@ impl Render for KiteFileDragPreview {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ColumnSelection {
+    selected_path: Option<PathBuf>,
+    selected_paths: Vec<PathBuf>,
+    anchor_path: Option<PathBuf>,
+}
+
 #[derive(Clone)]
 struct ColumnPane {
     path: PathBuf,
@@ -310,6 +317,11 @@ struct ColumnPane {
     collapsed_groups: BTreeSet<String>,
     search_query: Option<String>,
     search_truncated: bool,
+    /// Results came from the local listing, not the recursive walk.
+    search_preview: bool,
+    /// Selection from before the search started; restored when it ends so a
+    /// query that hides the selected file does not lose it.
+    pre_search_selection: Option<ColumnSelection>,
     loading: bool,
     skipped: usize,
     git_available: bool,
@@ -340,6 +352,8 @@ impl ColumnPane {
             collapsed_groups: rule.collapsed_groups,
             search_query: None,
             search_truncated: false,
+            search_preview: false,
+            pre_search_selection: None,
             loading,
             skipped,
             git_available,
@@ -362,7 +376,10 @@ impl ColumnPane {
             .filter(|entry| self.filter.matches(entry))
             .cloned()
             .collect::<Vec<_>>();
-        sort_entries(&mut entries, self.sort);
+        // Search results arrive ranked by relevance; keep that order.
+        if self.search_entries.is_none() {
+            sort_entries(&mut entries, self.sort);
+        }
         self.entries = entries;
         self.selected_paths.retain(|selected| {
             self.entries
@@ -495,6 +512,8 @@ impl ColumnPane {
         self.search_entries = None;
         self.search_query = None;
         self.search_truncated = false;
+        self.search_preview = false;
+        self.pre_search_selection = None;
         self.skipped = skipped;
         self.loading = false;
         self.refresh_view();
@@ -519,17 +538,58 @@ impl ColumnPane {
     }
 
     fn set_search_results(&mut self, query: String, entries: Vec<FileEntry>, truncated: bool) {
+        self.remember_pre_search_selection();
         self.search_entries = Some(entries);
         self.search_query = Some(query);
         self.search_truncated = truncated;
+        self.search_preview = false;
+        self.refresh_view();
+    }
+
+    fn set_search_preview(&mut self, query: String, mut entries: Vec<FileEntry>) {
+        self.remember_pre_search_selection();
+        sort_entries(&mut entries, self.sort);
+        self.search_entries = Some(entries);
+        self.search_query = Some(query);
+        self.search_truncated = false;
+        self.search_preview = true;
         self.refresh_view();
     }
 
     fn clear_search_results(&mut self) {
+        let was_searching = self.search_entries.is_some();
         self.search_entries = None;
         self.search_query = None;
         self.search_truncated = false;
+        self.search_preview = false;
+        if let Some(saved) = self.pre_search_selection.take()
+            && was_searching
+        {
+            self.selected_path = saved.selected_path;
+            self.selected_paths = saved.selected_paths;
+            self.selection_anchor_path = saved.anchor_path;
+        }
         self.refresh_view();
+    }
+
+    /// Captures the selection the first time results replace the listing.
+    fn remember_pre_search_selection(&mut self) {
+        if self.search_entries.is_none() && self.pre_search_selection.is_none() {
+            self.pre_search_selection = Some(ColumnSelection {
+                selected_path: self.selected_path.clone(),
+                selected_paths: self.selected_paths.clone(),
+                anchor_path: self.selection_anchor_path.clone(),
+            });
+        }
+    }
+
+    #[cfg(test)]
+    fn first_search_row_index(&self) -> Option<usize> {
+        let first_match = self.entries.first()?.path.as_path();
+        self.display_rows().iter().position(|row| match row {
+            ColumnDisplayRow::Entry(entry) => same_path(&entry.path, first_match),
+            ColumnDisplayRow::Group { .. } => false,
+        })
     }
 
     fn display_rows(&self) -> Vec<ColumnDisplayRow> {
@@ -551,7 +611,10 @@ impl ColumnPane {
 
         let mut rows = Vec::new();
         for ((_, label), mut entries) in groups {
-            sort_entries(&mut entries, self.sort);
+            // Search results arrive ranked; keep that order inside each group.
+            if self.search_entries.is_none() {
+                sort_entries(&mut entries, self.sort);
+            }
             let collapsed = self.collapsed_groups.contains(&label);
             rows.push(ColumnDisplayRow::Group {
                 label: SharedString::from(label),
@@ -883,6 +946,10 @@ pub struct KiteApp {
     column_scroll: ScrollHandle,
     column_vertical_scrolls: Vec<ColumnListScroll>,
     column_scroll_pending: bool,
+    /// Column to bring into view on the next frame, used when search opens.
+    column_scroll_to_column: Option<usize>,
+    /// Row to reveal in the search column after keyboard selection.
+    column_search_scroll_target: Option<(PathBuf, usize)>,
     column_preview: Option<ColumnPreviewState>,
     pending_file_selection: Option<PathBuf>,
     preview_generation: u64,
@@ -1078,17 +1145,16 @@ impl KiteApp {
             &column_search_input,
             window,
             |this: &mut Self, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => {
+                InputEvent::PressEnter { secondary, .. } => {
                     let value = this.column_search_input.read(cx).value().to_string();
-                    this.submit_column_search(value, window, cx);
+                    if !secondary && this.activate_column_search_selection(window, cx) {
+                        return;
+                    }
+                    this.start_column_search(value, Duration::ZERO, window, cx);
                 }
                 InputEvent::Change => {
                     let value = this.column_search_input.read(cx).value().to_string();
-                    if value.trim().is_empty() {
-                        this.clear_column_search_results(window, cx);
-                    } else {
-                        this.schedule_column_search(value, window, cx);
-                    }
+                    this.apply_column_search_input(value, window, cx);
                 }
                 _ => {}
             },
@@ -1149,6 +1215,8 @@ impl KiteApp {
             column_scroll: ScrollHandle::new(),
             column_vertical_scrolls: Vec::new(),
             column_scroll_pending: false,
+            column_scroll_to_column: None,
+            column_search_scroll_target: None,
             column_preview: None,
             pending_file_selection: initial_file.clone(),
             preview_generation: 0,
@@ -1196,7 +1264,7 @@ impl KiteApp {
     pub(crate) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
         self.show_preview = !self.show_preview;
         if self.show_preview {
-            if let Some(entry) = self.selected_last_column_file() {
+            if let Some((_, entry)) = self.preview_target() {
                 self.start_column_preview(entry, cx);
             }
         } else {
@@ -1391,7 +1459,7 @@ impl KiteApp {
         self.clear_hidden_column_selection();
         if self.show_preview {
             self.clear_column_preview();
-            if let Some(entry) = self.selected_last_column_file() {
+            if let Some((_, entry)) = self.preview_target() {
                 self.start_column_preview(entry, cx);
             }
         }
@@ -1420,7 +1488,28 @@ impl KiteApp {
             return false;
         }
         self.column_panes.truncate(keep);
+        self.drop_search_for_removed_column();
         true
+    }
+
+    /// Clears search state when the column that hosted it was closed.
+    fn drop_search_for_removed_column(&mut self) {
+        let Some(search_path) = self.column_search_path.as_ref() else {
+            return;
+        };
+        if self
+            .column_panes
+            .iter()
+            .any(|pane| same_path(&pane.path, search_path))
+        {
+            return;
+        }
+        self.cancel_column_search_task();
+        self.column_search_path = None;
+        for pane in &mut self.column_panes {
+            pane.clear_search_results();
+        }
+        self.clear_hidden_column_selection();
     }
 
     fn apply_device_snapshot(&mut self, snapshot: DeviceSnapshot, cx: &mut Context<Self>) {
@@ -1828,6 +1917,21 @@ impl KiteApp {
         self.error = None;
         if let Some(search) = self.active_search.clone() {
             self.start_search(search.query, window, cx);
+        } else if self.column_search_path.is_some() {
+            // File operations call refresh; rerun the active query so the
+            // result list reflects the new directory contents.
+            let query = self.column_search_input.read(cx).value().to_string();
+            if query.trim().is_empty() {
+                self.close_column_search(window, cx);
+                self.request_load(
+                    self.current_dir.clone(),
+                    NavigationIntent::Refresh,
+                    window,
+                    cx,
+                );
+            } else {
+                self.start_column_search(query, Duration::ZERO, window, cx);
+            }
         } else {
             self.request_load(
                 self.current_dir.clone(),
@@ -1883,7 +1987,7 @@ impl KiteApp {
             self.column_search_input.update(cx, |input, cx| {
                 input.set_value(query.clone(), window, cx);
             });
-            self.schedule_column_search(query, window, cx);
+            self.apply_column_search_input(query, window, cx);
         }
         let search_input = self.column_search_input.clone();
         window.defer(cx, move |window, cx| {
@@ -1934,7 +2038,13 @@ impl KiteApp {
         }
 
         self.cancel_column_search_task();
+        let index = self
+            .column_panes
+            .iter()
+            .position(|pane| same_path(&pane.path, &path));
         self.column_search_path = Some(path);
+        self.column_search_scroll_target = None;
+        self.column_scroll_to_column = index;
         for pane in &mut self.column_panes {
             pane.clear_search_results();
         }
@@ -1945,10 +2055,6 @@ impl KiteApp {
         cx.notify();
     }
 
-    fn submit_column_search(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.start_column_search(query, Duration::ZERO, window, cx);
-    }
-
     fn schedule_column_search(
         &mut self,
         query: String,
@@ -1956,6 +2062,132 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         self.start_column_search(query, COLUMN_SEARCH_DEBOUNCE, window, cx);
+    }
+
+    fn apply_column_search_input(
+        &mut self,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if value.trim().is_empty() {
+            self.clear_column_search_results(window, cx);
+        } else if !self.preview_column_search(&value, cx) {
+            self.schedule_column_search(value, window, cx);
+        }
+    }
+
+    /// Applies local results before the debounced recursive walk runs.
+    ///
+    /// Returns `true` when the previous complete result set already contains
+    /// every possible match, so the walk can be skipped entirely.
+    fn preview_column_search(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return false;
+        }
+        let Some(column) = self.column_search_root_index() else {
+            return false;
+        };
+        let query_lower = query.to_lowercase();
+        let pane = &mut self.column_panes[column];
+        let narrowing = !pane.search_preview
+            && pane
+                .search_query
+                .as_deref()
+                .is_some_and(|previous| search_query_narrows(previous, &query));
+
+        let complete;
+        if narrowing {
+            complete = !pane.search_truncated;
+            let narrowed =
+                narrow_search_entries(pane.search_entries.as_deref().unwrap_or_default(), &query);
+            pane.set_search_results(query, narrowed, !complete);
+        } else if pane.search_entries.is_some() {
+            // Keep the previous list on screen while the walk for the new
+            // query runs. Replacing it with directory-only matches on every
+            // keystroke makes the list shrink and grow, which reads as jitter.
+            complete = false;
+        } else {
+            complete = false;
+            let direct = pane
+                .directory_entries
+                .iter()
+                .filter(|entry| entry.name.to_lowercase().contains(&query_lower))
+                .cloned()
+                .collect::<Vec<_>>();
+            pane.set_search_preview(query, direct);
+        }
+        if complete {
+            self.cancel_column_search_task();
+        }
+        self.clear_hidden_column_selection();
+        cx.notify();
+        complete
+    }
+
+    /// Opens the highlighted search result, or the first result when nothing is
+    /// highlighted. Returns `false` while the search is still running or empty.
+    fn activate_column_search_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.column_search_loading {
+            return false;
+        }
+        let Some(column) = self.column_search_root_index() else {
+            return false;
+        };
+        let entry = {
+            let pane = &self.column_panes[column];
+            pane.selected_path
+                .as_ref()
+                .and_then(|selected| {
+                    pane.entries
+                        .iter()
+                        .find(|entry| same_path(&entry.path, selected))
+                })
+                .or_else(|| pane.entries.first())
+                .cloned()
+        };
+        let Some(entry) = entry else {
+            return false;
+        };
+        self.open_entry(entry, window, cx);
+        true
+    }
+
+    fn move_column_search_selection(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let Some(column) = self.column_search_root_index() else {
+            return false;
+        };
+        let (entry_rows, current_row, path) = {
+            let pane = &self.column_panes[column];
+            let rows = pane.display_rows();
+            let entry_rows = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| {
+                    matches!(row, ColumnDisplayRow::Entry(_)).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let current_row = pane.selected_path.as_ref().and_then(|selected| {
+                rows.iter().position(|row| {
+                    matches!(
+                        row,
+                        ColumnDisplayRow::Entry(entry) if same_path(&entry.path, selected)
+                    )
+                })
+            });
+            (entry_rows, current_row, pane.path.clone())
+        };
+        let Some(row) = entry_row_step(&entry_rows, current_row, forward) else {
+            return false;
+        };
+        self.select_column_entry(column, row, cx);
+        self.column_search_scroll_target = Some((path, row));
+        true
     }
 
     fn start_column_search(
@@ -2062,6 +2294,11 @@ impl KiteApp {
     fn close_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_column_search_results(window, cx);
         self.column_search_path = None;
+        // The restored selection may point at a file again.
+        self.sync_column_preview(cx);
+        // Return keyboard focus to the column view. Without this the removed
+        // input keeps focus and typing no longer opens a search bar.
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -2073,8 +2310,39 @@ impl KiteApp {
         });
         if !selection_is_visible {
             self.column_selected_path = None;
-            self.clear_column_preview();
+            // Keep the preview while something is still previewable; it is
+            // tied to the preview target, not to the last-clicked path.
+            if self.preview_target().is_none() {
+                self.clear_column_preview();
+            }
         }
+    }
+
+    /// Restarts the preview for the current target if the pane is showing a
+    /// different file or nothing at all.
+    fn sync_column_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.show_preview {
+            return;
+        }
+        match self.preview_target() {
+            Some((_, entry)) => {
+                let current = self
+                    .column_preview
+                    .as_ref()
+                    .is_some_and(|preview| same_path(&preview.path, &entry.path));
+                if !current {
+                    self.start_column_preview(entry, cx);
+                }
+            }
+            None => self.clear_column_preview(),
+        }
+    }
+
+    fn column_search_root_index(&self) -> Option<usize> {
+        let root = self.column_search_path.as_ref()?;
+        self.column_panes
+            .iter()
+            .position(|pane| same_path(&pane.path, root))
     }
 
     fn on_column_pane_action(
@@ -3607,17 +3875,26 @@ impl KiteApp {
             return;
         };
         if !entry.is_dir() {
-            self.column_panes
-                .truncate(column_count_after_file_selection(
-                    column,
-                    self.column_panes.len(),
-                ));
+            // Picking a search result must not close the columns to the right.
+            let search_here = self
+                .column_search_path
+                .as_ref()
+                .is_some_and(|path| same_path(path, &self.column_panes[column].path));
+            if !search_here {
+                self.column_panes
+                    .truncate(column_count_after_file_selection(
+                        column,
+                        self.column_panes.len(),
+                    ));
+            }
             if self.show_preview {
                 self.start_column_preview(entry, cx);
             } else {
                 self.clear_column_preview();
             }
-            self.column_scroll_pending = true;
+            if !search_here {
+                self.column_scroll_pending = true;
+            }
         } else {
             self.clear_column_preview();
         }
@@ -5797,6 +6074,7 @@ impl KiteApp {
         let mut strip = h_flex()
             .id("column-strip")
             .size_full()
+            .relative()
             .items_stretch()
             .gap(px(COLUMN_STRIP_GAP))
             .p(px(COLUMN_STRIP_PADDING))
@@ -5835,10 +6113,17 @@ impl KiteApp {
         for index in 0..self.column_panes.len() {
             strip = strip.child(self.render_column(index, window, cx));
         }
-        if self.show_preview
-            && let Some(entry) = self.selected_last_column_file()
-        {
-            strip = strip.child(self.render_column_preview(&entry, cx));
+        if self.show_preview {
+            match self.preview_target() {
+                Some((index, entry)) if index + 1 == self.column_panes.len() => {
+                    strip = strip.child(self.render_column_preview(&entry, cx));
+                }
+                Some((index, entry)) => {
+                    let preview = self.render_column_preview(&entry, cx);
+                    strip = strip.child(Self::floating_column_preview(index, preview));
+                }
+                None => {}
+            }
         }
         let horizontal_wheel_handle = scroll_handle.clone();
         div()
@@ -5860,14 +6145,49 @@ impl KiteApp {
             .into_any_element()
     }
 
-    fn selected_last_column_file(&self) -> Option<FileEntry> {
-        let pane = self.column_panes.last()?;
+    fn selected_column_file(&self, index: usize) -> Option<FileEntry> {
+        let pane = self.column_panes.get(index)?;
         let selected = pane.selected_path.as_ref()?;
         pane.entries
             .iter()
             .find(|entry| same_path(&entry.path, selected))
             .filter(|entry| !entry.is_dir())
             .cloned()
+    }
+
+    /// The column and file to preview. A file selected in the search column
+    /// wins; otherwise the last column's selection keeps its preview, so
+    /// opening search never hides a preview that was already showing.
+    fn preview_target(&self) -> Option<(usize, FileEntry)> {
+        if let Some(index) = self.column_search_root_index()
+            && let Some(entry) = self.selected_column_file(index)
+        {
+            return Some((index, entry));
+        }
+        let last = self.column_panes.len().checked_sub(1)?;
+        self.selected_column_file(last).map(|entry| (last, entry))
+    }
+
+    /// Previews of non-last columns float above the columns to their right so
+    /// the strip keeps its width.
+    fn floating_column_preview(index: usize, content: AnyElement) -> AnyElement {
+        let left = COLUMN_STRIP_PADDING
+            + index as f32 * (COLUMN_WIDTH + COLUMN_STRIP_GAP)
+            + COLUMN_WIDTH
+            + COLUMN_STRIP_GAP;
+        div()
+            .id("column-floating-preview")
+            .absolute()
+            .left(px(left))
+            .top(px(COLUMN_STRIP_PADDING))
+            .bottom(px(COLUMN_STRIP_PADDING))
+            .w(px(PREVIEW_WIDTH))
+            .rounded_lg()
+            .shadow_lg()
+            // Swallow pointer input so clicks do not reach the covered columns.
+            .occlude()
+            .child(content)
+            .into_any_element()
     }
 
     fn render_column_preview(&mut self, entry: &FileEntry, cx: &mut Context<Self>) -> AnyElement {
@@ -6503,6 +6823,14 @@ impl KiteApp {
             .get(index)
             .map(|state| state.handle.clone())
             .unwrap_or_default();
+        if self
+            .column_search_scroll_target
+            .as_ref()
+            .is_some_and(|(target, _)| same_path(target, &path))
+            && let Some((_, row)) = self.column_search_scroll_target.take()
+        {
+            vertical_scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         let search_open = self
             .column_search_path
             .as_ref()
@@ -6554,7 +6882,11 @@ impl KiteApp {
             cx.theme().secondary.opacity(0.72)
         };
         let empty_label = if search_query.is_some() {
-            "无搜索结果"
+            if search_loading {
+                ""
+            } else {
+                "无搜索结果"
+            }
         } else if rules.filter != ColumnFilter::All {
             "筛选后无项目"
         } else {
@@ -6688,9 +7020,18 @@ impl KiteApp {
                 Button::new(("column-search", index))
                     .ghost()
                     .compact()
+                    .toggled(search_open)
                     .icon(IconName::Search)
-                    .tooltip("搜索此分栏")
-                    .accessibility_label("搜索此分栏")
+                    .tooltip(if search_open {
+                        "关闭分栏搜索 (Esc)"
+                    } else {
+                        "搜索此分栏及子目录（跳过 node_modules、target 等生成目录）"
+                    })
+                    .accessibility_label(if search_open {
+                        "关闭分栏搜索"
+                    } else {
+                        "搜索此分栏及子目录"
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.toggle_column_search(search_path.clone(), window, cx)
                     })),
@@ -6876,28 +7217,77 @@ impl KiteApp {
                 .w_full()
                 .px_2()
                 .py_1()
+                .gap_1()
                 .items_center()
                 .bg(cx.theme().status_bar)
                 .border_b_1()
                 .border_color(border)
+                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    if modifiers.control || modifiers.alt || modifiers.platform {
+                        return;
+                    }
+                    match event.keystroke.key.as_str() {
+                        "down" if !modifiers.shift => {
+                            if this.move_column_search_selection(true, cx) {
+                                cx.stop_propagation();
+                            }
+                        }
+                        "up" if !modifiers.shift => {
+                            if this.move_column_search_selection(false, cx) {
+                                cx.stop_propagation();
+                            }
+                        }
+                        "escape" => {
+                            this.close_column_search(window, cx);
+                            cx.stop_propagation();
+                        }
+                        _ => {}
+                    }
+                }))
                 .child(
                     Input::new(&self.column_search_input)
-                        .aria_label("搜索当前分栏")
-                        .prefix(Icon::new(IconName::Search).size_3())
-                        .cleanable(true)
+                        .aria_label("搜索当前分栏及子目录")
+                        .prefix(Icon::new(IconName::Search).size_3().text_color(
+                            if search_loading {
+                                cx.theme().accent_foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            },
+                        ))
                         .suffix(
-                            Button::new(("column-close-search", index))
-                                .ghost()
-                                .compact()
-                                .icon(IconName::X)
-                                .tooltip("关闭分栏搜索 (Esc)")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if this.column_search_path.as_ref().is_some_and(|active_path| {
-                                        same_path(active_path, &close_search_path)
-                                    }) {
-                                        this.close_column_search(window, cx);
-                                    }
-                                })),
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .when(search_query.is_some(), |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(if search_truncated {
+                                                format!("{entry_count}+")
+                                            } else {
+                                                entry_count.to_string()
+                                            }),
+                                    )
+                                })
+                                .child(
+                                    Button::new(("column-close-search", index))
+                                        .ghost()
+                                        .compact()
+                                        .icon(IconName::X)
+                                        .tooltip("关闭分栏搜索 (Esc)")
+                                        .accessibility_label("关闭分栏搜索")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if this.column_search_path.as_ref().is_some_and(
+                                                |active_path| {
+                                                    same_path(active_path, &close_search_path)
+                                                },
+                                            ) {
+                                                this.close_column_search(window, cx);
+                                            }
+                                        })),
+                                ),
                         )
                         .small()
                         .flex_1()
@@ -8415,6 +8805,48 @@ fn column_count_after_file_selection(column: usize, current_count: usize) -> usi
     (column + 1).min(current_count)
 }
 
+fn search_selection_step(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match current {
+        Some(index) if forward => (index + 1).min(len - 1),
+        Some(index) => index.saturating_sub(1),
+        None if forward => 0,
+        None => len - 1,
+    })
+}
+
+/// Steps over display rows that hold entries, skipping group headers.
+fn entry_row_step(
+    entry_rows: &[usize],
+    current_row: Option<usize>,
+    forward: bool,
+) -> Option<usize> {
+    let position =
+        current_row.and_then(|row| entry_rows.iter().position(|candidate| *candidate == row));
+    let next = search_selection_step(position, entry_rows.len(), forward)?;
+    entry_rows.get(next).copied()
+}
+
+fn search_query_narrows(previous: &str, next: &str) -> bool {
+    let previous = previous.trim().to_lowercase();
+    let next = next.trim().to_lowercase();
+    !previous.is_empty() && next.contains(&previous)
+}
+
+fn narrow_search_entries(entries: &[FileEntry], query: &str) -> Vec<FileEntry> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|entry| entry.name.to_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
 impl Focusable for KiteApp {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -8472,6 +8904,14 @@ impl Render for KiteApp {
             let handle = self.column_scroll.clone();
             window.defer(cx, move |_, _| {
                 handle.set_offset(point(-handle.max_offset().x, handle.offset().y));
+            });
+        }
+        if let Some(index) = self.column_scroll_to_column.take() {
+            let offset = COLUMN_STRIP_PADDING + index as f32 * (COLUMN_WIDTH + COLUMN_STRIP_GAP);
+            let handle = self.column_scroll.clone();
+            window.defer(cx, move |_, _| {
+                let max = handle.max_offset().x.as_f32().max(0.0);
+                handle.set_offset(point(px(-offset.min(max)), handle.offset().y));
             });
         }
         if self.show_path_bar && !self.address_editing && self.path_bar_scroll_pending {
@@ -9578,5 +10018,240 @@ mod scroll_routing_tests {
     #[test]
     fn non_scrollable_directory_stays_at_start() {
         assert_eq!(directory_scroll_offset(-90.0, 0.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod column_search_tests {
+    use super::{
+        ColumnDisplayRow, ColumnPane, entry_row_step, narrow_search_entries, search_query_narrows,
+        search_selection_step,
+    };
+    use crate::fs::{EntryKind, FileEntry};
+    use crate::ui_preferences::ColumnViewRule;
+    use std::path::PathBuf;
+
+    fn entry(path: &str) -> FileEntry {
+        let path = PathBuf::from(path);
+        FileEntry {
+            extension: path
+                .extension()
+                .map(|value| value.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
+            name: path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path,
+            kind: EntryKind::File,
+            size: 0,
+            modified: None,
+            git_status: None,
+            svn_status: None,
+        }
+    }
+
+    #[test]
+    fn steps_through_search_results_without_leaving_the_list() {
+        assert_eq!(search_selection_step(None, 0, true), None);
+        assert_eq!(search_selection_step(None, 3, true), Some(0));
+        assert_eq!(search_selection_step(None, 3, false), Some(2));
+        assert_eq!(search_selection_step(Some(0), 3, true), Some(1));
+        assert_eq!(search_selection_step(Some(1), 3, false), Some(0));
+        assert_eq!(search_selection_step(Some(2), 3, true), Some(2));
+        assert_eq!(search_selection_step(Some(0), 3, false), Some(0));
+    }
+
+    #[test]
+    fn selection_skips_group_headers() {
+        let entry_rows = [1, 2, 4];
+        assert_eq!(entry_row_step(&entry_rows, None, true), Some(1));
+        assert_eq!(entry_row_step(&entry_rows, None, false), Some(4));
+        assert_eq!(entry_row_step(&entry_rows, Some(1), true), Some(2));
+        assert_eq!(entry_row_step(&entry_rows, Some(2), true), Some(4));
+        assert_eq!(entry_row_step(&entry_rows, Some(4), true), Some(4));
+        assert_eq!(entry_row_step(&entry_rows, Some(2), false), Some(1));
+        assert_eq!(entry_row_step(&entry_rows, Some(0), true), Some(1));
+        assert_eq!(entry_row_step(&[], None, true), None);
+    }
+
+    #[test]
+    fn search_results_keep_group_headers_and_rank_order() {
+        let root = PathBuf::from(r"C:\repo");
+        let mut column = ColumnPane::new(
+            root.clone(),
+            vec![entry(r"C:\repo\notes.txt")],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_search_results(
+            "target".to_string(),
+            vec![
+                entry(r"C:\repo\target.rs"),
+                entry(r"C:\repo\docs\targeting.md"),
+                entry(r"C:\repo\my-target.md"),
+                entry(r"C:\repo\target-notes.txt"),
+            ],
+            false,
+        );
+        column.group = crate::ui_preferences::ColumnGroupPreference::Extension;
+        column.refresh_view();
+
+        let rows = column.display_rows();
+        assert!(matches!(
+            rows.first(),
+            Some(ColumnDisplayRow::Group { label, count, .. })
+                if label.as_ref() == "MD" && *count == 2
+        ));
+        assert!(matches!(
+            &rows[1],
+            ColumnDisplayRow::Entry(entry) if entry.name == "targeting.md"
+        ));
+        assert!(matches!(
+            &rows[2],
+            ColumnDisplayRow::Entry(entry) if entry.name == "my-target.md"
+        ));
+        assert_eq!(column.first_search_row_index(), Some(4));
+
+        column.clear_search_results();
+        column.refresh_view();
+        assert!(matches!(
+            column.display_rows().first(),
+            Some(ColumnDisplayRow::Group { .. })
+        ));
+    }
+
+    #[test]
+    fn keeps_ranked_search_order_and_sorts_previews() {
+        let root = PathBuf::from(r"C:\repo");
+        let a = entry(r"C:\repo\a.txt");
+        let b = entry(r"C:\repo\b.txt");
+        let mut column = ColumnPane::new(
+            root,
+            vec![a.clone(), b.clone()],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+
+        column.set_search_results("txt".to_string(), vec![b.clone(), a.clone()], false);
+        assert_eq!(
+            column
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["b.txt", "a.txt"]
+        );
+
+        column.set_search_preview("txt".to_string(), vec![b, a]);
+        assert_eq!(
+            column
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+    }
+
+    #[test]
+    fn detects_narrowing_queries_case_insensitively() {
+        assert!(search_query_narrows("Target", "target.rs"));
+        assert!(search_query_narrows("tar", "target"));
+        assert!(!search_query_narrows("target", "tar"));
+        assert!(!search_query_narrows("", "target"));
+    }
+
+    #[test]
+    fn narrows_previous_results_without_reordering() {
+        let entries = vec![
+            entry(r"C:\repo\target.rs"),
+            entry(r"C:\repo\notes.txt"),
+            entry(r"C:\repo\sub\targeting.md"),
+        ];
+        let narrowed = narrow_search_entries(&entries, "TARGET");
+        assert_eq!(
+            narrowed
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["target.rs", "targeting.md"]
+        );
+    }
+
+    #[test]
+    fn distinguishes_preview_from_final_results() {
+        let root = PathBuf::from(r"C:\repo");
+        let mut column = ColumnPane::new(
+            root,
+            vec![entry(r"C:\repo\a.txt")],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_search_preview("a".to_string(), vec![entry(r"C:\repo\a.txt")]);
+        assert!(column.search_preview);
+        column.set_search_results("a".to_string(), vec![entry(r"C:\repo\a.txt")], false);
+        assert!(!column.search_preview);
+        column.clear_search_results();
+        assert!(!column.search_preview);
+    }
+
+    #[test]
+    fn closing_search_restores_a_selection_the_query_hid() {
+        let root = PathBuf::from(r"C:\repo");
+        let notes = entry(r"C:\repo\notes.txt");
+        let target = entry(r"C:\repo\target.txt");
+        let mut column = ColumnPane::new(
+            root,
+            vec![notes.clone(), target.clone()],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_single_selection(notes.path.clone());
+
+        column.set_search_preview("tar".to_string(), vec![target.clone()]);
+        assert_eq!(column.selected_path, None);
+        column.set_search_results("targ".to_string(), vec![target], false);
+        assert_eq!(column.selected_path, None);
+
+        column.clear_search_results();
+        assert_eq!(column.selected_path.as_deref(), Some(notes.path.as_path()));
+        assert!(column.is_selected(&notes.path));
+    }
+
+    #[test]
+    fn a_selection_made_in_search_survives_closing_it() {
+        let root = PathBuf::from(r"C:\repo");
+        let notes = entry(r"C:\repo\notes.txt");
+        let deep = entry(r"C:\repo\docs\target.md");
+        let mut column = ColumnPane::new(
+            root,
+            vec![notes.clone()],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_single_selection(notes.path.clone());
+        column.set_search_results("target".to_string(), vec![deep.clone()], false);
+        column.set_single_selection(deep.path.clone());
+
+        column.clear_search_results();
+        // The search pick is not in the listing, so the earlier selection
+        // returns instead of leaving the column with nothing selected.
+        assert_eq!(column.selected_path.as_deref(), Some(notes.path.as_path()));
     }
 }

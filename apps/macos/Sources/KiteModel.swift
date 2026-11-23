@@ -198,6 +198,7 @@ struct BrowserColumn: Identifiable {
     var collapsedGroups: Set<String>
     var searchQuery: String?
     var searchTruncated: Bool
+    var searchResultsAreFinal: Bool
 
     init(
         path: String,
@@ -225,6 +226,7 @@ struct BrowserColumn: Identifiable {
         self.collapsedGroups = rule.collapsedGroups
         self.searchQuery = nil
         self.searchTruncated = false
+        self.searchResultsAreFinal = false
         refreshView()
     }
 
@@ -368,6 +370,15 @@ struct BrowserColumn: Identifiable {
         searchEntries = entries
         searchQuery = query
         searchTruncated = truncated
+        searchResultsAreFinal = true
+        refreshView()
+    }
+
+    mutating func setSearchPreview(query: String, entries: [BrowserEntry]) {
+        searchEntries = entries.sorted { entryComesBefore($0, $1) }
+        searchQuery = query
+        searchTruncated = false
+        searchResultsAreFinal = false
         refreshView()
     }
 
@@ -375,6 +386,7 @@ struct BrowserColumn: Identifiable {
         searchEntries = nil
         searchQuery = nil
         searchTruncated = false
+        searchResultsAreFinal = false
         refreshView()
     }
 
@@ -437,9 +449,12 @@ struct BrowserColumn: Identifiable {
     }
 
     private mutating func refreshView() {
-        entries = sourceEntries
-            .filter { filter.matches($0) }
-            .sorted { entryComesBefore($0, $1) }
+        let filtered = sourceEntries.filter { filter.matches($0) }
+        if searchEntries == nil {
+            entries = filtered.sorted { entryComesBefore($0, $1) }
+        } else {
+            entries = filtered
+        }
         if let selectedPath,
            !entries.contains(where: { $0.path == selectedPath }) {
             self.selectedPath = nil
@@ -758,6 +773,8 @@ final class KiteModel: ObservableObject {
     private var columnAutoRefreshGeneration: UInt64 = 0
     private var columnAutoRefreshTask: Task<Void, Never>?
     private var contentSearchPowerPolicyTask: Task<Void, Never>?
+    private var columnKeyMonitor: Any?
+    private var lastHoveredColumnPath: String?
     private lazy var columnDirectoryWatcher = DirectoryWatcher { [weak self] in
         self?.directoryContentsDidChange()
     }
@@ -777,6 +794,7 @@ final class KiteModel: ObservableObject {
     private var pendingUpdate: UpdateInfoDto?
     @Published var activeColumnSearchPath: String?
     @Published var columnSearchText = ""
+    @Published var columnSearchSelectionPath: String?
     @Published private(set) var columnSearchLoading = false
     @Published var globalSearchText = ""
     @Published var globalSearchMode: GlobalSearchMode = .name
@@ -805,12 +823,19 @@ final class KiteModel: ObservableObject {
                 self?.updateContentSearchPowerPolicy()
             }
         }
+        columnKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleColumnKeyDown(event) ? nil : event
+        }
         PerformanceTrace.mark("macos.model_ready")
     }
 
     deinit {
         contentSearchPowerPolicyTask?.cancel()
         globalSearchDebounceTask?.cancel()
+        if let columnKeyMonitor {
+            NSEvent.removeMonitor(columnKeyMonitor)
+        }
     }
 
     var activeTab: BrowserTab? {
@@ -856,6 +881,17 @@ final class KiteModel: ObservableObject {
 
     var currentPath: String {
         activeTab?.currentPath ?? core.defaultDirectory()
+    }
+
+    func gitPreviewSummary(for path: String) async -> GitPreviewSummaryDto? {
+        let core = self.core
+        return await Task.detached(priority: .utility) {
+            do {
+                return try core.gitPreviewSummary(path: path)
+            } catch {
+                return nil
+            }
+        }.value
     }
 
     var canCloseTab: Bool { tabs.count > 1 }
@@ -1020,6 +1056,10 @@ final class KiteModel: ObservableObject {
         persistColumnViewRule(index: index)
     }
 
+    func noteColumnHover(path: String) {
+        lastHoveredColumnPath = path
+    }
+
     func resetColumnView(index: Int) {
         guard let tabIndex = activeTabIndex,
               tabs[tabIndex].columns.indices.contains(index) else {
@@ -1055,6 +1095,11 @@ final class KiteModel: ObservableObject {
             return
         }
 
+        openColumnSearch(path: path)
+    }
+
+    private func openColumnSearch(path: String) {
+
         if let previousPath = activeColumnSearchPath {
             clearColumnSearch(path: previousPath)
         }
@@ -1062,6 +1107,69 @@ final class KiteModel: ObservableObject {
         resetColumnSearchRequest()
         activeColumnSearchPath = path
         columnSearchText = columnQuery(for: path) ?? ""
+        columnSearchSelectionPath = nil
+    }
+
+    private func handleColumnKeyDown(_ event: NSEvent) -> Bool {
+        let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option, .function]
+        guard event.window?.isMainWindow == true else {
+            return false
+        }
+
+        if let path = activeColumnSearchPath {
+            if event.modifierFlags.contains(.command), event.keyCode == 36 { // Cmd+Return
+                cancelColumnSearchDebounce()
+                startColumnSearch(path: path, query: columnSearchText)
+                return true
+            }
+            switch event.keyCode {
+            case 125 where !event.modifierFlags.contains(.shift): // down arrow
+                if moveColumnSearchSelection(path: path, forward: true) {
+                    return true
+                }
+            case 126 where !event.modifierFlags.contains(.shift): // up arrow
+                if moveColumnSearchSelection(path: path, forward: false) {
+                    return true
+                }
+            case 53: // escape
+                clearColumnSearch(path: path)
+                return true
+            default:
+                break
+            }
+        }
+
+        guard event.modifierFlags.intersection(blockedModifiers).isEmpty else {
+            return false
+        }
+
+        guard let characters = event.characters,
+              !characters.isEmpty,
+              !characters.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return false
+        }
+
+        let hoveredPath = lastHoveredColumnPath.flatMap { path in
+            columns.contains(where: { $0.path == path }) ? path : nil
+        }
+        let targetPath = hoveredPath
+            ?? columns.last(where: { $0.path == currentPath })?.path
+            ?? columns.last?.path
+        guard let path = targetPath else { return false }
+
+        if let responder = event.window?.firstResponder,
+           responder is NSTextField || responder is NSTextView {
+            return false
+        }
+
+        if activeColumnSearchPath != path {
+            openColumnSearch(path: path)
+            columnSearchText = ""
+        }
+        setColumnSearchText(columnSearchText + characters)
+        return true
     }
 
     func setColumnSearchText(_ text: String) {
@@ -1077,6 +1185,11 @@ final class KiteModel: ObservableObject {
             return
         }
 
+        if narrowColumnSearch(query: query, path: path) {
+            return
+        }
+
+        columnSearchLoading = true
         columnSearchDebounceTask = Task { [weak self] in
             try? await Task<Never, Never>.sleep(
                 nanoseconds: Self.columnSearchDebounceNanoseconds
@@ -1091,7 +1204,92 @@ final class KiteModel: ObservableObject {
 
     func submitColumnSearch(path: String) {
         cancelColumnSearchDebounce()
+        if activateColumnSearchSelection(path: path) {
+            return
+        }
         startColumnSearch(path: path, query: columnSearchText)
+    }
+
+    /// Opens the highlighted search result, or the first result when nothing is
+    /// highlighted. Returns `false` while the search is still running or empty.
+    private func activateColumnSearchSelection(path: String) -> Bool {
+        guard !columnSearchLoading,
+              let tabIndex = activeTabIndex,
+              let columnIndex = tabs[tabIndex].columns.firstIndex(where: { $0.path == path })
+        else {
+            return false
+        }
+        let column = tabs[tabIndex].columns[columnIndex]
+        let entry = column.selectedPath
+            .flatMap { selected in column.entries.first { $0.path == selected } }
+            ?? column.entries.first
+        guard let entry else { return false }
+        if entry.isDirectory {
+            select(column: columnIndex, entry: entry, modifiers: [])
+        } else {
+            KitePlatform.open(entry.path)
+        }
+        return true
+    }
+
+    private func moveColumnSearchSelection(path: String, forward: Bool) -> Bool {
+        guard let tabIndex = activeTabIndex,
+              let columnIndex = tabs[tabIndex].columns.firstIndex(where: { $0.path == path })
+        else {
+            return false
+        }
+        let entries = tabs[tabIndex].columns[columnIndex].entries
+        guard !entries.isEmpty else { return false }
+        let current = tabs[tabIndex].columns[columnIndex].selectedPath.flatMap { selected in
+            entries.firstIndex(where: { $0.path == selected })
+        }
+        let target: Int
+        if let current {
+            target = min(max(current + (forward ? 1 : -1), 0), entries.count - 1)
+        } else {
+            target = forward ? 0 : entries.count - 1
+        }
+        let entry = entries[target]
+        tabs[tabIndex].columns[columnIndex].select(path: entry.path, mode: .replace)
+        columnSearchSelectionPath = entry.path
+        return true
+    }
+
+    /// Applies local results before the debounced recursive walk runs.
+    /// Returns `true` when the previous complete result set already contains
+    /// every possible match, so the walk can be skipped entirely.
+    private func narrowColumnSearch(query: String, path: String) -> Bool {
+        guard let tabIndex = activeTabIndex,
+              let columnIndex = tabs[tabIndex].columns.firstIndex(where: { $0.path == path })
+        else {
+            return false
+        }
+        let column = tabs[tabIndex].columns[columnIndex]
+        if column.searchResultsAreFinal,
+           let previous = column.searchQuery,
+           searchQueryNarrows(previous: previous, next: query) {
+            let narrowed = (column.searchEntries ?? []).filter {
+                $0.name.localizedCaseInsensitiveContains(query)
+            }
+            tabs[tabIndex].columns[columnIndex].setSearchResults(
+                query: query,
+                entries: narrowed,
+                truncated: column.searchTruncated
+            )
+            return !column.searchTruncated
+        }
+        let direct = column.directoryEntries.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+        }
+        tabs[tabIndex].columns[columnIndex].setSearchPreview(query: query, entries: direct)
+        return false
+    }
+
+    private func searchQueryNarrows(previous: String, next: String) -> Bool {
+        let previous = previous.trimmingCharacters(in: .whitespacesAndNewlines)
+        let next = next.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !previous.isEmpty else { return false }
+        return next.range(of: previous, options: [.caseInsensitive]) != nil
     }
 
     private func startColumnSearch(path: String, query: String) {
@@ -1158,6 +1356,7 @@ final class KiteModel: ObservableObject {
         clearColumnSearchResults(for: path)
         activeColumnSearchPath = nil
         columnSearchText = ""
+        columnSearchSelectionPath = nil
     }
 
     var hasGlobalSearchActivity: Bool {
@@ -1576,6 +1775,7 @@ final class KiteModel: ObservableObject {
         resetColumnSearchRequest()
         activeColumnSearchPath = nil
         columnSearchText = ""
+        columnSearchSelectionPath = nil
         clearGlobalSearch()
     }
 
@@ -1599,6 +1799,16 @@ final class KiteModel: ObservableObject {
             submitGlobalSearch()
             reloadVolumes()
             return
+        }
+        if let path = activeColumnSearchPath {
+            let query = columnSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !query.isEmpty {
+                // File operations call refresh; rerun the active query so the
+                // result list reflects the new directory contents.
+                refreshVisibleColumns()
+                startColumnSearch(path: path, query: query)
+                return
+            }
         }
         refreshVisibleColumns()
     }

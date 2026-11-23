@@ -429,16 +429,38 @@ private struct KiteBrowserColumn: View {
             if column.entries.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(column.displayRows) { row in
-                            columnRow(row)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(column.displayRows) { row in
+                                columnRow(row)
+                            }
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 5)
+                    }
+                    .scrollIndicators(.hidden)
+                    .onChange(of: column.searchQuery) { _ in
+                        guard let firstMatchID = column.displayRows.compactMap({ row in
+                            guard case .entry(let entry) = row else { return nil }
+                            return entry.id
+                        }).first else {
+                            return
+                        }
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(firstMatchID, anchor: .top)
                         }
                     }
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 5)
+                    .onChange(of: model.columnSearchSelectionPath) { selected in
+                        guard let selected,
+                              column.entries.contains(where: { $0.path == selected }) else {
+                            return
+                        }
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(selected, anchor: .center)
+                        }
+                    }
                 }
-                .scrollIndicators(.hidden)
             }
         }
         .frame(width: columnWidth)
@@ -475,6 +497,11 @@ private struct KiteBrowserColumn: View {
         .onAppear {
             DispatchQueue.main.async {
                 searchFocused = model.activeColumnSearchPath == column.path
+            }
+        }
+        .onHover { hovered in
+            if hovered {
+                model.noteColumnHover(path: column.path)
             }
         }
         .modifier(
@@ -530,8 +557,8 @@ private struct KiteBrowserColumn: View {
                     .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .buttonStyle(.plain)
-            .help(isSearchOpen ? "关闭分栏搜索" : "搜索此分栏")
-            .accessibilityLabel(isSearchOpen ? "关闭分栏搜索" : "搜索此分栏")
+            .help(isSearchOpen ? "关闭分栏搜索" : "搜索此分栏及子目录")
+            .accessibilityLabel(isSearchOpen ? "关闭分栏搜索" : "搜索此分栏及子目录")
 
             Button {
                 model.toggleColumnSort(index: index)
@@ -543,8 +570,13 @@ private struct KiteBrowserColumn: View {
                     .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .buttonStyle(.plain)
-            .help(column.sortAscending ? "当前升序，点击改为降序" : "当前降序，点击改为升序")
-            .accessibilityLabel(column.sortAscending ? "切换为降序排序" : "切换为升序排序")
+            .disabled(column.searchQuery != nil)
+            .help(column.searchQuery != nil
+                ? "搜索结果按匹配度排序"
+                : (column.sortAscending ? "当前升序，点击改为降序" : "当前降序，点击改为升序"))
+            .accessibilityLabel(column.searchQuery != nil
+                ? "搜索结果按匹配度排序"
+                : (column.sortAscending ? "切换为降序排序" : "切换为升序排序"))
 
             if isActive {
                 Button(action: onToggleDetails) {
@@ -592,7 +624,7 @@ private struct KiteBrowserColumn: View {
                 .foregroundStyle(searchFocused ? Color.accentColor : Color.secondary)
 
             TextField(
-                "搜索此分栏",
+                "搜索当前分栏及子目录",
                 text: Binding(
                     get: { model.columnSearchText },
                     set: { model.setColumnSearchText($0) }
@@ -692,7 +724,9 @@ private struct KiteBrowserColumn: View {
                 model: model,
                 entry: entry,
                 columnIndex: index,
+                columnPath: column.path,
                 isSelected: column.selectedPaths.contains(entry.path),
+                searchQuery: column.searchQuery,
                 showsDetails: showsDetails,
                 showsDateColumn: showsDateColumn,
                 showsKindColumn: showsKindColumn,
@@ -919,7 +953,7 @@ private struct KiteBrowserColumn: View {
                 .foregroundStyle(.tertiary)
             }
 
-            Text(column.emptyLabel)
+            Text(isSearchOpen && model.columnSearchLoading ? "搜索中…" : column.emptyLabel)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
 
@@ -972,7 +1006,9 @@ private struct KiteBrowserRow: View {
     @ObservedObject var model: KiteModel
     let entry: BrowserEntry
     let columnIndex: Int
+    let columnPath: String
     let isSelected: Bool
+    let searchQuery: String?
     let showsDetails: Bool
     let showsDateColumn: Bool
     let showsKindColumn: Bool
@@ -1093,11 +1129,19 @@ private struct KiteBrowserRow: View {
             .frame(width: 22, height: 22)
             .accessibilityHidden(true)
 
-            Text(entry.name)
+            highlightedName
                 .font(.system(size: 12.5, weight: isSelected ? .medium : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .layoutPriority(1)
+
+            if let relativeParent {
+                Text(relativeParent + "/")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
 
             Spacer(minLength: 4)
 
@@ -1120,6 +1164,43 @@ private struct KiteBrowserRow: View {
         guard let modifiedUnixMs = entry.modifiedUnixMs else { return "—" }
         let date = Date(timeIntervalSince1970: TimeInterval(modifiedUnixMs) / 1_000)
         return date.formatted(date: .numeric, time: .omitted)
+    }
+
+    private var relativeParent: String? {
+        guard searchQuery != nil else { return nil }
+        let parent = (entry.path as NSString).deletingLastPathComponent
+        guard !parent.isEmpty, parent != columnPath else { return nil }
+        guard parent.lowercased().hasPrefix(columnPath.lowercased()) else { return nil }
+        var relative = String(parent.dropFirst(columnPath.count))
+        while relative.hasPrefix("/") || relative.hasPrefix("\\") {
+            relative.removeFirst()
+        }
+        return relative.isEmpty ? nil : relative
+    }
+
+    private var highlightedName: Text {
+        guard let query = searchQuery?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return Text(entry.name)
+        }
+
+        var result = Text("")
+        var cursor = entry.name.startIndex
+        while let range = entry.name.range(
+            of: query,
+            options: [.caseInsensitive],
+            range: cursor..<entry.name.endIndex
+        ) {
+            result = result + Text(String(entry.name[cursor..<range.lowerBound]))
+            result = result + Text(String(entry.name[range]))
+                .foregroundColor(Color.accentColor)
+                .bold()
+            cursor = range.upperBound
+            if cursor == entry.name.endIndex {
+                break
+            }
+        }
+        return result + Text(String(entry.name[cursor...]))
     }
 
     private var metadataKind: String {
@@ -1155,7 +1236,7 @@ private struct KiteBrowserRow: View {
     }
 }
 
-private struct KiteVcsBadge {
+struct KiteVcsBadge {
     let code: String
     let color: Color
     let isSvn: Bool

@@ -294,7 +294,7 @@ pub fn search_directory(
         sort,
         SearchFilters::default(),
         cancel,
-        false,
+        true,
         DIRECTORY_SEARCH_THREADS,
     )
 }
@@ -407,7 +407,7 @@ fn search_directory_inner(
         .hidden(true)
         .follow_links(false)
         .threads(threads.max(1))
-        .same_file_system(prune_generated);
+        .same_file_system(false);
     if prune_generated {
         builder.filter_entry(|entry| {
             entry.depth() == 0
@@ -441,13 +441,13 @@ fn search_directory_inner(
     if cancel.load(AtomicOrdering::Relaxed) {
         return Ok(None);
     }
-    let mut entries = Arc::try_unwrap(entries)
+    let entries = Arc::try_unwrap(entries)
         .map_err(|_| "搜索任务未正确结束".to_string())?
         .into_inner()
         .map_err(|_| "搜索结果锁损坏".to_string())?;
     let has_more = entries.len() > SEARCH_RESULT_LIMIT;
+    let mut entries = rank_search_entries(entries, root, query, sort);
     entries.truncate(SEARCH_RESULT_LIMIT);
-    sort_entries(&mut entries, sort);
     Ok(Some(SearchSnapshot {
         root: root.to_path_buf(),
         query: query.to_string(),
@@ -718,26 +718,106 @@ pub(crate) fn file_entry_from_metadata(
     }
 }
 
+fn compare_entries(left: &FileEntry, right: &FileEntry, spec: SortSpec) -> Ordering {
+    group_order(left, right).then_with(|| {
+        let order = match spec.key {
+            SortKey::Name => compare_names(left, right),
+            SortKey::Vcs => left.vcs_rank().cmp(&right.vcs_rank()),
+            SortKey::Modified => left.modified.cmp(&right.modified),
+            SortKey::Kind => left
+                .extension
+                .cmp(&right.extension)
+                .then_with(|| compare_names(left, right)),
+            SortKey::Size => left.size.cmp(&right.size),
+        };
+        if spec.ascending {
+            order
+        } else {
+            order.reverse()
+        }
+    })
+}
+
 pub fn sort_entries(entries: &mut [FileEntry], spec: SortSpec) {
-    entries.sort_by(|left, right| {
-        group_order(left, right).then_with(|| {
-            let order = match spec.key {
-                SortKey::Name => compare_names(left, right),
-                SortKey::Vcs => left.vcs_rank().cmp(&right.vcs_rank()),
-                SortKey::Modified => left.modified.cmp(&right.modified),
-                SortKey::Kind => left
-                    .extension
-                    .cmp(&right.extension)
-                    .then_with(|| compare_names(left, right)),
-                SortKey::Size => left.size.cmp(&right.size),
-            };
-            if spec.ascending {
-                order
-            } else {
-                order.reverse()
-            }
-        })
+    entries.sort_by(|left, right| compare_entries(left, right, spec));
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct SearchRank {
+    tier: u8,
+    depth: usize,
+    position: usize,
+    name_len: usize,
+}
+
+fn search_match_tier(name_lower: &str, query_lower: &str, position: usize) -> u8 {
+    if name_lower == query_lower {
+        0
+    } else if position == 0 {
+        1
+    } else if name_lower[..position]
+        .chars()
+        .next_back()
+        .is_some_and(is_name_separator)
+    {
+        2
+    } else {
+        3
+    }
+}
+
+fn is_name_separator(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '-' | '_' | '.' | ',' | '(' | ')' | '[' | ']' | '{' | '}' | '+' | '&' | '@' | '#'
+        )
+}
+
+fn search_rank(entry: &FileEntry, root: &Path, query_lower: &str) -> SearchRank {
+    let name_lower = entry.name.to_lowercase();
+    let position = name_lower.find(query_lower).unwrap_or(usize::MAX);
+    let depth = entry
+        .path
+        .strip_prefix(root)
+        .map(|relative| relative.components().count().saturating_sub(1))
+        .unwrap_or(usize::MAX);
+    SearchRank {
+        tier: if position == usize::MAX {
+            4
+        } else {
+            search_match_tier(&name_lower, query_lower, position)
+        },
+        depth,
+        position,
+        name_len: name_lower.chars().count(),
+    }
+}
+
+fn rank_search_entries(
+    entries: Vec<FileEntry>,
+    root: &Path,
+    query: &str,
+    spec: SortSpec,
+) -> Vec<FileEntry> {
+    let query_lower = query.trim().to_lowercase();
+    if query_lower.is_empty() {
+        return entries;
+    }
+    let mut ranked = entries
+        .into_iter()
+        .map(|entry| (search_rank(&entry, root, &query_lower), entry))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_rank, left), (right_rank, right)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| compare_entries(left, right, spec))
+            .then_with(|| left.path.cmp(&right.path))
     });
+    ranked
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>()
 }
 
 fn group_order(left: &FileEntry, right: &FileEntry) -> Ordering {
@@ -780,7 +860,8 @@ pub fn type_label(kind: EntryKind, extension: &str) -> String {
     }
     let category = match extension {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => "图像",
-        "txt" | "md" | "log" | "ini" | "toml" | "yaml" | "yml" | "json" => "文本文档",
+        "txt" | "md" | "log" | "ini" | "toml" | "yaml" | "yml" | "json" | "mm" | "freemind"
+        | "opml" | "opmlm" => "文本文档",
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => "文档",
         "xmind" | "mm" | "freemind" | "opml" | "opmlm" => "思维导图",
         "zip" | "7z" | "rar" | "tar" | "gz" => "压缩文件",
@@ -936,6 +1017,102 @@ mod tests {
         }
     }
 
+    fn entry_at(path: &str) -> FileEntry {
+        let path = PathBuf::from(path);
+        FileEntry {
+            name: path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            extension: path
+                .extension()
+                .map(|value| value.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
+            path,
+            kind: EntryKind::File,
+            size: 0,
+            modified: None,
+            git_status: None,
+            svn_status: None,
+        }
+    }
+
+    #[test]
+    fn ranks_search_results_by_match_quality_then_depth() {
+        let root = PathBuf::from("root");
+        let entries = vec![
+            entry_at("root/xtarget.txt"),
+            entry_at("root/other/target.rs"),
+            entry_at("root/my-target.txt"),
+            entry_at("root/deep/target"),
+            entry_at("root/target.rs"),
+            entry_at("root/target"),
+        ];
+        let ranked = rank_search_entries(entries, &root, "target", SortSpec::default());
+        let paths = ranked
+            .iter()
+            .map(|entry| entry.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                "root/target",
+                "root/deep/target",
+                "root/target.rs",
+                "root/other/target.rs",
+                "root/my-target.txt",
+                "root/xtarget.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn ranks_case_insensitive_matches_and_shorter_names_first() {
+        let root = PathBuf::from("root");
+        let entries = vec![
+            entry_at("root/targeting.md"),
+            entry_at("root/TARGET.txt"),
+            entry_at("root/Target"),
+        ];
+        let ranked = rank_search_entries(entries, &root, "target", SortSpec::default());
+        let names = ranked
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Target", "TARGET.txt", "targeting.md"]);
+    }
+
+    #[test]
+    fn uses_column_sort_to_break_search_rank_ties() {
+        let root = PathBuf::from("root");
+        let entries = vec![entry_at("root/xa.txt"), entry_at("root/ya.txt")];
+        let ascending = rank_search_entries(entries.clone(), &root, "a", SortSpec::default());
+        assert_eq!(
+            ascending
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["xa.txt", "ya.txt"]
+        );
+
+        let descending = rank_search_entries(
+            entries,
+            &root,
+            "a",
+            SortSpec {
+                key: SortKey::Name,
+                ascending: false,
+            },
+        );
+        assert_eq!(
+            descending
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["ya.txt", "xa.txt"]
+        );
+    }
+
     #[test]
     fn sorts_directories_before_files() {
         let mut entries = vec![
@@ -1078,13 +1255,53 @@ mod tests {
             .expect("search directory")
             .expect("non-empty search");
         assert_eq!(result.entries.len(), 2);
-        assert_eq!(result.entries[0].name, "another-target.md");
-        assert_eq!(result.entries[1].name, "target.log");
+        assert_eq!(result.entries[0].name, "target.log");
+        assert_eq!(result.entries[1].name, "another-target.md");
 
         let cancelled = AtomicBool::new(true);
         let cancelled_result = search_directory(&root, "target", SortSpec::default(), &cancelled)
             .expect("cancelled search should not fail");
         assert!(cancelled_result.is_none());
+
+        fs::remove_dir_all(root).expect("clean test directory");
+    }
+
+    #[test]
+    fn skips_generated_directories_when_searching() {
+        let root = std::env::temp_dir().join(format!(
+            "kite-test-generated-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).expect("create source folder");
+        fs::create_dir_all(root.join("node_modules").join("pkg")).expect("create generated folder");
+        fs::create_dir_all(root.join("target").join("debug")).expect("create build folder");
+        fs::write(root.join("src").join("needle.rs"), b"code").expect("write source file");
+        fs::write(
+            root.join("node_modules").join("pkg").join("needle.js"),
+            b"dep",
+        )
+        .expect("write dependency file");
+        fs::write(
+            root.join("target").join("debug").join("needle.bin"),
+            b"build",
+        )
+        .expect("write build file");
+        fs::write(root.join("needle-root.txt"), b"root").expect("write root match");
+
+        let cancel = AtomicBool::new(false);
+        let result = search_directory(&root, "needle", SortSpec::default(), &cancel)
+            .expect("search directory")
+            .expect("non-empty search");
+        let names = result
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["needle-root.txt", "needle.rs"]);
 
         fs::remove_dir_all(root).expect("clean test directory");
     }
