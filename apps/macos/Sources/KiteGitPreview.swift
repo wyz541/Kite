@@ -140,7 +140,7 @@ struct KiteGitPreviewSection: View {
             }
             actionButton("历史") { showLog() }
             actionButton("Git 客户端") {
-                KiteGitClientWindowController.open(path: summary.repositoryRoot)
+                KiteGitClientWindowController.show(model: model, repositoryPath: summary.repositoryRoot)
             }
         }
     }

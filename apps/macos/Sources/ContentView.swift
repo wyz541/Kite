@@ -288,7 +288,7 @@ struct ContentView: View {
                     systemName: "arrow.triangle.branch",
                     title: "打开 Git 客户端 (⌘⇧G)"
                 ) {
-                    KiteGitClientWindowController.open(path: model.currentPath)
+                    KiteGitClientWindowController.show(model: model, repositoryPath: model.currentPath)
                 }
             }
             KiteToolbarIconButton(
@@ -431,7 +431,7 @@ struct ContentView: View {
 
             if model.columns.last?.gitAvailable == true {
                 Button {
-                    KiteGitClientWindowController.open(path: model.currentPath)
+                    KiteGitClientWindowController.show(model: model, repositoryPath: model.currentPath)
                 } label: {
                     KiteStatusBadge(title: "Git", systemImage: "arrow.triangle.branch")
                 }

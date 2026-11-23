@@ -9,6 +9,7 @@ pub mod ffi;
 pub mod file_watcher;
 pub mod fs;
 pub mod git;
+pub mod git_changes;
 pub mod global_name_search;
 pub mod indexed_search;
 pub mod name_index;

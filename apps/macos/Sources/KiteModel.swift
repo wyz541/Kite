@@ -1704,11 +1704,189 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
+    func gitRepositoryRoot(path: String) async -> String? {
+        let core = self.core
+        return try? await Task.detached(priority: .utility) {
+            try core.gitRepositoryRoot(path: path)
+        }.value
+    }
+
+    func loadGitClientWindowState(repositoryRoot: String) -> GitClientWindowSessionDto? {
+        core.loadGitClientWindowState(repositoryRoot: repositoryRoot)
+    }
+
+    func saveGitClientWindowState(_ state: GitClientWindowSessionDto) {
+        do {
+            try core.saveGitClientWindowState(state: state)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func runGitOperationControl(
+        path: String,
+        control: GitOperationControlDto
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.runGitOperationControl(path: path, control: control)
+        }.value
+    }
+
+    func runVcsOperationCancellable(
+        operation: VcsOperationDto,
+        path: String,
+        cancellation: VcsCancellation
+    ) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.runVcsOperationCancellable(
+                tool: .git,
+                operation: operation,
+                path: path,
+                cancellation: cancellation
+            )
+        }.value
+        refresh()
+        return message
+    }
+
     func gitFileDiff(path: String) async throws -> [GitDiffLineDto] {
         let core = self.core
         return try await Task.detached(priority: .userInitiated) {
             try core.gitFileDiff(path: path)
         }.value
+    }
+
+    func gitRepositoryChanges(
+        path: String,
+        includeIgnored: Bool
+    ) async throws -> GitRepositoryChangesDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRepositoryChanges(path: path, includeIgnored: includeIgnored)
+        }.value
+    }
+
+    func gitChangesDiff(
+        repositoryRoot: String,
+        path: String,
+        scope: GitDiffScopeDto
+    ) async throws -> GitFileChangesDiffDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitChangesDiff(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                scope: scope
+            )
+        }.value
+    }
+
+    func gitStageLines(
+        repositoryRoot: String,
+        path: String,
+        selections: [GitLineSelectionDto]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitStageLines(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                selections: selections
+            )
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitUnstageLines(
+        repositoryRoot: String,
+        path: String,
+        selections: [GitLineSelectionDto]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitUnstageLines(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                selections: selections
+            )
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitDiscardLines(
+        repositoryRoot: String,
+        path: String,
+        selections: [GitLineSelectionDto]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitDiscardLines(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                selections: selections
+            )
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitStagePaths(
+        repositoryRoot: String,
+        paths: [String]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitStagePaths(repositoryRoot: repositoryRoot, paths: paths)
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitUnstagePaths(
+        repositoryRoot: String,
+        paths: [String]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitUnstagePaths(repositoryRoot: repositoryRoot, paths: paths)
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitDiscardPaths(
+        repositoryRoot: String,
+        paths: [String]
+    ) async throws -> GitChangeOperationResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitDiscardPaths(repositoryRoot: repositoryRoot, paths: paths)
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitAddToGitignore(
+        repositoryRoot: String,
+        path: String,
+        pattern: String?,
+        localExclude: Bool
+    ) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitAddToGitignore(
+                repositoryRoot: repositoryRoot,
+                path: path,
+                pattern: pattern,
+                localExclude: localExclude
+            )
+        }.value
+        refresh()
+        return message
     }
 
     /// Runs a Git or SVN operation, refreshes the columns, and returns the

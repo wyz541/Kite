@@ -88,21 +88,21 @@ Git 客户端使用独立窗口。每个仓库最多打开一个窗口；再次�
 
 ### 布局
 
-- 左侧：变更分组和提交信息编辑区。
-- 中间：提交 Log。
-- 右侧：提交详情；提交文件清单由后续日志视图补充。
+- 左侧：变更分组、路径筛选和提交信息编辑区。
+- 右侧：所选文件或目录的差异、Hunk 与行级操作。
 - 底部：可折叠 Git 控制台和后台任务面板。
 - 顶部：当前分支、上游、领先 / 落后计数，以及 获取、拉取、推送、提交、贮藏。
 - 状态横幅：rebase、merge、cherry-pick、revert；按适用性提供继续、跳过和中止。正在 bisect 时显示结束并重置。
+
+提交图和完整日志由 #122 在同一窗口内补充。
 
 ### 窗口状态
 
 `GitClientWindowSessionDto` 随主会话写入 `session.json`，按仓库根目录去重，记录：
 
 - 窗口宽高。
-- 变更栏和详情栏比例。
 - 控制台高度和展开状态。
-- 最后打开的视图。
+- 分栏比例和最后视图字段，供后续日志视图扩展使用。
 
 ### 快捷键
 
@@ -116,8 +116,6 @@ Git 客户端使用独立窗口。每个仓库最多打开一个窗口；再次�
 | 提交 | Ctrl+K | Command+K |
 | 贮藏 | Ctrl+Alt+S | Option+Command+S |
 | 控制台 | Ctrl+J | Command+J |
-| 变更 / 日志 / 详情 | Alt+1 / 2 / 3 | Option+1 / 2 / 3 |
-| 上一个 / 下一个提交 | Alt+Up / Down | Option+Up / Down |
 | 快捷键表 | F1 | F1 |
 | 关闭提示或浮层 | Esc | Esc |
 
@@ -125,8 +123,52 @@ macOS 的 Git 窗口不使用 `Command+Shift+F` 获取，避免与主窗口全�
 
 ## 未覆盖
 
-- hunk 级和行级暂存：#119。
 - 并排差异和语法高亮：#121。
 - 提交图和完整日志：#122。
 - blame：#128。
 - 预览打开时延的前后对比：#129。
+
+## 变更视图与行级暂存
+
+### 数据模型
+
+`src/git_changes.rs` 用一次 `git status --porcelain=v2 --branch -z` 返回完整变更列表：
+
+- 分组：已暂存、未暂存、未跟踪、冲突、已忽略。
+- 重命名记录保留旧路径；未跟踪和忽略列表按需读取。
+- 列表保持平铺，Windows 和 macOS 各自生成目录树或平铺视图，避免 Core 为 1 万个文件重复建模。
+
+单个文件的 `file_changes_diff(repository_root, path, scope)` 返回 hunk、新旧行号和每一行的稳定选择键。
+修改行按同一 hunk 内相邻的删除/新增行配对，因此勾选一条修改会同时选择删除和新增两侧。
+
+### 补丁写入
+
+`stage_lines`、`unstage_lines`、`discard_lines` 共用同一套 Core 逻辑：
+
+1. 读取 index、HEAD 或工作区内容。
+2. 按选择生成目标内容；取消暂存和丢弃时应用未选中的行。
+3. 生成仅包含目标文件的完整 unified diff，通过 stdin 传给 `git apply --cached` 或工作区。
+4. 返回操作后的新变更列表。
+
+这样避免 UI 拼接 patch，也保证两端对新增、删除、修改和无末尾换行文件的行为一致。
+重命名文件只允许整文件取消暂存；二进制文件和被截断的大差异只允许整文件操作。
+
+### 安全边界
+
+- 丢弃前由两端 UI 弹出确认。
+- 未跟踪项目通过 `trash` 移到系统回收站，不使用 `git clean -fd`。
+- 丢弃已跟踪文件只还原工作区到 index，不改变已暂存内容。
+- 路径拒绝绝对路径和 `..`，所有 Git 命令限制在仓库根目录内。
+- `core.autocrlf=true/input` 且工作区含 CRLF 时返回提示；补丁保留 index 的换行风格。
+
+### 性能
+
+1 万个修改文件的 `repository_changes` 单次测量为 257 ms，方法见
+[`docs/performance/git-changes-10000-v0.6.88.md`](../performance/git-changes-10000-v0.6.88.md)。
+
+### 界面
+
+- Windows：`src/git_client_window.rs`，从 Git 菜单的“打开 Git 客户端”进入。
+- macOS：`apps/macos/Sources/KiteGitClientWindow.swift`，从文件或目录右键 Git 菜单进入。
+- 两端均可用 `Ctrl+Shift+G` / `Cmd+Shift+G` 从当前目录打开。
+- 两端均支持路径筛选、目录树/平铺切换、文件/目录/Hunk/行级暂存与取消暂存、丢弃、忽略规则和 CRLF 提示。

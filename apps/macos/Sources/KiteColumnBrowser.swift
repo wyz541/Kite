@@ -1716,6 +1716,19 @@ private struct KiteEntryMenu: View {
 
         Divider()
 
+        if entry.gitStatus != nil || model.isGitAvailable(forEntryPath: entry.path) {
+            Button {
+                KiteGitClientWindowController.show(
+                    model: model,
+                    repositoryPath: entry.isDirectory
+                        ? entry.path
+                        : (entry.path as NSString).deletingLastPathComponent
+                )
+            } label: {
+                Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
+            }
+        }
+
         Button {
             KitePlatform.open(entry.path)
         } label: {
@@ -1750,7 +1763,7 @@ private struct KiteEntryMenu: View {
         if model.columns.last?.gitAvailable == true {
             Menu {
                 Button("打开 Git 客户端…") {
-                    KiteGitClientWindowController.open(path: entry.path)
+                    KiteGitClientWindowController.show(model: model, repositoryPath: entry.path)
                 }
             } label: {
                 Label("Git", systemImage: "arrow.triangle.branch")
@@ -1926,6 +1939,17 @@ private struct KiteDirectoryMenu: View {
 
         Divider()
 
+        if column.gitAvailable {
+            Button {
+                KiteGitClientWindowController.show(
+                    model: model,
+                    repositoryPath: column.path
+                )
+            } label: {
+                Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
+            }
+        }
+
         Button {
             KitePlatform.open(column.path)
         } label: {
@@ -1952,7 +1976,7 @@ private struct KiteDirectoryMenu: View {
         if column.gitAvailable {
             Menu {
                 Button("打开 Git 客户端…") {
-                    KiteGitClientWindowController.open(path: column.path)
+                    KiteGitClientWindowController.show(model: model, repositoryPath: column.path)
                 }
             } label: {
                 Label("Git", systemImage: "arrow.triangle.branch")
