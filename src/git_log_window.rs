@@ -14,6 +14,7 @@ use kite_core::git::log::{
 use std::path::PathBuf;
 
 const PAGE_SIZE: u32 = 200;
+const REFERENCE_TREE_WIDTH: f32 = 218.0;
 const ROW_HEIGHT: f32 = 30.0;
 const GRAPH_LEFT_PADDING: f32 = 4.0;
 const GRAPH_LANE_MIN_WIDTH: f32 = 4.0;
@@ -424,6 +425,8 @@ impl Render for GitLogWindow {
                 h_flex()
                     .flex_1()
                     .min_h_0()
+                    .child(self.render_reference_tree(cx))
+                    .child(div().w(px(1.)).h_full().bg(border))
                     .child(self.render_log_pane(window, cx))
                     .child(div().w(px(1.)).h_full().bg(border))
                     .child(self.render_detail_pane(cx)),
@@ -631,6 +634,165 @@ impl GitLogWindow {
             .into_any_element()
     }
 
+    fn set_branch_filter(
+        &mut self,
+        branch: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.branch == branch {
+            return;
+        }
+        self.branch = branch;
+        self.refresh(window, cx);
+    }
+
+    fn render_reference_tree(&self, cx: &mut Context<Self>) -> AnyElement {
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        let refs = self
+            .context
+            .as_ref()
+            .map(|context| context.refs.clone())
+            .unwrap_or_default();
+        let mut rows = vec![self.render_reference_tree_row(
+            "全部分支".to_string(),
+            None,
+            IconName::GitBranch,
+            self.branch.is_none(),
+            false,
+            cx,
+        )];
+        for (title, kind, icon) in [
+            ("本地分支", GitRefKind::LocalBranch, IconName::GitBranch),
+            ("远程分支", GitRefKind::RemoteBranch, IconName::Cloud),
+            ("标签", GitRefKind::Tag, IconName::Tag),
+        ] {
+            let group = refs
+                .iter()
+                .filter(|reference| reference.kind == kind)
+                .collect::<Vec<_>>();
+            rows.push(Self::render_reference_tree_section(title, group.len(), cx));
+            for reference in group {
+                let selected = self.branch.as_deref() == Some(reference.full_name.as_str());
+                rows.push(self.render_reference_tree_row(
+                    reference.name.clone(),
+                    Some(reference.full_name.clone()),
+                    icon,
+                    selected,
+                    reference.is_head,
+                    cx,
+                ));
+            }
+        }
+
+        div()
+            .id("git-log-reference-tree")
+            .w(px(REFERENCE_TREE_WIDTH))
+            .h_full()
+            .min_h_0()
+            .flex_shrink_0()
+            .overflow_y_scroll()
+            .border_r_1()
+            .border_color(border)
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .p_2()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .pb_1()
+                            .child(
+                                Icon::new(IconName::GitBranch)
+                                    .size_3p5()
+                                    .text_color(cx.theme().primary),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("分支树"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(refs.len().to_string()),
+                            ),
+                    )
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_reference_tree_section(title: &'static str, count: usize, cx: &App) -> AnyElement {
+        h_flex()
+            .mt_2()
+            .h(px(20.))
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().flex_1().child(title))
+            .child(count.to_string())
+            .into_any_element()
+    }
+
+    fn render_reference_tree_row(
+        &self,
+        label: String,
+        full_name: Option<String>,
+        icon: IconName,
+        selected: bool,
+        is_head: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let accent = cx.theme().primary;
+        let muted = cx.theme().muted_foreground;
+        let hover = cx.theme().muted.opacity(0.12);
+        let row_key = full_name.clone().unwrap_or_else(|| "all".to_string());
+        h_flex()
+            .id(SharedString::from(format!("git-log-ref-{row_key}")))
+            .h(px(26.))
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap_1p5()
+            .pl_2()
+            .pr_2()
+            .rounded_md()
+            .when(selected, |this| this.bg(accent.opacity(0.15)))
+            .when(!selected, |this| this.hover(move |style| style.bg(hover)))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.set_branch_filter(full_name.clone(), window, cx);
+            }))
+            .child(
+                Icon::new(icon)
+                    .size_3p5()
+                    .text_color(if selected { accent } else { muted }),
+            )
+            .child(div().flex_1().min_w_0().truncate().text_sm().child(label))
+            .when(is_head, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(accent)
+                        .child("HEAD"),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_branch_menu(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.branch.clone();
         let refs = self
@@ -665,8 +827,7 @@ impl GitLogWindow {
                         .checked(selected.is_none())
                         .on_click(move |_, window, cx| {
                             let _ = all_entity.update(cx, |this, cx| {
-                                this.branch = None;
-                                this.refresh(window, cx);
+                                this.set_branch_filter(None, window, cx);
                             });
                         }),
                 );
@@ -687,8 +848,7 @@ impl GitLogWindow {
                             .on_click(move |_, window, cx| {
                                 let full_name = full_name.clone();
                                 let _ = item_entity.update(cx, |this, cx| {
-                                    this.branch = Some(full_name);
-                                    this.refresh(window, cx);
+                                    this.set_branch_filter(Some(full_name), window, cx);
                                 });
                             }),
                     );
@@ -1634,7 +1794,7 @@ pub(crate) fn open_git_log_window(path: PathBuf, cx: &mut App) -> Result<(), Str
             ..Default::default()
         }),
         window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
-        window_min_size: Some(size(px(960.), px(600.))),
+        window_min_size: Some(size(px(1180.), px(600.))),
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, move |window, cx| {
