@@ -142,6 +142,8 @@ private let kiteGitClientShortcuts: [KiteGitShortcutInfo] = [
     .init(label: "关闭提示或浮层", keys: "Esc"),
 ]
 
+private let kiteF1Shortcut = KeyEquivalent(Character(UnicodeScalar(NSF1FunctionKey)!))
+
 private struct KiteGitClientWindowView: View {
     @ObservedObject var model: KiteModel
     @State private var repositoryPath: String
@@ -349,6 +351,7 @@ private struct KiteGitClientWindowView: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
+                .keyboardShortcut(kiteF1Shortcut, modifiers: [])
             }
             HStack(spacing: 8) {
                 if let statusMessage {

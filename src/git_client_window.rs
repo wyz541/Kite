@@ -83,7 +83,7 @@ impl GitClientView {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GitNoticeKind {
+pub(crate) enum GitNoticeKind {
     Success,
     Info,
     Warning,
@@ -92,7 +92,7 @@ enum GitNoticeKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GitNoticeAction {
+pub(crate) enum GitNoticeAction {
     Refresh,
     ShowChanges,
     Pull,
@@ -100,12 +100,12 @@ enum GitNoticeAction {
 }
 
 #[derive(Clone, Debug)]
-struct GitNotice {
-    kind: GitNoticeKind,
-    title: SharedString,
-    message: SharedString,
-    action: Option<GitNoticeAction>,
-    action_label: Option<&'static str>,
+pub(crate) struct GitNotice {
+    pub(crate) kind: GitNoticeKind,
+    pub(crate) title: SharedString,
+    pub(crate) message: SharedString,
+    pub(crate) action: Option<GitNoticeAction>,
+    pub(crate) action_label: Option<&'static str>,
 }
 
 struct GitClientTask {
@@ -2161,21 +2161,7 @@ impl GitClientWindow {
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let (title, detail) = match operation {
-            GitOperationState::Rebasing => {
-                ("正在变基", "解决冲突后可继续、跳过当前提交或中止变基。")
-            }
-            GitOperationState::Merging => {
-                ("正在合并", "解决冲突后可继续合并，或中止并回到合并前。")
-            }
-            GitOperationState::CherryPicking => {
-                ("正在拣选提交", "解决冲突后可继续、跳过当前提交或中止拣选。")
-            }
-            GitOperationState::Reverting => {
-                ("正在还原提交", "解决冲突后可继续、跳过当前提交或中止还原。")
-            }
-            GitOperationState::Bisecting => ("正在二分查找", "可以结束并重置当前二分查找。"),
-        };
+        let (title, detail) = operation_banner_copy(operation);
         h_flex()
             .w_full()
             .gap_2()
@@ -2545,7 +2531,7 @@ impl GitClientWindow {
     }
 }
 
-const GIT_CLIENT_SHORTCUTS: &[(&str, &str)] = &[
+pub(crate) const GIT_CLIENT_SHORTCUTS: &[(&str, &str)] = &[
     ("打开 Git 客户端", "Ctrl+Shift+G"),
     ("刷新仓库", "Ctrl+Shift+R"),
     ("获取", "Ctrl+Shift+F"),
@@ -2558,7 +2544,21 @@ const GIT_CLIENT_SHORTCUTS: &[(&str, &str)] = &[
     ("关闭提示或浮层", "Esc"),
 ];
 
-fn notice_for_error(title: &'static str, error: String) -> GitNotice {
+pub(crate) fn operation_banner_copy(operation: GitOperationState) -> (&'static str, &'static str) {
+    match operation {
+        GitOperationState::Rebasing => ("正在变基", "解决冲突后可继续、跳过当前提交或中止变基。"),
+        GitOperationState::Merging => ("正在合并", "解决冲突后可继续合并，或中止并回到合并前。"),
+        GitOperationState::CherryPicking => {
+            ("正在拣选提交", "解决冲突后可继续、跳过当前提交或中止拣选。")
+        }
+        GitOperationState::Reverting => {
+            ("正在还原提交", "解决冲突后可继续、跳过当前提交或中止还原。")
+        }
+        GitOperationState::Bisecting => ("正在二分查找", "可以结束并重置当前二分查找。"),
+    }
+}
+
+pub(crate) fn notice_for_error(title: &'static str, error: String) -> GitNotice {
     let lower = error.to_ascii_lowercase();
     let rejected = lower.contains("non-fast-forward")
         || lower.contains("rejected")
