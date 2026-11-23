@@ -15,7 +15,11 @@ use std::path::PathBuf;
 
 const PAGE_SIZE: u32 = 200;
 const ROW_HEIGHT: f32 = 30.0;
-const GRAPH_LANE_WIDTH: f32 = 13.0;
+const GRAPH_LEFT_PADDING: f32 = 4.0;
+const GRAPH_LANE_MIN_WIDTH: f32 = 4.0;
+const GRAPH_LANE_MAX_WIDTH: f32 = 13.0;
+const GRAPH_EDGE_WIDTH: f32 = 2.0;
+const GRAPH_NODE_SIZE: f32 = 8.0;
 const GRAPH_COLORS: [u32; 10] = [
     0x5e9cff, 0x55b978, 0xf0a45c, 0xc678dd, 0x56b6c2, 0xe06c75, 0xe5c07b, 0x7f9cf5, 0x64d1a7,
     0xd884e0,
@@ -1096,14 +1100,15 @@ impl GitLogWindow {
         for edge in &row.edges {
             graph = graph.child(self.render_graph_edge(edge, row));
         }
-        let dot_size = 8.0;
-        let dot_left = 4.0 + row.lane as f32 * lane_width + (lane_width - dot_size) / 2.0;
+        let dot_left = GRAPH_LEFT_PADDING
+            + row.lane as f32 * lane_width
+            + (lane_width - GRAPH_NODE_SIZE) / 2.0;
         graph = graph.child(
             div()
                 .absolute()
                 .left(px(dot_left))
-                .top(px((ROW_HEIGHT - dot_size) / 2.0))
-                .size(px(dot_size))
+                .top(px((ROW_HEIGHT - GRAPH_NODE_SIZE) / 2.0))
+                .size(px(GRAPH_NODE_SIZE))
                 .rounded_full()
                 .bg(graph_color(row.color_index))
                 .border_2()
@@ -1114,28 +1119,55 @@ impl GitLogWindow {
     fn render_graph_edge(&self, edge: &GitGraphEdge, row: &GitGraphRow) -> AnyElement {
         let lane_color = graph_color(edge.color_index);
         let lane_width = graph_lane_width(row);
-        let from_x = 4.0 + edge.from_lane as f32 * lane_width + lane_width / 2.0;
-        let to_x = 4.0 + edge.to_lane as f32 * lane_width + lane_width / 2.0;
+        let from_x = GRAPH_LEFT_PADDING + edge.from_lane as f32 * lane_width + lane_width / 2.0;
+        let to_x = GRAPH_LEFT_PADDING + edge.to_lane as f32 * lane_width + lane_width / 2.0;
+        let edge_offset = GRAPH_EDGE_WIDTH / 2.0;
+        let center_y = ROW_HEIGHT / 2.0;
         if edge.from_lane == edge.to_lane {
             return div()
                 .absolute()
-                .left(px(from_x - 1.0))
+                .left(px(from_x - edge_offset))
                 .top(px(0.))
-                .w(px(2.0))
+                .w(px(GRAPH_EDGE_WIDTH))
                 .h(px(ROW_HEIGHT))
                 .bg(lane_color)
                 .into_any_element();
         }
-        let left = from_x.min(to_x);
-        let width = (from_x - to_x).abs().max(2.0);
+
+        // Keep this elbow geometry in sync with KiteGitGraphCell on macOS.
         div()
             .absolute()
-            .left(px(left))
-            .top(px(ROW_HEIGHT / 2.0 - 1.0))
-            .w(px(width))
-            .h(px(2.0))
-            .bg(lane_color)
-            .rounded_full()
+            .left(px(0.))
+            .top(px(0.))
+            .w_full()
+            .h_full()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(from_x - edge_offset))
+                    .top(px(0.))
+                    .w(px(GRAPH_EDGE_WIDTH))
+                    .h(px(center_y))
+                    .bg(lane_color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(from_x.min(to_x)))
+                    .top(px(center_y - edge_offset))
+                    .w(px((from_x - to_x).abs().max(GRAPH_EDGE_WIDTH)))
+                    .h(px(GRAPH_EDGE_WIDTH))
+                    .bg(lane_color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(to_x - edge_offset))
+                    .top(px(center_y))
+                    .w(px(GRAPH_EDGE_WIDTH))
+                    .h(px(center_y))
+                    .bg(lane_color),
+            )
             .into_any_element()
     }
 }
@@ -1581,7 +1613,7 @@ fn section_label(label: &'static str, cx: &App) -> AnyElement {
 }
 
 fn graph_lane_width(row: &GitGraphRow) -> f32 {
-    (80.0_f32 / row.lane_count.max(1) as f32).clamp(4.0, GRAPH_LANE_WIDTH)
+    (80.0_f32 / row.lane_count.max(1) as f32).clamp(GRAPH_LANE_MIN_WIDTH, GRAPH_LANE_MAX_WIDTH)
 }
 
 fn graph_color(color_index: u32) -> Hsla {
