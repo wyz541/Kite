@@ -749,7 +749,9 @@ private struct KiteGitGraphCell: View {
 
     var body: some View {
         Canvas { context, size in
-            let laneWidth = min(CGFloat(13), 80 / CGFloat(max(row.laneCount, 1)))
+            // Keep this graph geometry in sync with graph_lane_width on Windows.
+            let laneWidth = max(4, min(CGFloat(13), 80 / CGFloat(max(row.laneCount, 1))))
+            let edgeWidth: CGFloat = 2
             let originX: CGFloat = 4
             let centerY = size.height / 2
 
@@ -771,20 +773,20 @@ private struct KiteGitGraphCell: View {
                     path.addLine(to: CGPoint(x: toX, y: centerY))
                     path.addLine(to: CGPoint(x: toX, y: size.height))
                 }
-                context.stroke(path, with: .color(color), lineWidth: 1.6)
+                context.stroke(path, with: .color(color), lineWidth: edgeWidth)
             }
 
             let nodeRect = CGRect(
-                x: laneX(row.lane) - 4.5,
-                y: centerY - 4.5,
-                width: 9,
-                height: 9
+                x: laneX(row.lane) - 4,
+                y: centerY - 4,
+                width: 8,
+                height: 8
             )
             context.fill(Path(ellipseIn: nodeRect), with: .color(Self.color(row.colorIndex)))
             context.stroke(
                 Path(ellipseIn: nodeRect),
                 with: .color(Color(nsColor: .textBackgroundColor)),
-                lineWidth: 1.5
+                lineWidth: 2
             )
         }
         .drawingGroup()
