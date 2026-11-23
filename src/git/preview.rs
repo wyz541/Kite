@@ -5,15 +5,13 @@
 //! a work tree returns `None` after one `rev-parse` probe.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+#[cfg(test)]
+use std::process::Command;
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
+use super::GitService;
+use super::command::GitCommandResult;
+use super::error::GitError;
 use crate::fs::VcsStatus;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Text larger than this is not diffed for the preview.
 const DIFF_PREVIEW_MAX_BYTES: usize = 256 * 1024;
@@ -124,16 +122,13 @@ pub fn git_path_summary(path: &Path) -> Result<Option<GitPathSummary>, String> {
     } else {
         path.parent().unwrap_or(path)
     };
-    let Some(probe) = run_git(
+    let Ok(probe) = run_git(
         start,
         &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
     ) else {
         return Ok(None);
     };
-    if !probe.status.success() {
-        return Ok(None);
-    }
-    let text = String::from_utf8_lossy(&probe.stdout).into_owned();
+    let text = probe.stdout;
     let mut lines = text.lines();
     let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
         return Ok(None);
@@ -177,7 +172,7 @@ fn summary_in(
         is_directory,
     };
 
-    if let Some(output) = run_git(
+    if let Ok(output) = run_git(
         &root,
         &[
             "status",
@@ -189,12 +184,11 @@ fn summary_in(
             "--",
             &relative_arg,
         ],
-    ) && output.status.success()
-    {
-        apply_status_v2(&mut summary, &output.stdout);
+    ) {
+        apply_status_v2(&mut summary, output.stdout.as_bytes());
     }
 
-    if let Some(output) = run_git(
+    if let Ok(output) = run_git(
         &root,
         &[
             "log",
@@ -203,13 +197,12 @@ fn summary_in(
             "--",
             &relative_arg,
         ],
-    ) && output.status.success()
-    {
-        summary.last_commit = parse_commit_line(&String::from_utf8_lossy(&output.stdout));
+    ) {
+        summary.last_commit = parse_commit_line(&output.stdout);
     }
 
     if summary.head_short_hash.is_some()
-        && let Some(output) = run_git(
+        && let Ok(output) = run_git(
             &root,
             &[
                 "diff",
@@ -220,9 +213,8 @@ fn summary_in(
                 &relative_arg,
             ],
         )
-        && output.status.success()
     {
-        let (added, removed) = parse_numstat(&String::from_utf8_lossy(&output.stdout));
+        let (added, removed) = parse_numstat(&output.stdout);
         summary.lines_added = added;
         summary.lines_removed = removed;
     }
@@ -233,12 +225,8 @@ fn summary_in(
 /// Returns the working-tree diff of a file against HEAD, bounded for preview.
 pub fn git_file_diff(path: &Path) -> Result<Vec<GitDiffLine>, String> {
     let start = path.parent().unwrap_or(path);
-    let probe = run_git(start, &["rev-parse", "--show-toplevel"])
-        .ok_or_else(|| "未找到 Git。请确认 Git 已安装并位于 PATH 中。".to_string())?;
-    if !probe.status.success() {
-        return Err("所选项目不在 Git 工作区中".to_string());
-    }
-    let root_text = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    let probe = run_git(start, &["rev-parse", "--show-toplevel"]).map_err(|error| error.message)?;
+    let root_text = probe.stdout.trim().to_string();
     let root = dunce::canonicalize(&root_text).unwrap_or_else(|_| PathBuf::from(root_text));
     let target = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let relative = target
@@ -247,8 +235,7 @@ pub fn git_file_diff(path: &Path) -> Result<Vec<GitDiffLine>, String> {
         .to_string_lossy()
         .replace('\\', "/");
 
-    let has_head = run_git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"])
-        .is_some_and(|output| output.status.success());
+    let has_head = run_git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok();
     let mut args = vec!["diff", "--no-ext-diff", "--no-color", "-U3"];
     if has_head {
         args.push("HEAD");
@@ -257,14 +244,11 @@ pub fn git_file_diff(path: &Path) -> Result<Vec<GitDiffLine>, String> {
     }
     args.push("--");
     args.push(&relative);
-    let output = run_git(&root, &args).ok_or_else(|| "无法运行 git diff".to_string())?;
-    if !output.status.success() {
-        return Err(output_error(&output));
-    }
+    let output = run_git(&root, &args).map_err(|error| error.message)?;
     if output.stdout.len() > DIFF_PREVIEW_MAX_BYTES {
         return Err("差异过大，未在预览中显示".to_string());
     }
-    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_unified_diff(&output.stdout))
 }
 
 fn apply_status_v2(summary: &mut GitPathSummary, output: &[u8]) {
@@ -432,37 +416,8 @@ fn parse_unified_diff(text: &str) -> Vec<GitDiffLine> {
     lines
 }
 
-fn run_git(current_dir: &Path, args: &[&str]) -> Option<Output> {
-    let mut command = Command::new("git");
-    command
-        .current_dir(current_dir)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never")
-        .env("LC_ALL", "C");
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.output().ok()
-}
-
-fn output_error(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        format!(
-            "Git 操作失败，退出码 {}",
-            output.status.code().unwrap_or(-1)
-        )
-    } else {
-        format!(
-            "Git 操作失败：{}",
-            stderr
-                .replace(['\r', '\n'], " ")
-                .chars()
-                .take(300)
-                .collect::<String>()
-        )
-    }
+fn run_git(current_dir: &Path, args: &[&str]) -> Result<GitCommandResult, GitError> {
+    GitService::shared().run_preview_command(current_dir, args)
 }
 
 #[cfg(test)]
