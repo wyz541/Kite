@@ -307,6 +307,14 @@ function Move-NativeCursor {
     Start-Sleep -Milliseconds 12
 }
 
+function Invoke-NativeClick {
+    param([int]$X, [int]$Y)
+    Move-NativeCursor -X $X -Y $Y
+    Start-Sleep -Milliseconds 150
+    [KiteDragNative]::mouse_event([KiteDragNative]::LeftDown, 0, 0, 0, [UIntPtr]::Zero)
+    [KiteDragNative]::mouse_event([KiteDragNative]::LeftUp, 0, 0, 0, [UIntPtr]::Zero)
+}
+
 function Invoke-NativeDrag {
     param([int]$FromX, [int]$FromY, [int]$ToX, [int]$ToY)
     Move-NativeCursor -X $FromX -Y $FromY
@@ -409,9 +417,21 @@ function Test-BrowserUpload {
         } else {
             $kiteWindow = [System.Windows.Automation.AutomationElement]::FromHandle($KiteHandle)
             $rect = $kiteWindow.Current.BoundingRectangle
-            # The current file column sits between the sidebar and preview pane.
-            $fromX = [int]($rect.Left + ($rect.Width * 0.45))
             $columnHeaderBottom = Find-ColumnHeaderBottom -ProcessId $KiteProcess.Id
+            $primerY = if ($null -ne $columnHeaderBottom) {
+                [int]($columnHeaderBottom + 15)
+            } else {
+                [int]($rect.Top + 178)
+            }
+            # Focusing a column can reflow the column strip. Establish that layout first,
+            # then drag from the stable file column before invoking the actual gesture.
+            Invoke-NativeClick -X ([int]($rect.Left + ($rect.Width * 0.75))) -Y $primerY
+            Start-Sleep -Milliseconds 700
+            $kiteWindow = [System.Windows.Automation.AutomationElement]::FromHandle($KiteHandle)
+            $rect = $kiteWindow.Current.BoundingRectangle
+            $columnHeaderBottom = Find-ColumnHeaderBottom -ProcessId $KiteProcess.Id
+            # After focus, the current file column sits between the sidebar and preview pane.
+            $fromX = [int]($rect.Left + ($rect.Width * 0.45))
             if ($null -ne $columnHeaderBottom) {
                 # The first file row follows the 32 px column header and 30 px row.
                 $fromY = [int]($columnHeaderBottom + 15)
