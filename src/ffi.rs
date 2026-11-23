@@ -13,6 +13,9 @@ use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, trans
 use crate::git::GitEventSink as _;
 use crate::git::{self, GitDiffLine, GitDiffLineKind, GitPathSummary};
 use crate::git_changes::{self, GitChangeGroup, GitDiffScope, GitHunkLineKind};
+use crate::git_ops::{
+    self, GitCommandOutcome, GitRepositoryStatus, GitResetMode, GitStashEntry, GitStashSaveOptions,
+};
 use crate::platform::{HostPlatform, default_root_path, host_platform};
 use crate::session::{self as session_store, SessionStateDto};
 use crate::text_editor::{self, TextDocument, TextLineEnding};
@@ -276,6 +279,39 @@ pub enum GitDiffLineKindDto {
 pub struct GitDiffLineDto {
     pub kind: GitDiffLineKindDto,
     pub text: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitStashEntryDto {
+    pub selector: String,
+    pub commit_hash: String,
+    pub short_hash: String,
+    pub date: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRepositoryStatusDto {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub operation: Option<String>,
+    pub has_conflicts: bool,
+    pub stash_count: u32,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCommandOutcomeDto {
+    pub message: String,
+    pub operation: Option<String>,
+    pub has_conflicts: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitResetModeDto {
+    Soft,
+    Mixed,
+    Hard,
+    Keep,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -1012,6 +1048,158 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    pub fn git_operation_status(&self, path: String) -> Result<GitRepositoryStatusDto, KiteError> {
+        git_ops::git_operation_status(&PathBuf::from(path))
+            .map(git_repository_status_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_list(&self, path: String) -> Result<Vec<GitStashEntryDto>, KiteError> {
+        git_ops::git_stash_list(&PathBuf::from(path))
+            .map(|entries| entries.into_iter().map(git_stash_entry_dto).collect())
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_diff(
+        &self,
+        path: String,
+        index: u32,
+    ) -> Result<Vec<GitDiffLineDto>, KiteError> {
+        git_ops::git_stash_diff(&PathBuf::from(path), index)
+            .map(|lines| lines.into_iter().map(git_diff_line_dto).collect())
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_save(
+        &self,
+        path: String,
+        message: Option<String>,
+        include_untracked: bool,
+        keep_index: bool,
+        paths: Vec<String>,
+    ) -> Result<String, KiteError> {
+        git_ops::git_stash_save(
+            &PathBuf::from(path),
+            GitStashSaveOptions {
+                message,
+                include_untracked,
+                keep_index,
+                paths: paths.into_iter().map(PathBuf::from).collect(),
+            },
+        )
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_apply(
+        &self,
+        path: String,
+        index: u32,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_stash_apply(&PathBuf::from(path), index)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_pop(
+        &self,
+        path: String,
+        index: u32,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_stash_pop(&PathBuf::from(path), index)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_drop(
+        &self,
+        path: String,
+        index: u32,
+        confirmed: bool,
+    ) -> Result<String, KiteError> {
+        git_ops::git_stash_drop(&PathBuf::from(path), index, confirmed)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_clear(&self, path: String, confirmed: bool) -> Result<String, KiteError> {
+        git_ops::git_stash_clear(&PathBuf::from(path), confirmed).map_err(KiteError::operation)
+    }
+
+    pub fn git_stash_branch(
+        &self,
+        path: String,
+        index: u32,
+        branch: String,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_stash_branch(&PathBuf::from(path), index, &branch)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_reset(
+        &self,
+        path: String,
+        mode: GitResetModeDto,
+        target: String,
+        confirmed: bool,
+    ) -> Result<String, KiteError> {
+        git_ops::git_reset(
+            &PathBuf::from(path),
+            git_reset_mode(mode),
+            &target,
+            confirmed,
+        )
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_revert(
+        &self,
+        path: String,
+        commits: Vec<String>,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_revert(&PathBuf::from(path), &commits)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_revert_continue(&self, path: String) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_revert_continue(&PathBuf::from(path))
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_revert_abort(&self, path: String) -> Result<String, KiteError> {
+        git_ops::git_revert_abort(&PathBuf::from(path)).map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick(
+        &self,
+        path: String,
+        commits: Vec<String>,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_cherry_pick(&PathBuf::from(path), &commits)
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick_continue(
+        &self,
+        path: String,
+    ) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_cherry_pick_continue(&PathBuf::from(path))
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick_skip(&self, path: String) -> Result<GitCommandOutcomeDto, KiteError> {
+        git_ops::git_cherry_pick_skip(&PathBuf::from(path))
+            .map(git_command_outcome_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_cherry_pick_abort(&self, path: String) -> Result<String, KiteError> {
+        git_ops::git_cherry_pick_abort(&PathBuf::from(path)).map_err(KiteError::operation)
+    }
+
     /// Flat repository change list used by the Git client window.
     pub fn git_repository_changes(
         &self,
@@ -1698,6 +1886,43 @@ fn git_line_selections(selections: Vec<GitLineSelectionDto>) -> Vec<git_changes:
             new_line: selection.new_line,
         })
         .collect()
+}
+
+fn git_stash_entry_dto(entry: GitStashEntry) -> GitStashEntryDto {
+    GitStashEntryDto {
+        selector: entry.selector,
+        commit_hash: entry.commit_hash,
+        short_hash: entry.short_hash,
+        date: entry.date,
+        message: entry.message,
+    }
+}
+
+fn git_repository_status_dto(status: GitRepositoryStatus) -> GitRepositoryStatusDto {
+    GitRepositoryStatusDto {
+        repository_root: status.repository_root.to_string_lossy().into_owned(),
+        branch: status.branch,
+        operation: status.operation.map(|state| state.label().to_string()),
+        has_conflicts: status.has_conflicts,
+        stash_count: status.stash_count,
+    }
+}
+
+fn git_command_outcome_dto(outcome: GitCommandOutcome) -> GitCommandOutcomeDto {
+    GitCommandOutcomeDto {
+        message: outcome.message,
+        operation: outcome.operation.map(|state| state.label().to_string()),
+        has_conflicts: outcome.has_conflicts,
+    }
+}
+
+fn git_reset_mode(mode: GitResetModeDto) -> GitResetMode {
+    match mode {
+        GitResetModeDto::Soft => GitResetMode::Soft,
+        GitResetModeDto::Mixed => GitResetMode::Mixed,
+        GitResetModeDto::Hard => GitResetMode::Hard,
+        GitResetModeDto::Keep => GitResetMode::Keep,
+    }
 }
 
 fn text_document_dto(document: TextDocument) -> TextDocumentDto {

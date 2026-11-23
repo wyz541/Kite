@@ -239,6 +239,22 @@ Core 测试覆盖：
 - blame：#128。
 - 预览打开时延和 gix/CLI 对比：#129。
 
+## Stash、Reset、Revert 与 Cherry-pick
+
+`src/git_ops.rs` 提供两端共用的历史操作：
+
+- Stash：列出、保存、查看差异、应用、弹出、删除、清空，以及从 Stash 新建分支。
+  保存时可填写说明、包含未跟踪文件、保留暂存区，或只保存当前选中的文件。
+- Reset：soft、mixed、hard、keep。`reset --hard` 在 Core 和界面两层都要求确认。
+- Revert 与 Cherry-pick：支持一个或多个提交。发生冲突时保留 Git 操作状态，
+  两端显示同一状态横幅，并提供继续、跳过和中止入口。
+- 删除 Stash、清空 Stash 和 `reset --hard` 必须由调用方明确传入
+  `confirmed: true`；界面只在用户确认后传入该值。
+
+Windows 的 Git 操作窗口位于 `src/git_tools_window.rs`，macOS 对应
+`apps/macos/Sources/KiteGitToolsWindow.swift`。两端都从 Git 客户端的“Stash / 操作”进入，
+窗口内提供 Stash、历史和操作三个标签页，并共用 Rust Core 返回的数据和错误。
+
 ## 变更视图与行级暂存
 
 ### 数据模型
