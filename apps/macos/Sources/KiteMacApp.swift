@@ -174,6 +174,11 @@ struct KiteMacApp: App {
                 }
                 .disabled(model.updateInProgress)
             }
+            CommandMenu("Git") {
+                Button("交互式 Rebase…") {
+                    KiteGitRebaseWindowController.show(path: model.currentPath, model: model)
+                }
+            }
             CommandMenu("导航") {
 
                 Divider()

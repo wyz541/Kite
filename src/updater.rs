@@ -505,6 +505,7 @@ fn windows_system_proxy_url() -> Option<String> {
     parse_windows_proxy_server(&server)
 }
 
+#[cfg(target_os = "windows")]
 fn parse_windows_proxy_server(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -534,6 +535,7 @@ fn parse_windows_proxy_server(value: &str) -> Option<String> {
     http.or(socks)
 }
 
+#[cfg(target_os = "windows")]
 fn proxy_url(scheme: &str, address: &str) -> String {
     if address.contains("://") {
         address.to_string()
@@ -1058,7 +1060,9 @@ try {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    #[cfg(target_os = "windows")]
+    use std::time::Instant;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn release_json(version: &str, digest: &str) -> String {
         json!({
@@ -1408,6 +1412,7 @@ semver = { version = "1" }
         }
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn windows_proxy_parser_prefers_https_entry() {
         assert_eq!(

@@ -1770,6 +1770,12 @@ private struct KiteEntryMenu: View {
             }
         }
 
+        Button {
+            KiteGitRebaseWindowController.show(path: entry.path, model: model)
+        } label: {
+            Label("交互式 Rebase…", systemImage: "arrow.triangle.branch")
+        }
+
         Divider()
 
         Button {
@@ -1981,6 +1987,12 @@ private struct KiteDirectoryMenu: View {
             } label: {
                 Label("Git", systemImage: "arrow.triangle.branch")
             }
+        }
+
+        Button {
+            KiteGitRebaseWindowController.show(path: column.path, model: model)
+        } label: {
+            Label("交互式 Rebase…", systemImage: "arrow.triangle.branch")
         }
 
         Divider()

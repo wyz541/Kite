@@ -133,6 +133,13 @@ pub struct ColumnPaneAction {
     pub command: ColumnPaneCommand,
 }
 
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = kite, no_json)]
+pub struct GitRebaseSetAction {
+    pub index: usize,
+    pub action: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VcsMenuCommand {
     GitOpenClient,
@@ -144,6 +151,7 @@ pub enum VcsMenuCommand {
     GitFetch,
     GitDiff,
     GitLog,
+    GitRebase,
     GitRevert,
     GitClean,
     SvnUpdate,

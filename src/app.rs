@@ -3261,6 +3261,19 @@ impl KiteApp {
                 self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
             }
             VcsMenuCommand::GitLog => self.open_vcs_log_window_task(VcsTool::Git, path, window, cx),
+            VcsMenuCommand::GitRebase => {
+                match crate::git_rebase_window::open_git_rebase_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开交互式 Rebase 窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitRevert => self.confirm_vcs_revert(VcsTool::Git, path, window, cx),
             VcsMenuCommand::GitClean => self.confirm_git_clean(path, window, cx),
             VcsMenuCommand::SvnUpdate => {

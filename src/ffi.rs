@@ -19,6 +19,10 @@ use crate::git_changes::{self, GitChangeGroup, GitDiffScope, GitHunkLineKind};
 use crate::git_ops::{
     self, GitCommandOutcome, GitRepositoryStatus, GitResetMode, GitStashEntry, GitStashSaveOptions,
 };
+use crate::git_rebase::{
+    self, GitRebaseAction, GitRebaseCommit, GitRebaseOptions, GitRebasePlan, GitRebaseSpec,
+    GitRebaseState, GitRebaseStatus, GitRebaseTodo,
+};
 use crate::platform::{HostPlatform, default_root_path, host_platform};
 use crate::session::{self as session_store, GitClientWindowSessionDto, SessionStateDto};
 use crate::text_editor::{self, TextDocument, TextLineEnding};
@@ -592,6 +596,81 @@ pub struct GitLineSelectionDto {
 pub struct GitChangeOperationResultDto {
     pub message: String,
     pub changes: GitRepositoryChangesDto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitRebaseActionDto {
+    Pick,
+    Reword,
+    Edit,
+    Squash,
+    Fixup,
+    Drop,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRebaseTodoDto {
+    pub commit: String,
+    pub action: GitRebaseActionDto,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct GitRebaseOptionsDto {
+    pub update_refs: bool,
+    pub autosquash: bool,
+    pub preserve_merges: bool,
+    pub allow_rewrite_pushed: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRebaseSpecDto {
+    pub upstream: String,
+    pub onto: String,
+    pub options: GitRebaseOptionsDto,
+    pub todo: Vec<GitRebaseTodoDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRebaseCommitDto {
+    pub hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub unix_seconds: i64,
+    pub subject: String,
+    pub message: String,
+    pub parents: Vec<String>,
+    pub pushed: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRebasePlanDto {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub head: String,
+    pub upstream: String,
+    pub onto: String,
+    pub operation: Option<String>,
+    pub protected: bool,
+    pub has_merges: bool,
+    pub pushed_commits: Vec<String>,
+    pub commits: Vec<GitRebaseCommitDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitRebaseStatusDto {
+    InProgress,
+    Stopped,
+    Completed,
+    Aborted,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRebaseStateDto {
+    pub status: GitRebaseStatusDto,
+    pub head: String,
+    pub message: String,
+    pub remaining: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -1451,6 +1530,176 @@ impl KiteCore {
                 run_vcs_query(VcsTool::Svn, query, &path).map_err(KiteError::operation)
             }
         }
+    }
+
+    pub fn git_rebase_plan(&self, path: String) -> Result<GitRebasePlanDto, KiteError> {
+        git_rebase::git_rebase_plan(&PathBuf::from(path))
+            .map(git_rebase_plan_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_status(&self, path: String) -> Result<Option<GitRebaseStateDto>, KiteError> {
+        git_rebase::git_rebase_status(&PathBuf::from(path))
+            .map(|state| state.map(git_rebase_state_dto))
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_start(
+        &self,
+        path: String,
+        spec: GitRebaseSpecDto,
+    ) -> Result<GitRebaseStateDto, KiteError> {
+        git_rebase::git_rebase(&PathBuf::from(path), &git_rebase_spec(spec))
+            .map(git_rebase_state_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_continue(&self, path: String) -> Result<GitRebaseStateDto, KiteError> {
+        git_rebase::git_rebase_continue(&PathBuf::from(path))
+            .map(git_rebase_state_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_skip(&self, path: String) -> Result<GitRebaseStateDto, KiteError> {
+        git_rebase::git_rebase_skip(&PathBuf::from(path))
+            .map(git_rebase_state_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_abort(&self, path: String) -> Result<GitRebaseStateDto, KiteError> {
+        git_rebase::git_rebase_abort(&PathBuf::from(path))
+            .map(git_rebase_state_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_reword(
+        &self,
+        path: String,
+        commit: String,
+        message: String,
+        allow_rewrite_pushed: bool,
+    ) -> Result<GitRebaseStateDto, KiteError> {
+        git_rebase::git_rebase_reword(
+            &PathBuf::from(path),
+            &commit,
+            &message,
+            allow_rewrite_pushed,
+        )
+        .map(git_rebase_state_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_squash(
+        &self,
+        path: String,
+        commits: Vec<String>,
+        fixup: bool,
+        message: Option<String>,
+        allow_rewrite_pushed: bool,
+    ) -> Result<GitRebaseStateDto, KiteError> {
+        git_rebase::git_rebase_squash(
+            &PathBuf::from(path),
+            &commits,
+            fixup,
+            message,
+            allow_rewrite_pushed,
+        )
+        .map(git_rebase_state_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_rebase_fixup_worktree(
+        &self,
+        path: String,
+        commit: String,
+        allow_rewrite_pushed: bool,
+    ) -> Result<GitRebaseStateDto, KiteError> {
+        git_rebase::git_rebase_fixup_worktree(&PathBuf::from(path), &commit, allow_rewrite_pushed)
+            .map(git_rebase_state_dto)
+            .map_err(KiteError::operation)
+    }
+}
+
+fn git_rebase_action(action: GitRebaseActionDto) -> GitRebaseAction {
+    match action {
+        GitRebaseActionDto::Pick => GitRebaseAction::Pick,
+        GitRebaseActionDto::Reword => GitRebaseAction::Reword,
+        GitRebaseActionDto::Edit => GitRebaseAction::Edit,
+        GitRebaseActionDto::Squash => GitRebaseAction::Squash,
+        GitRebaseActionDto::Fixup => GitRebaseAction::Fixup,
+        GitRebaseActionDto::Drop => GitRebaseAction::Drop,
+    }
+}
+
+fn git_rebase_options(options: GitRebaseOptionsDto) -> GitRebaseOptions {
+    GitRebaseOptions {
+        update_refs: options.update_refs,
+        autosquash: options.autosquash,
+        preserve_merges: options.preserve_merges,
+        allow_rewrite_pushed: options.allow_rewrite_pushed,
+    }
+}
+
+fn git_rebase_spec(spec: GitRebaseSpecDto) -> GitRebaseSpec {
+    GitRebaseSpec {
+        upstream: spec.upstream,
+        onto: spec.onto,
+        options: git_rebase_options(spec.options),
+        todo: spec
+            .todo
+            .into_iter()
+            .map(|item| GitRebaseTodo {
+                commit: item.commit,
+                action: git_rebase_action(item.action),
+                message: item.message,
+            })
+            .collect(),
+    }
+}
+
+fn git_rebase_plan_dto(plan: GitRebasePlan) -> GitRebasePlanDto {
+    GitRebasePlanDto {
+        repository_root: plan.repository_root.to_string_lossy().into_owned(),
+        branch: plan.branch,
+        head: plan.head,
+        upstream: plan.upstream,
+        onto: plan.onto,
+        operation: plan.operation,
+        protected: plan.protected,
+        has_merges: plan.has_merges,
+        pushed_commits: plan.pushed_commits,
+        commits: plan
+            .commits
+            .into_iter()
+            .map(git_rebase_commit_dto)
+            .collect(),
+    }
+}
+
+fn git_rebase_commit_dto(commit: GitRebaseCommit) -> GitRebaseCommitDto {
+    GitRebaseCommitDto {
+        hash: commit.hash,
+        short_hash: commit.short_hash,
+        author: commit.author,
+        unix_seconds: commit.unix_seconds,
+        subject: commit.subject,
+        message: commit.message,
+        parents: commit.parents,
+        pushed: commit.pushed,
+    }
+}
+
+fn git_rebase_state_dto(state: GitRebaseState) -> GitRebaseStateDto {
+    GitRebaseStateDto {
+        status: match state.status {
+            GitRebaseStatus::InProgress => GitRebaseStatusDto::InProgress,
+            GitRebaseStatus::Stopped => GitRebaseStatusDto::Stopped,
+            GitRebaseStatus::Completed => GitRebaseStatusDto::Completed,
+            GitRebaseStatus::Aborted => GitRebaseStatusDto::Aborted,
+        },
+        head: state.head,
+        message: state.message,
+        remaining: state.remaining,
     }
 }
 
