@@ -142,6 +142,8 @@ private let kiteGitClientShortcuts: [KiteGitShortcutInfo] = [
     .init(label: "关闭提示或浮层", keys: "Esc"),
 ]
 
+private let kiteF1Shortcut = KeyEquivalent(Character(UnicodeScalar(NSF1FunctionKey)!))
+
 private struct KiteGitClientWindowView: View {
     @ObservedObject var model: KiteModel
     @State private var repositoryPath: String
@@ -281,6 +283,15 @@ private struct KiteGitClientWindowView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                Button("比较") {
+                    KiteDiffViewerWindowController.shared.show(
+                        path: repositoryPath,
+                        appModel: model,
+                        preset: .headToWorkingTree
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button {
                     Task { await loadChanges() }
                 } label: {
@@ -356,6 +367,7 @@ private struct KiteGitClientWindowView: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
+                .keyboardShortcut(kiteF1Shortcut, modifiers: [])
             }
             HStack(spacing: 8) {
                 if let statusMessage {
@@ -586,6 +598,16 @@ private struct KiteGitClientWindowView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button("Diff 查看器") {
+                let fullPath = diff.path.hasPrefix("/")
+                    ? diff.path
+                    : (repositoryPath as NSString).appendingPathComponent(diff.path)
+                KiteDiffViewerWindowController.shared.show(
+                    path: fullPath,
+                    appModel: model,
+                    preset: diff.scope == .staged ? .headToIndex : .indexToWorkingTree
+                )
+            }
             if !checked.isEmpty {
                 if let selectedGroup {
                     switch selectedGroup {

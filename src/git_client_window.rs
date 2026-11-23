@@ -8,6 +8,7 @@ use crate::actions::{
     GitClientSkip, GitClientStash, GitClientToggleConsole,
 };
 
+use crate::diff_viewer_window;
 use crate::git_tools_window::open_git_tools_window;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -20,6 +21,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kite_core::diff::DiffEndpoint;
 use kite_core::git::{GitOperationAction, GitOperationState, run_git_operation_control};
 use kite_core::git_changes::{
     self, GitChangeGroup, GitDiffScope, GitFileChangesDiff, GitHunkLineKind, GitLineSelection,
@@ -83,7 +85,7 @@ impl GitClientView {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GitNoticeKind {
+pub(crate) enum GitNoticeKind {
     Success,
     Info,
     Warning,
@@ -92,7 +94,7 @@ enum GitNoticeKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GitNoticeAction {
+pub(crate) enum GitNoticeAction {
     Refresh,
     ShowChanges,
     Pull,
@@ -100,12 +102,12 @@ enum GitNoticeAction {
 }
 
 #[derive(Clone, Debug)]
-struct GitNotice {
-    kind: GitNoticeKind,
-    title: SharedString,
-    message: SharedString,
-    action: Option<GitNoticeAction>,
-    action_label: Option<&'static str>,
+pub(crate) struct GitNotice {
+    pub(crate) kind: GitNoticeKind,
+    pub(crate) title: SharedString,
+    pub(crate) message: SharedString,
+    pub(crate) action: Option<GitNoticeAction>,
+    pub(crate) action_label: Option<&'static str>,
 }
 
 struct GitClientTask {
@@ -1248,6 +1250,25 @@ impl GitClientWindow {
                             })),
                     )
                     .child(
+                        Button::new("git-client-diff-viewer")
+                            .ghost()
+                            .compact()
+                            .label("比较")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                let result = diff_viewer_window::open_diff_viewer_window(
+                                    this.repository_root.clone(),
+                                    DiffEndpoint::Revision("HEAD".to_string()),
+                                    DiffEndpoint::WorkingTree,
+                                    cx,
+                                );
+                                match result {
+                                    Ok(()) => this.error = None,
+                                    Err(error) => this.error = Some(error.into()),
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("git-client-refresh")
                             .ghost()
                             .compact()
@@ -1837,7 +1858,33 @@ impl GitClientWindow {
             .as_ref()
             .map(|selection| selection.path.clone());
         let group = self.selected.as_ref().map(|selection| selection.group);
-        let mut actions = h_flex().gap_1();
+        let viewer_path = self.repository_root.join(&diff.path);
+        let (viewer_old, viewer_new) = match diff.scope {
+            GitDiffScope::Staged => (
+                DiffEndpoint::Revision("HEAD".to_string()),
+                DiffEndpoint::Index,
+            ),
+            GitDiffScope::Unstaged => (DiffEndpoint::Index, DiffEndpoint::WorkingTree),
+        };
+        let mut actions = h_flex().gap_1().child(
+            Button::new("git-client-open-diff-viewer")
+                .ghost()
+                .compact()
+                .label("Diff 查看器")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let result = diff_viewer_window::open_diff_viewer_window(
+                        viewer_path.clone(),
+                        viewer_old.clone(),
+                        viewer_new.clone(),
+                        cx,
+                    );
+                    match result {
+                        Ok(()) => this.error = None,
+                        Err(error) => this.error = Some(error.into()),
+                    }
+                    cx.notify();
+                })),
+        );
         if let Some(path) = path {
             match group {
                 Some(GitChangeGroup::Staged) if count > 0 => {
@@ -2232,21 +2279,7 @@ impl GitClientWindow {
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let (title, detail) = match operation {
-            GitOperationState::Rebasing => {
-                ("正在变基", "解决冲突后可继续、跳过当前提交或中止变基。")
-            }
-            GitOperationState::Merging => {
-                ("正在合并", "解决冲突后可继续合并，或中止并回到合并前。")
-            }
-            GitOperationState::CherryPicking => {
-                ("正在拣选提交", "解决冲突后可继续、跳过当前提交或中止拣选。")
-            }
-            GitOperationState::Reverting => {
-                ("正在还原提交", "解决冲突后可继续、跳过当前提交或中止还原。")
-            }
-            GitOperationState::Bisecting => ("正在二分查找", "可以结束并重置当前二分查找。"),
-        };
+        let (title, detail) = operation_banner_copy(operation);
         h_flex()
             .w_full()
             .gap_2()
@@ -2616,7 +2649,7 @@ impl GitClientWindow {
     }
 }
 
-const GIT_CLIENT_SHORTCUTS: &[(&str, &str)] = &[
+pub(crate) const GIT_CLIENT_SHORTCUTS: &[(&str, &str)] = &[
     ("打开 Git 客户端", "Ctrl+Shift+G"),
     ("刷新仓库", "Ctrl+Shift+R"),
     ("获取", "Ctrl+Shift+F"),
@@ -2629,7 +2662,21 @@ const GIT_CLIENT_SHORTCUTS: &[(&str, &str)] = &[
     ("关闭提示或浮层", "Esc"),
 ];
 
-fn notice_for_error(title: &'static str, error: String) -> GitNotice {
+pub(crate) fn operation_banner_copy(operation: GitOperationState) -> (&'static str, &'static str) {
+    match operation {
+        GitOperationState::Rebasing => ("正在变基", "解决冲突后可继续、跳过当前提交或中止变基。"),
+        GitOperationState::Merging => ("正在合并", "解决冲突后可继续合并，或中止并回到合并前。"),
+        GitOperationState::CherryPicking => {
+            ("正在拣选提交", "解决冲突后可继续、跳过当前提交或中止拣选。")
+        }
+        GitOperationState::Reverting => {
+            ("正在还原提交", "解决冲突后可继续、跳过当前提交或中止还原。")
+        }
+        GitOperationState::Bisecting => ("正在二分查找", "可以结束并重置当前二分查找。"),
+    }
+}
+
+pub(crate) fn notice_for_error(title: &'static str, error: String) -> GitNotice {
     let lower = error.to_ascii_lowercase();
     let rejected = lower.contains("non-fast-forward")
         || lower.contains("rejected")

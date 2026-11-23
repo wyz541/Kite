@@ -15,6 +15,7 @@ use crate::context_menu::{
     show_properties,
 };
 use crate::devices::{DeviceSnapshot, PortableDevice, StorageVolume, VolumeKind};
+use crate::diff_viewer_window;
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::file_clipboard::{self, ClipboardMode, FileClipboard};
 use crate::fs::{
@@ -58,10 +59,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
+use kite_core::diff::DiffEndpoint;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
-    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, GitService, git_file_diff,
-    git_path_summary, git_repository_root,
+    GitChangeCounts, GitPathSummary, GitService, git_path_summary, git_repository_root,
 };
 pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
@@ -988,8 +989,6 @@ struct ColumnGitPreview {
     path: PathBuf,
     summary: Option<GitPathSummary>,
     loading: bool,
-    diff_visible: bool,
-    diff: Option<Result<Arc<Vec<GitDiffLine>>, SharedString>>,
 }
 
 enum PreviewScrollbar {
@@ -1691,6 +1690,8 @@ impl KiteApp {
             KeyBinding::new("f1", GitClientShowShortcuts, Some("GitClient")),
             KeyBinding::new("escape", GitClientDismiss, Some("GitClient")),
             KeyBinding::new("secondary-s", SaveEditor, Some("KiteEditor")),
+            KeyBinding::new("f7", DiffNextChange, Some("KiteDiff")),
+            KeyBinding::new("shift-f7", DiffPreviousChange, Some("KiteDiff")),
         ]);
     }
     pub fn install_menus(cx: &mut App) {
@@ -3950,10 +3951,6 @@ impl KiteApp {
         // Paths without a Git status from the directory snapshot are outside a
         // work tree or ignored; skip the extra git processes for them.
         let path = entry.path.clone();
-        let keep_diff = self
-            .column_git_preview
-            .as_ref()
-            .is_some_and(|preview| preview.diff_visible && same_path(&preview.path, &path));
         if entry.git_status.is_none() && !self.git_available_for(&path) {
             self._git_preview_task = Task::ready(());
             self.column_git_preview = None;
@@ -3964,8 +3961,6 @@ impl KiteApp {
             path: path.clone(),
             summary: None,
             loading: true,
-            diff_visible: false,
-            diff: None,
         });
         self._git_preview_task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PREVIEW_LOAD_DEBOUNCE).await;
@@ -3981,9 +3976,6 @@ impl KiteApp {
                     preview.loading = false;
                     preview.summary = summary;
                 }
-                if keep_diff {
-                    this.toggle_column_git_diff(cx);
-                }
                 cx.notify();
             });
         });
@@ -3996,35 +3988,6 @@ impl KiteApp {
         self.column_panes
             .iter()
             .any(|pane| pane.git_available && same_path(&pane.path, parent))
-    }
-
-    fn toggle_column_git_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(preview) = self.column_git_preview.as_mut() else {
-            return;
-        };
-        preview.diff_visible = !preview.diff_visible;
-        if !preview.diff_visible || preview.diff.is_some() {
-            cx.notify();
-            return;
-        }
-        let path = preview.path.clone();
-        let generation = self.preview_generation;
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { git_file_diff(&path) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.preview_generation != generation {
-                    return;
-                }
-                if let Some(preview) = this.column_git_preview.as_mut() {
-                    preview.diff = Some(result.map(Arc::new).map_err(SharedString::from));
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
     fn start_column_preview(&mut self, entry: FileEntry, cx: &mut Context<Self>) {
@@ -6794,17 +6757,30 @@ impl KiteApp {
             let path = preview.path.clone();
             let mut actions = h_flex().gap_1().flex_wrap();
             if changed {
+                let viewer_path = path.clone();
+                let viewer_old = DiffEndpoint::Revision("HEAD".to_string());
+                let viewer_new =
+                    if summary.staged_status.is_some() && summary.unstaged_status.is_none() {
+                        DiffEndpoint::Index
+                    } else {
+                        DiffEndpoint::WorkingTree
+                    };
                 actions = actions.child(
                     Button::new("column-preview-git-diff")
                         .ghost()
                         .compact()
-                        .label(if preview.diff_visible {
-                            "隐藏差异"
-                        } else {
-                            "查看差异"
-                        })
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.toggle_column_git_diff(cx);
+                        .label("Diff 查看器")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            match diff_viewer_window::open_diff_viewer_window(
+                                viewer_path.clone(),
+                                viewer_old.clone(),
+                                viewer_new.clone(),
+                                cx,
+                            ) {
+                                Ok(()) => this.error = None,
+                                Err(error) => this.error = Some(error.into()),
+                            }
+                            cx.notify();
                         })),
                 );
             }
@@ -6872,9 +6848,6 @@ impl KiteApp {
             section = section.child(actions);
         }
 
-        if preview.diff_visible {
-            section = section.child(render_git_diff(preview.diff.as_ref(), cx));
-        }
         section.into_any_element()
     }
 
@@ -9822,54 +9795,6 @@ fn git_commit_time_label(unix_seconds: i64) -> String {
                 .to_string()
         })
         .unwrap_or_default()
-}
-
-fn render_git_diff(
-    diff: Option<&Result<Arc<Vec<GitDiffLine>>, SharedString>>,
-    cx: &App,
-) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let body = v_flex()
-        .id("column-preview-git-diff")
-        .w_full()
-        .max_h(px(320.))
-        .overflow_y_scroll()
-        .rounded_sm()
-        .bg(cx.theme().muted.opacity(0.25))
-        .p_1()
-        .text_xs();
-    match diff {
-        None => body.child(div().text_color(muted).child("正在读取差异…")),
-        Some(Err(error)) => body.child(div().text_color(cx.theme().danger).child(error.clone())),
-        Some(Ok(lines)) if lines.is_empty() => {
-            body.child(div().text_color(muted).child("没有可显示的差异"))
-        }
-        Some(Ok(lines)) => body.children(lines.iter().map(|line| {
-            let (prefix, color, background) = match line.kind {
-                GitDiffLineKind::Added => (
-                    "+",
-                    vcs_status_color(VcsStatus::Added),
-                    Some(vcs_status_color(VcsStatus::Added).opacity(0.12)),
-                ),
-                GitDiffLineKind::Removed => (
-                    "-",
-                    vcs_status_color(VcsStatus::Deleted),
-                    Some(vcs_status_color(VcsStatus::Deleted).opacity(0.12)),
-                ),
-                GitDiffLineKind::Hunk => ("", muted, None),
-                GitDiffLineKind::Context => (" ", cx.theme().foreground, None),
-            };
-            div()
-                .w_full()
-                .px_1()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .text_color(color)
-                .when_some(background, |this, background| this.bg(background))
-                .child(format!("{prefix}{}", line.text))
-        })),
-    }
-    .into_any_element()
 }
 
 fn preview_property(label: &str, value: String, cx: &App) -> AnyElement {

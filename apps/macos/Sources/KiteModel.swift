@@ -1958,6 +1958,13 @@ final class KiteModel: ObservableObject {
         return message
     }
 
+    func gitDiff(request: GitDiffRequestDto) async throws -> GitDiffDocumentDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDiff(request: request)
+        }.value
+    }
+
     /// Runs a Git or SVN operation, refreshes the columns, and returns the
     /// status message for the caller to show.
     @discardableResult
