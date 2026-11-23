@@ -282,14 +282,6 @@ impl GitExecutor {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&directory)?.permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&directory, permissions)?;
-        }
-
         let askpass = credentials
             .map(|_| AskpassBridge::new())
             .transpose()
@@ -666,6 +658,14 @@ impl AskpassBridge {
         let directory =
             std::env::temp_dir().join(format!("kite-git-askpass-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&directory)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&directory)?.permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&directory, permissions)?;
+        }
 
         #[cfg(unix)]
         {
