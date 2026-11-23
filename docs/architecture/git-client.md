@@ -212,7 +212,7 @@ P0 采用 **git CLI 作为唯一读写后端**。
 | 大数据性能 | 进程启动成本固定；status/log/diff 在 Git 自身优化下表现稳定 | 理论上有进程内优势，但需要真实仓库基准 |
 | 维护风险 | 语义与 Git 一致 | 版本绑定和 API 变更风险更高 |
 
-初次 release smoke 对比见 [Git 后端对比](../performance/git-backends-v0.6.88.md)。单台 macOS 结果中，gix 的 status 更慢，log、blame 和 diff 更快，反向执行顺序保持相同方向；混合后端仍不足以抵消配置、错误分类和测试复杂度，因此当前四类读路径继续使用 Git CLI。引入 gix 前必须满足：
+初次 release smoke 对比见 [Git 后端对比](../performance/git-backends-v0.6.88.md)。单台 macOS 两次反向顺序结果中，gix 的 status 稳定更慢；log、blame 和 diff 的 p50 更快，但 p95 方向不一致，尚未满足稳定的 20% 门槛。混合后端仍不足以抵消配置、错误分类和测试复杂度，因此当前四类读路径继续使用 Git CLI。引入 gix 前必须满足：
 
 - 同一临时仓库和真实大仓库上的 status/log/diff/blame 输出等价。
 - p95 延迟至少优于 CLI 20%，且内存增量在可接受范围内。
