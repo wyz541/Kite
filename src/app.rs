@@ -22,6 +22,7 @@ use crate::fs::{
     format_size, load_directory, open_file, recycle_entry, rename_entry, search_directory,
     sort_entries, transfer_entry, validate_name, worse_status,
 };
+use crate::git_client_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -59,6 +60,7 @@ use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
     GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, git_file_diff, git_path_summary,
+    git_repository_root,
 };
 pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
@@ -1468,6 +1470,21 @@ impl KiteApp {
             KeyBinding::new("delete", RecycleSelection, Some("Kite")),
             KeyBinding::new("enter", OpenSelection, Some("Kite")),
             KeyBinding::new("escape", ClearSearchOverlay, Some("Kite")),
+            KeyBinding::new("secondary-shift-g", OpenGitClient, Some("Kite")),
+            KeyBinding::new("secondary-shift-r", GitClientRefresh, Some("GitClient")),
+            KeyBinding::new("secondary-shift-f", GitClientFetch, Some("GitClient")),
+            KeyBinding::new("secondary-shift-p", GitClientPull, Some("GitClient")),
+            KeyBinding::new("secondary-shift-k", GitClientPush, Some("GitClient")),
+            KeyBinding::new("secondary-k", GitClientCommit, Some("GitClient")),
+            KeyBinding::new("secondary-alt-s", GitClientStash, Some("GitClient")),
+            KeyBinding::new("secondary-j", GitClientToggleConsole, Some("GitClient")),
+            KeyBinding::new("alt-1", GitClientShowChanges, Some("GitClient")),
+            KeyBinding::new("alt-2", GitClientShowLog, Some("GitClient")),
+            KeyBinding::new("alt-3", GitClientShowDetails, Some("GitClient")),
+            KeyBinding::new("f1", GitClientShowShortcuts, Some("GitClient")),
+            KeyBinding::new("alt-up", GitClientPreviousCommit, Some("GitClient")),
+            KeyBinding::new("alt-down", GitClientNextCommit, Some("GitClient")),
+            KeyBinding::new("escape", GitClientDismiss, Some("GitClient")),
             KeyBinding::new("secondary-s", SaveEditor, Some("KiteEditor")),
         ]);
     }
@@ -1485,6 +1502,7 @@ impl KiteApp {
                 MenuItem::separator(),
                 MenuItem::action("全局搜索…", OpenGlobalSearch),
             ]),
+            Menu::new("Git").items([MenuItem::action("打开 Git 客户端…", OpenGitClient)]),
             Menu::new("显示").items([
                 MenuItem::action("列表视图", ShowListView),
                 MenuItem::action("分栏视图", ShowColumnsView),
@@ -3205,6 +3223,7 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         match command {
+            VcsMenuCommand::GitOpenClient => self.open_git_client_at_path(path, window, cx),
             VcsMenuCommand::GitAdd => {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Add, path, window, cx)
             }
@@ -3266,6 +3285,7 @@ impl KiteApp {
             VcsOperation::Pull => format!("正在{}拉取…", tool.label()),
             VcsOperation::Push => format!("正在{}推送…", tool.label()),
             VcsOperation::Fetch => format!("正在{}获取…", tool.label()),
+            VcsOperation::Stash => format!("正在{}暂存…", tool.label()),
             VcsOperation::Revert => format!("正在{}还原…", tool.label()),
             VcsOperation::Clean => format!("正在{}清理…", tool.label()),
             VcsOperation::Update => format!("正在{}更新…", tool.label()),
@@ -4816,6 +4836,7 @@ impl KiteApp {
         let can_modify_current = !self.current_dir.as_os_str().is_empty();
         let has_clipboard = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let current_favorite = self.current_dir_is_favorite();
+        let git_available = self.current_git_available(cx);
         let loading = self.loading;
         let search_expanded = self.search_visible
             || self.active_search.is_some()
@@ -4898,6 +4919,18 @@ impl KiteApp {
                         this.toggle_current_favorite(cx)
                     })),
             )
+            .when(git_available, |this| {
+                this.child(
+                    Button::new("open-git-client")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::GitBranch)
+                        .tooltip("打开 Git 客户端 (Ctrl+Shift+G)")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_git_client_for_current(&OpenGitClient, window, cx)
+                        })),
+                )
+            })
             .child(
                 Button::new("copy")
                     .ghost()
@@ -5024,6 +5057,79 @@ impl KiteApp {
         toolbar.into_any_element()
     }
 
+    fn current_git_available(&self, cx: &App) -> bool {
+        if self.view_mode == ViewMode::Columns && self.active_search.is_none() {
+            self.column_panes
+                .last()
+                .is_some_and(|pane| pane.git_available)
+        } else {
+            self.table.read(cx).delegate().git_available()
+        }
+    }
+
+    fn open_git_client_for_current(
+        &mut self,
+        _: &OpenGitClient,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self
+            .selected_entries(cx)
+            .first()
+            .map(|entry| entry.path.clone())
+            .unwrap_or_else(|| self.current_dir.clone());
+        self.open_git_client_at_path(path, window, cx);
+    }
+
+    fn open_git_client_at_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.notice = Some("正在查找 Git 仓库…".into());
+        self.error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { git_repository_root(&path) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Some(root)) => this.open_git_client_root(root, window, cx),
+                    Ok(None) => {
+                        this.notice = None;
+                        this.error = Some("当前项目不在 Git 仓库中".into());
+                    }
+                    Err(error) => {
+                        this.notice = None;
+                        this.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_git_client_root(
+        &mut self,
+        repository_root: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match git_client_window::open_git_client_window(repository_root, window, cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("Git 客户端已打开".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
     fn open_global_search(
         &mut self,
         _: &OpenGlobalSearch,
@@ -6314,6 +6420,16 @@ impl KiteApp {
             );
         }
 
+        let repository_root = summary.repository_root.clone();
+        section = section.child(
+            Button::new("column-preview-git-client")
+                .ghost()
+                .compact()
+                .label("Git 客户端")
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_git_client_root(repository_root.clone(), window, cx);
+                })),
+        );
         if !summary.is_directory && !summary.ignored {
             let changed = summary.staged_status.is_some() || summary.unstaged_status.is_some();
             let path = preview.path.clone();
@@ -8535,6 +8651,9 @@ impl Render for KiteApp {
             )
             .on_action(cx.listener(|this, action: &OpenGlobalSearch, window, cx| {
                 this.open_global_search(action, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &OpenGitClient, window, cx| {
+                this.open_git_client_for_current(action, window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &CreateFolder, window, cx| this.begin_new_folder(window, cx)),

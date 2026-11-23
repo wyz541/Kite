@@ -102,6 +102,11 @@ struct KitePreviewPane: View {
                 }
             }
 
+            if entry.gitStatus != nil || model.isGitAvailable(forEntryPath: entry.path) {
+                KitePreviewAction(title: "Git 客户端", systemImage: "arrow.triangle.branch") {
+                    KiteGitClientWindowController.open(path: entry.path)
+                }
+            }
             KitePreviewAction(title: "Finder", systemImage: "folder") {
                 KitePlatform.revealInFinder(entry.path)
             }

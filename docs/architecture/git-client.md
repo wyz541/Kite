@@ -74,6 +74,55 @@ Windows 使用 `CREATE_NO_WINDOW`，不弹出控制台窗口。
 
 状态颜色沿用分栏徽标的配色：冲突、删除为红色；新增、重命名为绿色；修改为橙色；未跟踪为青色。
 
+## 客户端窗口框架
+
+Git 客户端使用独立窗口。每个仓库最多打开一个窗口；再次打开同一仓库时激活已有窗口。
+
+### 入口
+
+- 分栏中的仓库目录或项目右键菜单：`Git > 打开 Git 客户端`。
+- 主工具栏 Git 按钮；macOS 同时提供可点击的状态栏 Git 标记。
+- 预览中的 Git 区块：`Git 客户端`。
+- 应用菜单：`Git > 打开 Git 客户端…`。
+- Windows 快捷键 `Ctrl+Shift+G`；macOS `Command+Shift+G`。
+
+### 布局
+
+- 左侧：变更分组和提交信息编辑区。
+- 中间：提交 Log。
+- 右侧：提交详情；提交文件清单由后续日志视图补充。
+- 底部：可折叠 Git 控制台和后台任务面板。
+- 顶部：当前分支、上游、领先 / 落后计数，以及 获取、拉取、推送、提交、贮藏。
+- 状态横幅：rebase、merge、cherry-pick、revert；按适用性提供继续、跳过和中止。正在 bisect 时显示结束并重置。
+
+### 窗口状态
+
+`GitClientWindowSessionDto` 随主会话写入 `session.json`，按仓库根目录去重，记录：
+
+- 窗口宽高。
+- 变更栏和详情栏比例。
+- 控制台高度和展开状态。
+- 最后打开的视图。
+
+### 快捷键
+
+| 操作 | Windows | macOS |
+| --- | --- | --- |
+| 打开 Git 客户端 | Ctrl+Shift+G | Command+Shift+G |
+| 刷新仓库 | Ctrl+Shift+R | Command+Shift+R |
+| 获取 | Ctrl+Shift+F | Option+Command+F |
+| 拉取 | Ctrl+Shift+P | Option+Command+P |
+| 推送 | Ctrl+Shift+K | Option+Command+K |
+| 提交 | Ctrl+K | Command+K |
+| 贮藏 | Ctrl+Alt+S | Option+Command+S |
+| 控制台 | Ctrl+J | Command+J |
+| 变更 / 日志 / 详情 | Alt+1 / 2 / 3 | Option+1 / 2 / 3 |
+| 上一个 / 下一个提交 | Alt+Up / Down | Option+Up / Down |
+| 快捷键表 | F1 | F1 |
+| 关闭提示或浮层 | Esc | Esc |
+
+macOS 的 Git 窗口不使用 `Command+Shift+F` 获取，避免与主窗口全局搜索冲突。
+
 ## 未覆盖
 
 - hunk 级和行级暂存：#119。

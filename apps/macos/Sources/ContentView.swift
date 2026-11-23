@@ -274,6 +274,14 @@ struct ContentView: View {
                 KiteGlobalSearchWindowController.shared.show(model: model)
             }
 
+            if model.columns.last?.gitAvailable == true {
+                KiteToolbarIconButton(
+                    systemName: "arrow.triangle.branch",
+                    title: "打开 Git 客户端 (⌘⇧G)"
+                ) {
+                    KiteGitClientWindowController.open(path: model.currentPath)
+                }
+            }
             KiteToolbarIconButton(
                 systemName: currentFolderIsFavorite ? "star.fill" : "star",
                 title: currentFolderIsFavorite ? "取消收藏当前文件夹" : "收藏当前文件夹",
@@ -413,7 +421,13 @@ struct ContentView: View {
             }
 
             if model.columns.last?.gitAvailable == true {
-                KiteStatusBadge(title: "Git", systemImage: "arrow.triangle.branch")
+                Button {
+                    KiteGitClientWindowController.open(path: model.currentPath)
+                } label: {
+                    KiteStatusBadge(title: "Git", systemImage: "arrow.triangle.branch")
+                }
+                .buttonStyle(.plain)
+                .help("打开 Git 客户端")
             }
 
             if model.columns.last?.svnAvailable == true {

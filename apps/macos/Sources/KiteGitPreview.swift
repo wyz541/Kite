@@ -139,6 +139,9 @@ struct KiteGitPreviewSection: View {
                 actionButton("取消暂存") { run(.unstage) }
             }
             actionButton("历史") { showLog() }
+            actionButton("Git 客户端") {
+                KiteGitClientWindowController.open(path: summary.repositoryRoot)
+            }
         }
     }
 

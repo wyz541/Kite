@@ -2325,7 +2325,8 @@ final class KiteModel: ObservableObject {
         let state = SessionStateDto(
             schemaVersion: Self.sessionSchemaVersion,
             activeTab: activeTab,
-            tabs: savedTabs
+            tabs: savedTabs,
+            gitClientWindows: core.loadSession()?.gitClientWindows ?? []
         )
         do {
             try core.saveSession(state: state)

@@ -480,6 +480,13 @@ impl ContextMenuProvider for RefreshMenuProvider {
 
 fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
     vec![
+        menu_item(
+            "打开 Git 客户端",
+            IconName::GitBranch,
+            VcsMenuCommand::GitOpenClient,
+            enabled,
+        ),
+        ContextMenuNode::Separator,
         menu_item("添加", IconName::GitBranch, VcsMenuCommand::GitAdd, enabled),
         menu_item(
             "取消暂存",
@@ -905,6 +912,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitOpenClient)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitAdd)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitUnstage)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitCommit)));

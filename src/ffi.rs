@@ -10,14 +10,17 @@ use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSea
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, transfer_entry};
-use crate::git::{self, GitDiffLine, GitDiffLineKind, GitPathSummary};
+use crate::git::{
+    self, GitChangedFile, GitDiffLine, GitDiffLineKind, GitOperationAction, GitOperationState,
+    GitPathSummary, GitRepositorySnapshot,
+};
 use crate::platform::{HostPlatform, default_root_path, host_platform};
-use crate::session::{self as session_store, SessionStateDto};
+use crate::session::{self as session_store, GitClientWindowSessionDto, SessionStateDto};
 use crate::text_editor::{self, TextDocument, TextLineEnding};
 use crate::updater::{self, UpdateInfo};
 use crate::vcs::{
-    VcsOperation, VcsQuery, VcsTool, apply_statuses, load_vcs_snapshot, run_vcs_operation,
-    run_vcs_query,
+    VcsCancellation, VcsOperation, VcsQuery, VcsTool, apply_statuses, load_vcs_snapshot,
+    run_vcs_operation, run_vcs_operation_cancellable, run_vcs_query,
 };
 
 #[cfg(target_os = "macos")]
@@ -262,6 +265,45 @@ pub struct GitPathSummaryDto {
     pub is_directory: bool,
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitChangedFileDto {
+    pub path: String,
+    pub staged_status: Option<String>,
+    pub staged_code: Option<String>,
+    pub unstaged_status: Option<String>,
+    pub unstaged_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitOperationKindDto {
+    Rebasing,
+    Merging,
+    CherryPicking,
+    Reverting,
+    Bisecting,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitRepositorySnapshotDto {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub head_short_hash: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub operation: Option<GitOperationKindDto>,
+    pub changes: GitChangeCountsDto,
+    pub changed_files: Vec<GitChangedFileDto>,
+    pub recent_commits: Vec<GitCommitSummaryDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitOperationControlDto {
+    ContinueOperation,
+    Skip,
+    Abort,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum GitDiffLineKindDto {
     Context,
@@ -290,6 +332,7 @@ pub enum VcsOperationDto {
     Pull,
     Push,
     Fetch,
+    Stash,
     Revert,
     Clean,
     Update,
@@ -626,6 +669,20 @@ impl KiteCore {
         session_store::save_session(&state).map_err(KiteError::operation)
     }
 
+    pub fn load_git_client_window_state(
+        &self,
+        repository_root: String,
+    ) -> Option<GitClientWindowSessionDto> {
+        session_store::load_git_client_window_state(&PathBuf::from(repository_root))
+    }
+
+    pub fn save_git_client_window_state(
+        &self,
+        state: GitClientWindowSessionDto,
+    ) -> Result<(), KiteError> {
+        session_store::save_git_client_window_state(&state).map_err(KiteError::operation)
+    }
+
     pub fn open_text_document(&self, path: String) -> Result<TextDocumentDto, KiteError> {
         text_editor::TextDocument::open(&PathBuf::from(path))
             .map(text_document_dto)
@@ -744,6 +801,21 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    pub fn git_repository_root(&self, path: String) -> Result<Option<String>, KiteError> {
+        git::git_repository_root(&PathBuf::from(path))
+            .map(|root| root.map(|root| root.to_string_lossy().into_owned()))
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_repository_snapshot(
+        &self,
+        path: String,
+    ) -> Result<Option<GitRepositorySnapshotDto>, KiteError> {
+        git::git_repository_snapshot(&PathBuf::from(path))
+            .map(|snapshot| snapshot.map(git_repository_snapshot_dto))
+            .map_err(KiteError::operation)
+    }
+
     pub fn git_file_diff(&self, path: String) -> Result<Vec<GitDiffLineDto>, KiteError> {
         git::git_file_diff(&PathBuf::from(path))
             .map(|lines| lines.into_iter().map(git_diff_line_dto).collect())
@@ -762,6 +834,31 @@ impl KiteCore {
             &PathBuf::from(path),
         )
         .map_err(KiteError::operation)
+    }
+
+    pub fn run_vcs_operation_cancellable(
+        &self,
+        tool: VcsToolDto,
+        operation: VcsOperationDto,
+        path: String,
+        cancellation: Arc<VcsCancellation>,
+    ) -> Result<String, KiteError> {
+        run_vcs_operation_cancellable(
+            vcs_tool(tool),
+            vcs_operation(operation),
+            &PathBuf::from(path),
+            &cancellation,
+        )
+        .map_err(KiteError::operation)
+    }
+
+    pub fn run_git_operation_control(
+        &self,
+        path: String,
+        control: GitOperationControlDto,
+    ) -> Result<String, KiteError> {
+        git::run_git_operation_control(&PathBuf::from(path), git_operation_action(control))
+            .map_err(KiteError::operation)
     }
 
     pub fn run_vcs_query(
@@ -793,12 +890,83 @@ fn vcs_operation(operation: VcsOperationDto) -> VcsOperation {
         VcsOperationDto::Pull => VcsOperation::Pull,
         VcsOperationDto::Push => VcsOperation::Push,
         VcsOperationDto::Fetch => VcsOperation::Fetch,
+        VcsOperationDto::Stash => VcsOperation::Stash,
         VcsOperationDto::Revert => VcsOperation::Revert,
         VcsOperationDto::Clean => VcsOperation::Clean,
         VcsOperationDto::Update => VcsOperation::Update,
         VcsOperationDto::Lock => VcsOperation::Lock,
         VcsOperationDto::Unlock => VcsOperation::Unlock,
         VcsOperationDto::Cleanup => VcsOperation::Cleanup,
+    }
+}
+
+fn git_operation_action(control: GitOperationControlDto) -> GitOperationAction {
+    match control {
+        GitOperationControlDto::ContinueOperation => GitOperationAction::Continue,
+        GitOperationControlDto::Skip => GitOperationAction::Skip,
+        GitOperationControlDto::Abort => GitOperationAction::Abort,
+    }
+}
+
+fn git_operation_kind(operation: GitOperationState) -> GitOperationKindDto {
+    match operation {
+        GitOperationState::Rebasing => GitOperationKindDto::Rebasing,
+        GitOperationState::Merging => GitOperationKindDto::Merging,
+        GitOperationState::CherryPicking => GitOperationKindDto::CherryPicking,
+        GitOperationState::Reverting => GitOperationKindDto::Reverting,
+        GitOperationState::Bisecting => GitOperationKindDto::Bisecting,
+    }
+}
+
+fn git_repository_snapshot_dto(snapshot: GitRepositorySnapshot) -> GitRepositorySnapshotDto {
+    GitRepositorySnapshotDto {
+        repository_root: snapshot.repository_root.to_string_lossy().into_owned(),
+        branch: snapshot.branch,
+        head_short_hash: snapshot.head_short_hash,
+        upstream: snapshot.upstream,
+        ahead: snapshot.ahead,
+        behind: snapshot.behind,
+        operation: snapshot.operation.map(git_operation_kind),
+        changes: GitChangeCountsDto {
+            modified: snapshot.changes.modified,
+            added: snapshot.changes.added,
+            deleted: snapshot.changes.deleted,
+            renamed: snapshot.changes.renamed,
+            untracked: snapshot.changes.untracked,
+            conflicted: snapshot.changes.conflicted,
+        },
+        changed_files: snapshot
+            .changed_files
+            .into_iter()
+            .map(git_changed_file_dto)
+            .collect(),
+        recent_commits: snapshot
+            .recent_commits
+            .into_iter()
+            .map(git_commit_summary_dto)
+            .collect(),
+    }
+}
+
+fn git_changed_file_dto(file: GitChangedFile) -> GitChangedFileDto {
+    GitChangedFileDto {
+        path: file.path,
+        staged_status: file.staged_status.map(|status| status.label().to_string()),
+        staged_code: file.staged_status.map(|status| status.code().to_string()),
+        unstaged_status: file
+            .unstaged_status
+            .map(|status| status.label().to_string()),
+        unstaged_code: file.unstaged_status.map(|status| status.code().to_string()),
+    }
+}
+
+fn git_commit_summary_dto(commit: git::GitCommitSummary) -> GitCommitSummaryDto {
+    GitCommitSummaryDto {
+        hash: commit.hash,
+        short_hash: commit.short_hash,
+        author: commit.author,
+        unix_seconds: commit.unix_seconds,
+        subject: commit.subject,
     }
 }
 
@@ -825,13 +993,7 @@ fn git_path_summary_dto(summary: GitPathSummary) -> GitPathSummaryDto {
             .unstaged_status
             .map(|status| status.code().to_string()),
         ignored: summary.ignored,
-        last_commit: summary.last_commit.map(|commit| GitCommitSummaryDto {
-            hash: commit.hash,
-            short_hash: commit.short_hash,
-            author: commit.author,
-            unix_seconds: commit.unix_seconds,
-            subject: commit.subject,
-        }),
+        last_commit: summary.last_commit.map(git_commit_summary_dto),
         lines_added: summary.lines_added,
         lines_removed: summary.lines_removed,
         changes: GitChangeCountsDto {

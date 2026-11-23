@@ -48,6 +48,25 @@ actions!(
         CreateStartMenuShortcut,
         CheckForUpdates,
         OpenSettings,
+        OpenGitClient,
+        GitClientRefresh,
+        GitClientFetch,
+        GitClientPull,
+        GitClientPush,
+        GitClientCommit,
+        GitClientStash,
+        GitClientToggleConsole,
+        GitClientShowChanges,
+        GitClientShowLog,
+        GitClientShowDetails,
+        GitClientShowShortcuts,
+        GitClientContinue,
+        GitClientSkip,
+        GitClientAbort,
+        GitClientCancelTask,
+        GitClientDismiss,
+        GitClientPreviousCommit,
+        GitClientNextCommit,
         SaveEditor,
     ]
 );
@@ -120,6 +139,7 @@ pub struct ColumnPaneAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VcsMenuCommand {
+    GitOpenClient,
     GitAdd,
     GitUnstage,
     GitCommit,

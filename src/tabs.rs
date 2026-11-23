@@ -130,6 +130,9 @@ impl KiteWindow {
                 .iter()
                 .map(|entry| entry.view.read(cx).session_tab())
                 .collect(),
+            git_client_windows: session::load_session()
+                .map(|state| state.git_client_windows)
+                .unwrap_or_default(),
         };
         if self.last_persisted_session.as_ref() == Some(&state) {
             return;

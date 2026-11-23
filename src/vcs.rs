@@ -1,6 +1,11 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -67,6 +72,7 @@ pub enum VcsOperation {
     Pull,
     Push,
     Fetch,
+    Stash,
     Revert,
     Clean,
     Update,
@@ -79,6 +85,32 @@ pub enum VcsOperation {
 pub enum VcsQuery {
     Diff,
     Log,
+}
+
+/// Cancellation handle shared with long-running Git and SVN operations. The UI
+/// owns one handle per background task; calling `cancel` asks the process
+/// runner to terminate the child and return an explicit cancellation error.
+#[derive(Debug, uniffi::Object)]
+pub struct VcsCancellation {
+    cancelled: AtomicBool,
+}
+
+#[uniffi::export]
+impl VcsCancellation {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cancelled: AtomicBool::new(false),
+        })
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
 }
 
 impl VcsQuery {
@@ -337,9 +369,27 @@ pub fn run_vcs_operation(
     operation: VcsOperation,
     target: &Path,
 ) -> Result<String, String> {
+    run_vcs_operation_with_cancel(tool, operation, target, None)
+}
+
+pub fn run_vcs_operation_cancellable(
+    tool: VcsTool,
+    operation: VcsOperation,
+    target: &Path,
+    cancellation: &VcsCancellation,
+) -> Result<String, String> {
+    run_vcs_operation_with_cancel(tool, operation, target, Some(&cancellation.cancelled))
+}
+
+fn run_vcs_operation_with_cancel(
+    tool: VcsTool,
+    operation: VcsOperation,
+    target: &Path,
+    cancellation: Option<&AtomicBool>,
+) -> Result<String, String> {
     match tool {
-        VcsTool::Git => run_git_operation(operation, target),
-        VcsTool::Svn => run_svn_operation(operation, target),
+        VcsTool::Git => run_git_operation(operation, target, cancellation),
+        VcsTool::Svn => run_svn_operation(operation, target, cancellation),
     }
 }
 
@@ -521,7 +571,11 @@ fn run_query_command(label: &str, mut command: Command) -> Result<String, String
     }
 }
 
-fn run_git_operation(operation: VcsOperation, target: &Path) -> Result<String, String> {
+fn run_git_operation(
+    operation: VcsOperation,
+    target: &Path,
+    cancellation: Option<&AtomicBool>,
+) -> Result<String, String> {
     if matches!(
         &operation,
         VcsOperation::Update | VcsOperation::Lock | VcsOperation::Unlock | VcsOperation::Cleanup
@@ -568,16 +622,20 @@ fn run_git_operation(operation: VcsOperation, target: &Path) -> Result<String, S
             "Git 提交"
         }
         VcsOperation::Pull => {
-            command.args(["pull", "--no-edit"]);
+            command.args(["pull", "--no-edit", "--progress"]);
             "Git 拉取"
         }
         VcsOperation::Push => {
-            command.arg("push");
+            command.args(["push", "--progress"]);
             "Git 推送"
         }
         VcsOperation::Fetch => {
-            command.args(["fetch", "--prune"]);
+            command.args(["fetch", "--prune", "--progress"]);
             "Git 获取"
+        }
+        VcsOperation::Stash => {
+            command.args(["stash", "push", "--include-untracked"]);
+            "Git 暂存"
         }
         VcsOperation::Revert => {
             command
@@ -594,16 +652,21 @@ fn run_git_operation(operation: VcsOperation, target: &Path) -> Result<String, S
         | VcsOperation::Unlock
         | VcsOperation::Cleanup => unreachable!(),
     };
-    run_operation_command(label, command)
+    run_operation_command(label, command, cancellation)
 }
 
-fn run_svn_operation(operation: VcsOperation, target: &Path) -> Result<String, String> {
+fn run_svn_operation(
+    operation: VcsOperation,
+    target: &Path,
+    cancellation: Option<&AtomicBool>,
+) -> Result<String, String> {
     if matches!(
         &operation,
         VcsOperation::Unstage
             | VcsOperation::Pull
             | VcsOperation::Push
             | VcsOperation::Fetch
+            | VcsOperation::Stash
             | VcsOperation::Clean
     ) {
         return Err("SVN 不支持此操作".to_string());
@@ -647,9 +710,10 @@ fn run_svn_operation(operation: VcsOperation, target: &Path) -> Result<String, S
         | VcsOperation::Pull
         | VcsOperation::Push
         | VcsOperation::Fetch
+        | VcsOperation::Stash
         | VcsOperation::Clean => unreachable!(),
     };
-    run_operation_command(label, command)
+    run_operation_command(label, command, cancellation)
 }
 
 fn working_directory(target: &Path) -> &Path {
@@ -672,18 +736,83 @@ fn configured_command(program: &str, current_dir: &Path) -> Command {
     command
 }
 
-fn run_operation_command(label: &str, mut command: Command) -> Result<String, String> {
-    let output = command.output().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            format!("未找到 {}。请确认命令已安装并位于 PATH 中。", label)
-        } else {
-            format!("{label}失败：{error}")
-        }
-    })?;
+fn run_operation_command(
+    label: &str,
+    mut command: Command,
+    cancellation: Option<&AtomicBool>,
+) -> Result<String, String> {
+    let output = if cancellation.is_some() {
+        run_cancellable_command(label, command, cancellation)?
+    } else {
+        command
+            .output()
+            .map_err(|error| spawn_error(label, error))?
+    };
     if output.status.success() {
         Ok(format!("{label}完成"))
     } else {
         Err(output_error(label, &output))
+    }
+}
+
+fn run_cancellable_command(
+    label: &str,
+    mut command: Command,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| spawn_error(label, error))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{label}失败：无法读取标准输出"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{label}失败：无法读取错误输出"))?;
+    let stdout_reader = thread::spawn(move || read_all(stdout));
+    let stderr_reader = thread::spawn(move || read_all(stderr));
+
+    let status = loop {
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err("操作已取消".to_string());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("{label}失败：无法读取进程状态：{error}"))?
+        {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(40));
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| format!("{label}失败：标准输出读取线程异常退出"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| format!("{label}失败：错误输出读取线程异常退出"))?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_all(mut stream: impl Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let _ = stream.read_to_end(&mut bytes);
+    bytes
+}
+
+fn spawn_error(label: &str, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        format!("未找到 {}。请确认命令已安装并位于 PATH 中。", label)
+    } else {
+        format!("{label}失败：{error}")
     }
 }
 
@@ -926,11 +1055,32 @@ mod tests {
         );
         assert_eq!(std::fs::read(&file).expect("read note"), b"before");
 
+        std::fs::write(&file, b"stashed").expect("modify note for stash");
+        let stashed_untracked = root.join("stashed-untracked.txt");
+        std::fs::write(&stashed_untracked, b"stash me").expect("write stashed untracked file");
+        assert!(
+            run_vcs_operation(VcsTool::Git, VcsOperation::Stash, &root)
+                .expect("git stash")
+                .contains("完成")
+        );
+        assert_eq!(std::fs::read(&file).expect("read stashed note"), b"before");
+        assert!(!stashed_untracked.exists());
+
         let untracked = root.join("junk.tmp");
         std::fs::write(&untracked, b"junk").expect("write untracked file");
         run_vcs_operation(VcsTool::Git, VcsOperation::Clean, &untracked).expect("git clean");
         assert!(!untracked.exists());
         std::fs::remove_dir_all(root).expect("clean git operations root");
+    }
+
+    #[test]
+    fn rejects_stash_for_svn() {
+        let root = unique_temp_dir("svn-stash");
+        std::fs::create_dir_all(&root).expect("create svn stash root");
+        let error = run_vcs_operation(VcsTool::Svn, VcsOperation::Stash, &root)
+            .expect_err("SVN stash should fail");
+        assert!(error.contains("不支持"));
+        std::fs::remove_dir_all(root).expect("clean svn stash root");
     }
 
     #[test]
