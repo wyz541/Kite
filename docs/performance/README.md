@@ -268,7 +268,7 @@ cargo run --locked --release --features performance --bin kite-perf -- \
   --markdown target/performance/git-smoke.md
 ```
 
-也可以设置 `KITE_GIX_BIN`。`--git-only` 跳过其他模块，适合重复生成 Git 专项结果。未提供可执行文件时，报告把对比标记为 `not_automated`，其他 Git 场景仍会运行。
+也可以设置 `KITE_GIX_BIN`。`--git-only` 跳过其他模块，适合重复生成 Git 专项结果。`--gix-first` 反转两端的执行顺序，用来检查文件系统缓存造成的顺序偏差。未提供可执行文件时，报告把对比标记为 `not_automated`，其他 Git 场景仍会运行。
 
 场景边界：
 

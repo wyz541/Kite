@@ -153,6 +153,7 @@ struct Args {
     cold_samples: Option<usize>,
     fixture_root: Option<PathBuf>,
     gix_bin: Option<PathBuf>,
+    gix_first: bool,
     git_only: bool,
     keep_fixtures: bool,
     include_network: bool,
@@ -168,6 +169,7 @@ impl Default for Args {
             cold_samples: None,
             fixture_root: None,
             gix_bin: None,
+            gix_first: false,
             git_only: false,
             keep_fixtures: false,
             include_network: false,
@@ -233,7 +235,13 @@ fn run() -> Result<(), String> {
     let mut results = Vec::new();
 
     if args.git_only {
-        measure_vcs(&fixtures, &profile, gix_bin.as_ref(), &mut results)?;
+        measure_vcs(
+            &fixtures,
+            &profile,
+            gix_bin.as_ref(),
+            args.gix_first,
+            &mut results,
+        )?;
     } else {
         measure_column_navigation(&fixtures, &profile, &mut results)?;
         measure_tabs_and_session(&fixtures, &profile, &mut results)?;
@@ -244,7 +252,13 @@ fn run() -> Result<(), String> {
         measure_preview_and_editor(&fixtures, &profile, &mut results)?;
         measure_file_operations(&fixtures, &profile, &mut results)?;
         measure_archive_operations(&fixtures, &profile, &mut results)?;
-        measure_vcs(&fixtures, &profile, gix_bin.as_ref(), &mut results)?;
+        measure_vcs(
+            &fixtures,
+            &profile,
+            gix_bin.as_ref(),
+            args.gix_first,
+            &mut results,
+        )?;
         measure_devices(&profile, &mut results)?;
         measure_update_path(&fixtures, &profile, args.include_network, &mut results)?;
     }
@@ -358,6 +372,7 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--gix requires a path".to_string())?,
                 ));
             }
+            "--gix-first" => args.gix_first = true,
             "--git-only" => args.git_only = true,
             "--keep-fixtures" => args.keep_fixtures = true,
             "--include-network" => args.include_network = true,
@@ -381,7 +396,7 @@ fn parse_positive_usize(value: String, flag: &str) -> Result<usize, String> {
 
 fn print_help() {
     println!(
-        "kite-perf {}\n\nUsage: cargo run --release --features performance --bin kite-perf -- [options]\n\nOptions:\n  --profile <smoke|ci|standard|extended>  Fixture and sample preset (default: standard)\n  --output <path>                         JSON report path\n  --markdown <path>                       Optional Markdown summary path\n  --samples <n>                           Override interactive sample count\n  --cold-samples <n>                      Override cold-start/build sample count\n  --fixture-root <path>                   Use a new explicit temporary fixture directory\n  --gix <path>                            Compare Git read paths with this gix executable\n  --git-only                              Run only the Git backend scenarios\n  --keep-fixtures                         Keep generated fixtures after the run\n  --include-network                       Measure the GitHub update check as an external boundary\n  --help                                  Print this help",
+        "kite-perf {}\n\nUsage: cargo run --release --features performance --bin kite-perf -- [options]\n\nOptions:\n  --profile <smoke|ci|standard|extended>  Fixture and sample preset (default: standard)\n  --output <path>                         JSON report path\n  --markdown <path>                       Optional Markdown summary path\n  --samples <n>                           Override interactive sample count\n  --cold-samples <n>                      Override cold-start/build sample count\n  --fixture-root <path>                   Use a new explicit temporary fixture directory\n  --gix <path>                            Compare Git read paths with this gix executable\n  --gix-first                             Measure gix scenarios before Git CLI scenarios\n  --git-only                              Run only the Git backend scenarios\n  --keep-fixtures                         Keep generated fixtures after the run\n  --include-network                       Measure the GitHub update check as an external boundary\n  --help                                  Print this help",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -2309,6 +2324,7 @@ fn measure_vcs(
     fixtures: &FixtureSet,
     config: &ProfileConfig,
     gix_bin: Option<&GixBackend>,
+    gix_first: bool,
     results: &mut Vec<MetricResult>,
 ) -> Result<(), String> {
     let Some(vcs_dir) = &fixtures.vcs_dir else {
@@ -2373,193 +2389,12 @@ fn measure_vcs(
         },
     );
 
-    let git = Path::new("git");
-    let status_pathspec = ".";
-    let history_path = "history/hot.txt";
-    measure_scenario(
-        results,
-        "VCS and context menus",
-        "git_status_cli",
-        "process",
-        config.samples,
-        1,
-        vec![
-            "Measures git status --porcelain=v1 -z --untracked-files=all.".to_string(),
-            "The path scope is the repository root.".to_string(),
-        ],
-        |_| {
-            let output = capture_command(
-                git,
-                vcs_dir,
-                &[
-                    "status",
-                    "--porcelain=v1",
-                    "-z",
-                    "--untracked-files=all",
-                    "--",
-                    status_pathspec,
-                ],
-            )?;
-            Ok(
-                WorkAmount::items(config.vcs_files as u64).with_details(json!({
-                    "output_bytes": output.stdout.len(),
-                })),
-            )
-        },
-    );
-    measure_scenario(
-        results,
-        "VCS and context menus",
-        "git_log_cli_first_100",
-        "process",
-        config.samples,
-        1,
-        vec![
-            "Measures git log -n 100 using short hashes and subjects.".to_string(),
-            "The fixture contains exactly 100 commits.".to_string(),
-        ],
-        |_| {
-            let output = capture_command(git, vcs_dir, &["log", "-n", "100", "--format=%h %s"])?;
-            let count = String::from_utf8_lossy(&output.stdout).lines().count();
-            if count != 100 {
-                return Err(format!("expected 100 log lines, received {count}"));
-            }
-            Ok(WorkAmount::items(100))
-        },
-    );
-    measure_scenario(
-        results,
-        "VCS and context menus",
-        "git_blame_cli",
-        "process",
-        config.samples,
-        1,
-        vec![
-            "Measures git blame --line-porcelain for one 64-line file.".to_string(),
-            "The path has 100 commits in its ancestry.".to_string(),
-        ],
-        |_| {
-            let output = capture_command(
-                git,
-                vcs_dir,
-                &["blame", "--line-porcelain", "--", history_path],
-            )?;
-            let lines = String::from_utf8_lossy(&output.stdout).lines().count();
-            if lines == 0 {
-                return Err("git blame produced no output".to_string());
-            }
-            Ok(WorkAmount::items(64))
-        },
-    );
-    measure_scenario(
-        results,
-        "VCS and context menus",
-        "git_diff_cli",
-        "process",
-        config.samples,
-        1,
-        vec![
-            "Measures git diff --numstat between HEAD^ and HEAD for one file.".to_string(),
-            "This is a commit-to-commit diff, not a worktree render.".to_string(),
-        ],
-        |_| {
-            let output = capture_command(
-                git,
-                vcs_dir,
-                &["diff", "--numstat", "HEAD^", "HEAD", "--", history_path],
-            )?;
-            let files = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .count();
-            if files != 1 {
-                return Err(format!("expected one changed file, received {files}"));
-            }
-            Ok(WorkAmount::items(1))
-        },
-    );
-
-    if let Some(gix) = gix_bin {
-        let gix_note = format!("gix version: {}", gix.version);
-        measure_scenario(
-            results,
-            "VCS and context menus",
-            "git_status_gix",
-            "process",
-            config.samples,
-            1,
-            vec![
-                "Measures gix status with the simplified output and --no-write.".to_string(),
-                "The external gix process is the comparison boundary.".to_string(),
-                gix_note.clone(),
-            ],
-            |_| {
-                capture_command(
-                    &gix.path,
-                    vcs_dir,
-                    &["status", "--untracked=all", "--no-write"],
-                )?;
-                Ok(WorkAmount::items(config.vcs_files as u64))
-            },
-        );
-        measure_scenario(
-            results,
-            "VCS and context menus",
-            "git_log_gix_first_100",
-            "process",
-            config.samples,
-            1,
-            vec![
-                "Measures gix log over the 100-commit fixture.".to_string(),
-                "The external gix process is the comparison boundary.".to_string(),
-                gix_note.clone(),
-            ],
-            |_| {
-                capture_command(&gix.path, vcs_dir, &["log"])?;
-                Ok(WorkAmount::items(100))
-            },
-        );
-        measure_scenario(
-            results,
-            "VCS and context menus",
-            "git_blame_gix",
-            "process",
-            config.samples,
-            1,
-            vec![
-                "Measures gix blame for the same 64-line file.".to_string(),
-                "The external gix process is the comparison boundary.".to_string(),
-                gix_note.clone(),
-            ],
-            |_| {
-                capture_command(&gix.path, vcs_dir, &["blame", history_path])?;
-                Ok(WorkAmount::items(64))
-            },
-        );
-        measure_scenario(
-            results,
-            "VCS and context menus",
-            "git_diff_gix",
-            "process",
-            config.samples,
-            1,
-            vec![
-                "Measures gix diff tree HEAD^ HEAD.".to_string(),
-                "The external gix process is the comparison boundary.".to_string(),
-                gix_note.clone(),
-            ],
-            |_| {
-                capture_command(&gix.path, vcs_dir, &["diff", "tree", "HEAD^", "HEAD"])?;
-                Ok(WorkAmount::items(1))
-            },
-        );
+    if gix_first {
+        measure_git_gix_scenarios(vcs_dir, config, gix_bin, gix_first, results);
+        measure_git_cli_scenarios(vcs_dir, config, gix_first, results);
     } else {
-        record_gap(
-            results,
-            "VCS and context menus",
-            "process",
-            "gix backend comparison (install gix, pass --gix, or set KITE_GIX_BIN)",
-        );
+        measure_git_cli_scenarios(vcs_dir, config, gix_first, results);
+        measure_git_gix_scenarios(vcs_dir, config, gix_bin, gix_first, results);
     }
 
     let entries = kite_fs::load_directory(vcs_dir, kite_fs::SortSpec::default())?.entries;
@@ -2592,6 +2427,228 @@ fn measure_vcs(
         "AppKit menu latency and SVN fixture when svn is unavailable",
     );
     Ok(())
+}
+
+fn measure_git_cli_scenarios(
+    vcs_dir: &Path,
+    config: &ProfileConfig,
+    gix_first: bool,
+    results: &mut Vec<MetricResult>,
+) {
+    let git = Path::new("git");
+    let status_pathspec = ".";
+    let history_path = "history/hot.txt";
+    let order_note = if gix_first {
+        "Execution order: gix before Git CLI.".to_string()
+    } else {
+        "Execution order: Git CLI before gix.".to_string()
+    };
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_status_cli",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures git status --porcelain=v1 -z --untracked-files=all.".to_string(),
+            "The path scope is the repository root.".to_string(),
+            order_note.clone(),
+        ],
+        |_| {
+            let output = capture_command(
+                git,
+                vcs_dir,
+                &[
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--",
+                    status_pathspec,
+                ],
+            )?;
+            Ok(
+                WorkAmount::items(config.vcs_files as u64).with_details(json!({
+                    "output_bytes": output.stdout.len(),
+                })),
+            )
+        },
+    );
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_log_cli_first_100",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures git log -n 100 using short hashes and subjects.".to_string(),
+            "The fixture contains exactly 100 commits.".to_string(),
+            order_note.clone(),
+        ],
+        |_| {
+            let output = capture_command(git, vcs_dir, &["log", "-n", "100", "--format=%h %s"])?;
+            let count = String::from_utf8_lossy(&output.stdout).lines().count();
+            if count != 100 {
+                return Err(format!("expected 100 log lines, received {count}"));
+            }
+            Ok(WorkAmount::items(100))
+        },
+    );
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_blame_cli",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures git blame --line-porcelain for one 64-line file.".to_string(),
+            "The path has 100 commits in its ancestry.".to_string(),
+            order_note.clone(),
+        ],
+        |_| {
+            let output = capture_command(
+                git,
+                vcs_dir,
+                &["blame", "--line-porcelain", "--", history_path],
+            )?;
+            if String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+                return Err("git blame produced no output".to_string());
+            }
+            Ok(WorkAmount::items(64))
+        },
+    );
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_diff_cli",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures git diff --numstat between HEAD^ and HEAD for one file.".to_string(),
+            "This is a commit-to-commit diff, not a worktree render.".to_string(),
+            order_note.clone(),
+        ],
+        |_| {
+            let output = capture_command(
+                git,
+                vcs_dir,
+                &["diff", "--numstat", "HEAD^", "HEAD", "--", history_path],
+            )?;
+            let files = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            if files != 1 {
+                return Err(format!("expected one changed file, received {files}"));
+            }
+            Ok(WorkAmount::items(1))
+        },
+    );
+}
+
+fn measure_git_gix_scenarios(
+    vcs_dir: &Path,
+    config: &ProfileConfig,
+    gix_bin: Option<&GixBackend>,
+    gix_first: bool,
+    results: &mut Vec<MetricResult>,
+) {
+    let history_path = "history/hot.txt";
+    let order_note = if gix_first {
+        "Execution order: gix before Git CLI.".to_string()
+    } else {
+        "Execution order: Git CLI before gix.".to_string()
+    };
+    let Some(gix) = gix_bin else {
+        record_gap(
+            results,
+            "VCS and context menus",
+            "process",
+            "gix backend comparison (install gix, pass --gix, or set KITE_GIX_BIN)",
+        );
+        return;
+    };
+    let gix_note = format!("gix version: {}", gix.version);
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_status_gix",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures gix status with the simplified output and --no-write.".to_string(),
+            "The external gix process is the comparison boundary.".to_string(),
+            order_note.clone(),
+            gix_note.clone(),
+        ],
+        |_| {
+            capture_command(
+                &gix.path,
+                vcs_dir,
+                &["status", "--untracked=all", "--no-write"],
+            )?;
+            Ok(WorkAmount::items(config.vcs_files as u64))
+        },
+    );
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_log_gix_first_100",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures gix log over the 100-commit fixture.".to_string(),
+            "The external gix process is the comparison boundary.".to_string(),
+            order_note.clone(),
+            gix_note.clone(),
+        ],
+        |_| {
+            capture_command(&gix.path, vcs_dir, &["log"])?;
+            Ok(WorkAmount::items(100))
+        },
+    );
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_blame_gix",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures gix blame for the same 64-line file.".to_string(),
+            "The external gix process is the comparison boundary.".to_string(),
+            order_note.clone(),
+            gix_note.clone(),
+        ],
+        |_| {
+            capture_command(&gix.path, vcs_dir, &["blame", history_path])?;
+            Ok(WorkAmount::items(64))
+        },
+    );
+    measure_scenario(
+        results,
+        "VCS and context menus",
+        "git_diff_gix",
+        "process",
+        config.samples,
+        1,
+        vec![
+            "Measures gix diff tree HEAD^ HEAD.".to_string(),
+            "The external gix process is the comparison boundary.".to_string(),
+            order_note.clone(),
+            gix_note.clone(),
+        ],
+        |_| {
+            capture_command(&gix.path, vcs_dir, &["diff", "tree", "HEAD^", "HEAD"])?;
+            Ok(WorkAmount::items(1))
+        },
+    );
 }
 
 fn measure_devices(config: &ProfileConfig, results: &mut Vec<MetricResult>) -> Result<(), String> {
@@ -3002,6 +3059,14 @@ fn append_git_backend_comparison(output: &mut String, results: &[MetricResult]) 
         .find_map(|note| note.strip_prefix("gix version: "))
     {
         output.push_str(&format!("gix version: `{version}`.\n\n"));
+    }
+    if let Some(order) = results
+        .iter()
+        .filter(|result| result.scenario == "git_status_cli")
+        .flat_map(|result| result.notes.iter())
+        .find_map(|note| note.strip_prefix("Execution order: "))
+    {
+        output.push_str(&format!("Execution order: {order}\n\n"));
     }
     output.push_str("| Operation | CLI p50 ms | gix p50 ms | p50 ratio | CLI p95 ms | gix p95 ms | p95 ratio | n |\n");
     output.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
