@@ -3,6 +3,7 @@ uniffi::setup_scaffolding!();
 pub mod archive;
 pub mod content_search;
 pub mod devices;
+pub mod diff;
 pub mod favorites;
 pub mod ffi;
 #[cfg(windows)]

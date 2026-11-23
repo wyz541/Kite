@@ -8,6 +8,10 @@ use std::time::UNIX_EPOCH;
 use crate::archive::{self, ArchiveFormat, ArchivePhase, ArchiveProgress};
 use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSearchSnapshot};
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
+use crate::diff::{
+    self, DiffContentKind, DiffEndpoint, DiffHunk, DiffLine, DiffRow, DiffRowKind, DiffStats,
+    DiffSyntaxKind, DiffSyntaxSpan, DiffWordRange, GitDiffDocument, GitDiffRequest,
+};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, transfer_entry};
 use crate::git::GitEventSink as _;
@@ -825,6 +829,119 @@ pub struct GitRebaseStateDto {
     pub remaining: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitDiffEndpointDto {
+    Revision { revision: String },
+    Index,
+    WorkingTree,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitDiffRequestDto {
+    pub path: String,
+    pub old: GitDiffEndpointDto,
+    pub new: GitDiffEndpointDto,
+    pub ignore_whitespace: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DiffContentKindDto {
+    Text,
+    Binary,
+    Image,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DiffRowKindDto {
+    File,
+    Hunk,
+    Context,
+    Deletion,
+    Addition,
+    Modification,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DiffWordRangeDto {
+    pub start_utf16: u32,
+    pub end_utf16: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DiffSyntaxKindDto {
+    Keyword,
+    String,
+    Number,
+    Comment,
+    TypeName,
+    Function,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DiffSyntaxSpanDto {
+    pub start_utf16: u32,
+    pub end_utf16: u32,
+    pub kind: DiffSyntaxKindDto,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DiffLineDto {
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub text: String,
+    pub highlighted: Vec<DiffWordRangeDto>,
+    pub syntax: Vec<DiffSyntaxSpanDto>,
+    pub missing_newline: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DiffRowDto {
+    pub kind: DiffRowKindDto,
+    pub text: String,
+    pub left: Option<DiffLineDto>,
+    pub right: Option<DiffLineDto>,
+    pub change_index: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct DiffStatsDto {
+    pub files: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    pub hunks: u32,
+    pub old_bytes: Option<u64>,
+    pub new_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DiffHunkDto {
+    pub header: String,
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    pub first_row: u32,
+    pub row_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct GitDiffDocumentDto {
+    pub repository_root: String,
+    pub relative_path: String,
+    pub old_label: String,
+    pub new_label: String,
+    pub rows: Vec<DiffRowDto>,
+    pub hunks: Vec<DiffHunkDto>,
+    pub change_rows: Vec<u32>,
+    pub stats: DiffStatsDto,
+    pub content_kind: DiffContentKindDto,
+    pub large_file: bool,
+    pub truncated: bool,
+    pub message: Option<String>,
+    pub old_image: Option<Vec<u8>>,
+    pub new_image: Option<Vec<u8>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum VcsToolDto {
     Git,
@@ -1633,6 +1750,13 @@ impl KiteCore {
             local_exclude,
         )
         .map_err(KiteError::operation)
+    }
+
+    /// Structured two-endpoint diff for the shared native diff viewers.
+    pub fn git_diff(&self, request: GitDiffRequestDto) -> Result<GitDiffDocumentDto, KiteError> {
+        diff::git_diff(&git_diff_request(request))
+            .map(git_diff_document_dto)
+            .map_err(KiteError::operation)
     }
 
     pub fn run_vcs_operation(
@@ -2799,6 +2923,123 @@ fn git_reset_mode(mode: GitResetModeDto) -> GitResetMode {
         GitResetModeDto::Mixed => GitResetMode::Mixed,
         GitResetModeDto::Hard => GitResetMode::Hard,
         GitResetModeDto::Keep => GitResetMode::Keep,
+    }
+}
+
+fn git_diff_request(request: GitDiffRequestDto) -> GitDiffRequest {
+    GitDiffRequest {
+        path: PathBuf::from(request.path),
+        old: git_diff_endpoint(request.old),
+        new: git_diff_endpoint(request.new),
+        ignore_whitespace: request.ignore_whitespace,
+    }
+}
+
+fn git_diff_endpoint(endpoint: GitDiffEndpointDto) -> DiffEndpoint {
+    match endpoint {
+        GitDiffEndpointDto::Revision { revision } => DiffEndpoint::Revision(revision),
+        GitDiffEndpointDto::Index => DiffEndpoint::Index,
+        GitDiffEndpointDto::WorkingTree => DiffEndpoint::WorkingTree,
+    }
+}
+
+fn git_diff_document_dto(document: GitDiffDocument) -> GitDiffDocumentDto {
+    GitDiffDocumentDto {
+        repository_root: document.repository_root.to_string_lossy().into_owned(),
+        relative_path: document.relative_path,
+        old_label: document.old_label,
+        new_label: document.new_label,
+        rows: document.rows.into_iter().map(diff_row_dto).collect(),
+        hunks: document.hunks.into_iter().map(diff_hunk_dto).collect(),
+        change_rows: document.change_rows,
+        stats: diff_stats_dto(document.stats),
+        content_kind: match document.content_kind {
+            DiffContentKind::Text => DiffContentKindDto::Text,
+            DiffContentKind::Binary => DiffContentKindDto::Binary,
+            DiffContentKind::Image => DiffContentKindDto::Image,
+        },
+        large_file: document.large_file,
+        truncated: document.truncated,
+        message: document.message,
+        old_image: document.old_image,
+        new_image: document.new_image,
+    }
+}
+
+fn diff_row_dto(row: DiffRow) -> DiffRowDto {
+    DiffRowDto {
+        kind: match row.kind {
+            DiffRowKind::File => DiffRowKindDto::File,
+            DiffRowKind::Hunk => DiffRowKindDto::Hunk,
+            DiffRowKind::Context => DiffRowKindDto::Context,
+            DiffRowKind::Deletion => DiffRowKindDto::Deletion,
+            DiffRowKind::Addition => DiffRowKindDto::Addition,
+            DiffRowKind::Modification => DiffRowKindDto::Modification,
+        },
+        text: row.text,
+        left: row.left.map(diff_line_dto),
+        right: row.right.map(diff_line_dto),
+        change_index: row.change_index,
+    }
+}
+
+fn diff_line_dto(line: DiffLine) -> DiffLineDto {
+    DiffLineDto {
+        old_line: line.old_line,
+        new_line: line.new_line,
+        text: line.text,
+        highlighted: line
+            .highlighted
+            .into_iter()
+            .map(diff_word_range_dto)
+            .collect(),
+        syntax: line.syntax.into_iter().map(diff_syntax_span_dto).collect(),
+        missing_newline: line.missing_newline,
+    }
+}
+
+fn diff_syntax_span_dto(span: DiffSyntaxSpan) -> DiffSyntaxSpanDto {
+    DiffSyntaxSpanDto {
+        start_utf16: span.start_utf16,
+        end_utf16: span.end_utf16,
+        kind: match span.kind {
+            DiffSyntaxKind::Keyword => DiffSyntaxKindDto::Keyword,
+            DiffSyntaxKind::String => DiffSyntaxKindDto::String,
+            DiffSyntaxKind::Number => DiffSyntaxKindDto::Number,
+            DiffSyntaxKind::Comment => DiffSyntaxKindDto::Comment,
+            DiffSyntaxKind::TypeName => DiffSyntaxKindDto::TypeName,
+            DiffSyntaxKind::Function => DiffSyntaxKindDto::Function,
+        },
+    }
+}
+
+fn diff_word_range_dto(range: DiffWordRange) -> DiffWordRangeDto {
+    DiffWordRangeDto {
+        start_utf16: range.start_utf16,
+        end_utf16: range.end_utf16,
+    }
+}
+
+fn diff_stats_dto(stats: DiffStats) -> DiffStatsDto {
+    DiffStatsDto {
+        files: stats.files,
+        additions: stats.additions,
+        deletions: stats.deletions,
+        hunks: stats.hunks,
+        old_bytes: stats.old_bytes,
+        new_bytes: stats.new_bytes,
+    }
+}
+
+fn diff_hunk_dto(hunk: DiffHunk) -> DiffHunkDto {
+    DiffHunkDto {
+        header: hunk.header,
+        old_start: hunk.old_start,
+        old_count: hunk.old_count,
+        new_start: hunk.new_start,
+        new_count: hunk.new_count,
+        first_row: hunk.first_row,
+        row_count: hunk.row_count,
     }
 }
 

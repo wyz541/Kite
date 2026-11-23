@@ -8,6 +8,7 @@ use crate::actions::{
     GitClientSkip, GitClientStash, GitClientToggleConsole,
 };
 
+use crate::diff_viewer_window;
 use crate::git_tools_window::open_git_tools_window;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -20,6 +21,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kite_core::diff::DiffEndpoint;
 use kite_core::git::{GitOperationAction, GitOperationState, run_git_operation_control};
 use kite_core::git_changes::{
     self, GitChangeGroup, GitDiffScope, GitFileChangesDiff, GitHunkLineKind, GitLineSelection,
@@ -1211,6 +1213,25 @@ impl GitClientWindow {
                             })),
                     )
                     .child(
+                        Button::new("git-client-diff-viewer")
+                            .ghost()
+                            .compact()
+                            .label("比较")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                let result = diff_viewer_window::open_diff_viewer_window(
+                                    this.repository_root.clone(),
+                                    DiffEndpoint::Revision("HEAD".to_string()),
+                                    DiffEndpoint::WorkingTree,
+                                    cx,
+                                );
+                                match result {
+                                    Ok(()) => this.error = None,
+                                    Err(error) => this.error = Some(error.into()),
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("git-client-refresh")
                             .ghost()
                             .compact()
@@ -1766,7 +1787,33 @@ impl GitClientWindow {
             .as_ref()
             .map(|selection| selection.path.clone());
         let group = self.selected.as_ref().map(|selection| selection.group);
-        let mut actions = h_flex().gap_1();
+        let viewer_path = self.repository_root.join(&diff.path);
+        let (viewer_old, viewer_new) = match diff.scope {
+            GitDiffScope::Staged => (
+                DiffEndpoint::Revision("HEAD".to_string()),
+                DiffEndpoint::Index,
+            ),
+            GitDiffScope::Unstaged => (DiffEndpoint::Index, DiffEndpoint::WorkingTree),
+        };
+        let mut actions = h_flex().gap_1().child(
+            Button::new("git-client-open-diff-viewer")
+                .ghost()
+                .compact()
+                .label("Diff 查看器")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let result = diff_viewer_window::open_diff_viewer_window(
+                        viewer_path.clone(),
+                        viewer_old.clone(),
+                        viewer_new.clone(),
+                        cx,
+                    );
+                    match result {
+                        Ok(()) => this.error = None,
+                        Err(error) => this.error = Some(error.into()),
+                    }
+                    cx.notify();
+                })),
+        );
         if let Some(path) = path {
             match group {
                 Some(GitChangeGroup::Staged) if count > 0 => {

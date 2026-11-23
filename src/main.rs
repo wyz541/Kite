@@ -10,6 +10,8 @@ mod archive_progress_window;
 #[cfg(windows)]
 mod context_menu;
 #[cfg(windows)]
+mod diff_viewer_window;
+#[cfg(windows)]
 mod explorer_integration;
 #[cfg(windows)]
 mod file_clipboard;
