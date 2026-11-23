@@ -68,6 +68,7 @@ $summary = [ordered]@{
     uploads = @()
 }
 $failure = $null
+$kite = $null
 
 function Track-Process {
     param([System.Diagnostics.Process]$Process)
@@ -408,8 +409,8 @@ function Test-BrowserUpload {
         } else {
             $kiteWindow = [System.Windows.Automation.AutomationElement]::FromHandle($KiteHandle)
             $rect = $kiteWindow.Current.BoundingRectangle
-            # The E2E directory contains one file in the rightmost active column.
-            $fromX = [int]($rect.Left + ($rect.Width * 0.75))
+            # The current file column sits between the sidebar and preview pane.
+            $fromX = [int]($rect.Left + ($rect.Width * 0.45))
             $columnHeaderBottom = Find-ColumnHeaderBottom -ProcessId $KiteProcess.Id
             if ($null -ne $columnHeaderBottom) {
                 # The first file row follows the 32 px column header and 30 px row.
