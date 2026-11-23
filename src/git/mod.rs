@@ -7,19 +7,26 @@
 mod command;
 mod error;
 mod events;
+#[allow(dead_code)]
 mod external;
 mod operation;
 mod repository;
+#[allow(dead_code)]
 mod status;
 mod watch;
 
+#[cfg(test)]
+use status::GitPathStatus;
+
 pub mod preview;
+pub mod remote;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
+#[cfg(test)]
 use crate::fs::{FileEntry, VcsStatus};
 
 pub use command::{
@@ -43,8 +50,6 @@ pub use repository::{
     repository_state,
 };
 pub use watch::{GitRepositoryEvent, GitRepositoryWatcher};
-
-pub(crate) use status::{GitPathStatus, git_statuses};
 
 #[derive(Clone)]
 pub struct GitService {
@@ -390,6 +395,7 @@ impl Drop for GitOperationTask {
 
 /// Compat shim for the existing VCS status snapshot. Git data now comes from
 /// the Git service while SVN remains in `vcs.rs`.
+#[cfg(test)]
 pub(crate) fn apply_git_statuses(
     entries: &mut [FileEntry],
     view_root: &Path,
@@ -446,8 +452,6 @@ pub(crate) fn apply_git_statuses(
         entry.git_status = crate::fs::worse_status(exact.get(&key).copied(), aggregate);
     }
 }
-
-pub(crate) use external::open_log_window;
 
 #[cfg(test)]
 mod tests {

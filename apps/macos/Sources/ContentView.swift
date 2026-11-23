@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var model: KiteModel
+    @ObservedObject private var gitService = KiteGitService.shared
 
     @AppStorage("kite.macos.sidebar-visible") private var showsSidebar = true
     @AppStorage("kite.macos.preview-visible") private var showsPreview = true
@@ -275,6 +276,10 @@ struct ContentView: View {
         let selectedEntries = model.selectedColumnEntries
         let selectedPaths = selectedEntries.map(\.path)
         return HStack(spacing: 2) {
+            KiteGitMenu(model: model, path: model.currentPath)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
             KiteToolbarIconButton(
                 systemName: "magnifyingglass",
                 title: "全局搜索 (⌘⇧F)",
@@ -397,6 +402,30 @@ struct ContentView: View {
                     .lineLimit(1)
             }
 
+            if let operation = gitService.operation {
+                if let fraction = operation.progress.fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 96)
+                } else {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+
+                Text(operation.progress.message.isEmpty ? operation.label : operation.progress.message)
+                    .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Button("取消") {
+                    gitService.cancel()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .disabled(operation.progress.cancelled)
+            }
+
             Spacer(minLength: 8)
 
             if selectedEntries.count > 1 {
@@ -456,6 +485,9 @@ struct ContentView: View {
     private var statusText: String {
         if let error = model.errorMessage {
             return error
+        }
+        if let gitStatus = model.gitStatusMessage {
+            return gitStatus
         }
         if let update = model.updateStatusMessage {
             return update

@@ -246,10 +246,27 @@ struct KiteSettingsView: View {
                         .toggleStyle(.switch)
                         .controlSize(.small)
                 }
+                SettingsDivider()
+                SettingsRow(
+                    title: "定时获取 Git 更新",
+                    detail: "每 15 分钟在后台获取当前仓库，不会自动合并。"
+                ) {
+                    Toggle("", isOn: gitAutoFetchBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
             }
         } footer: {
-            Text("关闭此选项后，Kite 下次启动时打开个人文件夹。")
+            Text("关闭会话恢复后，Kite 下次启动时打开个人文件夹。定时获取默认关闭。")
         }
+    }
+
+    private var gitAutoFetchBinding: Binding<Bool> {
+        Binding(
+            get: { model.gitAutoFetchEnabled },
+            set: { model.setGitAutoFetchEnabled($0) }
+        )
     }
 
     private var appearanceSettings: some View {

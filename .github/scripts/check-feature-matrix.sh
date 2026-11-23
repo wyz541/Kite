@@ -21,6 +21,7 @@ required_features=(
   "Git 客户端"
   "Git 客户端变更与行级暂存"
   "Git Stash、Reset、Revert 与 Cherry-pick"
+  "Git 远程、Fetch/Pull/Push、克隆与初始化"
 )
 
 failed=false

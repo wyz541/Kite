@@ -349,7 +349,6 @@ private struct KiteGitClientWindowView: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
-                .keyboardShortcut(.f1, modifiers: [])
             }
             HStack(spacing: 8) {
                 if let statusMessage {
