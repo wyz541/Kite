@@ -14,6 +14,8 @@ mod explorer_integration;
 #[cfg(windows)]
 mod file_clipboard;
 #[cfg(windows)]
+mod git_merge_window;
+#[cfg(windows)]
 mod global_search_window;
 #[cfg(windows)]
 mod preview_window;

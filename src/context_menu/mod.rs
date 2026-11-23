@@ -512,6 +512,12 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
             VcsMenuCommand::GitFetch,
             enabled,
         ),
+        menu_item(
+            "合并与冲突解决…",
+            IconName::GitBranch,
+            VcsMenuCommand::GitMerge,
+            enabled,
+        ),
         ContextMenuNode::Separator,
         menu_item(
             "显示差异",
@@ -911,6 +917,7 @@ mod tests {
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPull)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPush)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitFetch)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitMerge)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitDiff)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitLog)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRevert)));

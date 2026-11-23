@@ -14,10 +14,10 @@ Kite 的 Git 能力分两层交付：
 
 Git 逻辑只在 Rust Core 实现一次。
 
-- Core：`src/git.rs` 读取单个路径的 Git 摘要和差异。`src/vcs.rs` 继续负责状态徽标和写操作。
-- FFI：`src/ffi.rs` 通过 UniFFI 导出 `git_path_summary`、`git_file_diff`、`run_vcs_operation` 和 `run_vcs_query`。
-- Windows：GPUI 分栏预览直接调用 `kite_core::git`。
-- macOS：SwiftUI `KiteGitPreviewSection` 通过 `KiteModel` 调用 FFI。
+- Core：`src/git.rs` 读取单个路径的 Git 摘要、差异、分支、冲突和三方合并数据。`src/vcs.rs` 继续负责状态徽标与通用 VCS 操作。
+- FFI：`src/ffi.rs` 通过 UniFFI 导出预览查询、合并、冲突解决、继续和中止操作。
+- Windows：GPUI 预览与合并窗口直接调用 `kite_core::git`。
+- macOS：SwiftUI 预览与合并窗口通过 `KiteModel` 调用 FFI。
 
 macOS 此前没有 Git 写操作入口。导出 `run_vcs_operation` 和 `run_vcs_query` 补齐这个缺口。
 
@@ -73,6 +73,50 @@ Windows 使用 `CREATE_NO_WINDOW`，不弹出控制台窗口。
 - 快捷操作：查看差异、暂存、取消暂存、历史。
 
 状态颜色沿用分栏徽标的配色：冲突、删除为红色；新增、重命名为绿色；修改为橙色；未跟踪为青色。
+
+## 合并与冲突解决
+
+### 合并策略
+
+`git_merge(path, spec)` 使用 git CLI 执行普通、`--no-ff`、`--ff-only` 或 `--squash` 合并。目标分支名作为独立参数传递，拒绝以 `-` 开头的输入；合并前用 `rev-parse --verify <target>^{commit}` 校验目标。
+
+普通合并和保留合并提交可传入自定义提交说明。压缩合并只有在用户提供说明时才创建提交；说明留空时只暂存结果，避免静默提交。
+
+### 冲突模型
+
+`git_conflicts(path)` 通过 `git ls-files -u -z` 读取 stage 1/2/3，并返回：
+
+- 双方修改、双方新增、自己删除、对方删除、重命名和其他冲突。
+- 每个冲突的基线、自己、对方路径及是否存在。
+- 二进制标记；检测到 NUL 或非 UTF-8 内容时不进入文本合并。
+- 进行中的 merge、rebase、cherry-pick、revert 或 bisect 状态。
+- 是否可以继续或中止。
+
+重命名冲突由“stage 1 原路径 + stage 2 自己的新路径 + stage 3 对方的新路径”组成。选择一边会删除另外两个路径并暂存选中的路径；选择两边会暂存两份新文件并删除原路径。
+
+### 三方合并
+
+`git_three_way_merge(path, conflict)` 将 stage 2、stage 1、stage 3 写入临时文件，调用 `git merge-file -p --diff3`。Core 解析出的结果包括：
+
+- 带冲突标记的完整合并文本。
+- 按行标记的上下文、自己、基线、对方和标记行。
+- 每个冲突块的两个版本和基线版本。
+
+用户逐个冲突块选择自己、对方或两边后，`apply_conflict_choices` 生成最终文本。`git_resolve_conflict` 拒绝仍含完整冲突标记的文本，写回工作区后执行 `git add -A -- <path>`。删除型解决方式移除文件后同样暂存删除。
+
+### 外部工具
+
+`git_open_merge_tool` 只启动用户配置的 `merge.tool`，使用 `git mergetool --no-prompt --tool <tool>`。未配置该键时返回可操作错误，不回退到终端型编辑器。
+
+### 界面
+
+Windows `GitMergeWindow` 与 macOS `KiteGitMergeWindowView` 使用同一 Core 数据：
+
+- 顶部选择目标分支、合并策略和可选提交说明。
+- 左侧冲突文件列表；二进制冲突和重命名冲突使用整文件选择。
+- 文本冲突显示自己、对方、合并结果三列，冲突行按来源着色，当前冲突块高亮。
+- 可以逐块选择自己、对方或两边，也可以切换手动编辑。
+- 解决后可继续原操作；中止操作会先要求确认。
 
 ## 未覆盖
 

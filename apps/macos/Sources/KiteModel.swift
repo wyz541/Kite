@@ -1711,6 +1711,117 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
+    func gitMergeBranches(path: String) async throws -> [GitBranchSummaryDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitMergeBranches(path: path)
+        }.value
+    }
+
+    func mergeGit(path: String, request: GitMergeRequestDto) async throws -> GitMergeOutcomeDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitMerge(path: path, request: request)
+        }.value
+        refresh()
+        return result
+    }
+
+    func gitConflicts(path: String) async throws -> GitConflictStateDto? {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitConflicts(path: path)
+        }.value
+    }
+
+    func gitConflictSides(
+        path: String,
+        conflict: GitConflictEntryDto
+    ) async throws -> GitConflictSidesDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitConflictSides(path: path, conflict: conflict)
+        }.value
+    }
+
+    func gitThreeWayMerge(
+        path: String,
+        conflict: GitConflictEntryDto
+    ) async throws -> GitThreeWayMergeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitThreeWayMerge(path: path, conflict: conflict)
+        }.value
+    }
+
+    func gitApplyConflictChoices(
+        mergedText: String,
+        choices: [GitConflictChoiceDto]
+    ) async -> String {
+        let core = self.core
+        return await Task.detached(priority: .userInitiated) {
+            core.gitApplyConflictChoices(mergedText: mergedText, choices: choices)
+        }.value
+    }
+
+    func gitResolveConflict(
+        path: String,
+        relativePath: String,
+        content: String?
+    ) async throws {
+        let core = self.core
+        try await Task.detached(priority: .userInitiated) {
+            try core.gitResolveConflict(
+                path: path,
+                relativePath: relativePath,
+                content: content
+            )
+        }.value
+        refresh()
+    }
+
+    func gitChooseConflictSide(
+        path: String,
+        conflict: GitConflictEntryDto,
+        side: GitConflictSideDto
+    ) async throws {
+        let core = self.core
+        try await Task.detached(priority: .userInitiated) {
+            try core.gitChooseConflictSide(path: path, conflict: conflict, side: side)
+        }.value
+        refresh()
+    }
+
+    func gitContinueOperation(path: String) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitContinueOperation(path: path)
+        }.value
+        refresh()
+        return message
+    }
+
+    func gitAbortOperation(path: String) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitAbortOperation(path: path)
+        }.value
+        refresh()
+        return message
+    }
+
+    func gitOpenMergeTool(
+        path: String,
+        conflict: GitConflictEntryDto
+    ) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitOpenMergeTool(path: path, conflict: conflict)
+        }.value
+        refresh()
+        return message
+    }
+
     /// Runs a Git or SVN operation, refreshes the columns, and returns the
     /// status message for the caller to show.
     @discardableResult

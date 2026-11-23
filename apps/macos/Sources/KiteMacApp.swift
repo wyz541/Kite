@@ -192,6 +192,15 @@ struct KiteMacApp: App {
                 }
                 .keyboardShortcut("r", modifiers: [.command])
             }
+            CommandMenu("Git") {
+                Button("合并与冲突解决…") {
+                    KiteGitMergeWindowController.shared.show(
+                        model: model,
+                        path: model.currentPath
+                    )
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+            }
             CommandMenu("页签") {
                 Button("新建页签") {
                     model.newTab()

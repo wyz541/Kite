@@ -22,6 +22,7 @@ use crate::fs::{
     format_size, load_directory, open_file, recycle_entry, rename_entry, search_directory,
     sort_entries, transfer_entry, validate_name, worse_status,
 };
+use crate::git_merge_window::GitMergeWindow;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -2695,6 +2696,36 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn open_git_merge_window(
+        &mut self,
+        path: PathBuf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = "Git 合并与冲突解决";
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some(title.into()),
+                ..Default::default()
+            }),
+            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+            window_min_size: Some(size(px(980.), px(640.))),
+            ..Default::default()
+        };
+        match gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| GitMergeWindow::new(path, window, cx))
+        }) {
+            Ok(_) => {
+                self.error = None;
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(format!("无法打开 Git 合并窗口：{error}").into());
+            }
+        }
+        cx.notify();
+    }
+
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let shell_path = shell_fs::is_shell_namespace_path(&path);
         if path.is_dir() || (shell_path && shell_fs::is_directory(&path)) {
@@ -3221,6 +3252,7 @@ impl KiteApp {
             VcsMenuCommand::GitFetch => {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Fetch, path, window, cx)
             }
+            VcsMenuCommand::GitMerge => self.open_git_merge_window(path, window, cx),
             VcsMenuCommand::GitDiff => {
                 self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
             }
@@ -6316,6 +6348,8 @@ impl KiteApp {
 
         if !summary.is_directory && !summary.ignored {
             let changed = summary.staged_status.is_some() || summary.unstaged_status.is_some();
+            let conflicted = summary.staged_status == Some(VcsStatus::Conflicted)
+                || summary.unstaged_status == Some(VcsStatus::Conflicted);
             let path = preview.path.clone();
             let mut actions = h_flex().gap_1().flex_wrap();
             if changed {
@@ -6333,7 +6367,18 @@ impl KiteApp {
                         })),
                 );
             }
-            if summary.unstaged_status.is_some() {
+            if conflicted {
+                let path = path.clone();
+                actions = actions.child(
+                    Button::new("column-preview-git-resolve")
+                        .ghost()
+                        .compact()
+                        .label("解决冲突")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_git_merge_window(path.clone(), window, cx);
+                        })),
+                );
+            } else if summary.unstaged_status.is_some() {
                 let path = path.clone();
                 actions = actions.child(
                     Button::new("column-preview-git-stage")
@@ -6351,7 +6396,7 @@ impl KiteApp {
                         })),
                 );
             }
-            if summary.staged_status.is_some() {
+            if !conflicted && summary.staged_status.is_some() {
                 let path = path.clone();
                 actions = actions.child(
                     Button::new("column-preview-git-unstage")

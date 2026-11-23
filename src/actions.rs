@@ -126,6 +126,7 @@ pub enum VcsMenuCommand {
     GitPull,
     GitPush,
     GitFetch,
+    GitMerge,
     GitDiff,
     GitLog,
     GitRevert,

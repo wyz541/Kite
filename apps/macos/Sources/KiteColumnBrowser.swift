@@ -1748,6 +1748,21 @@ private struct KiteEntryMenu: View {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
         }
 
+        if model.isGitAvailable(forEntryPath: entry.path) {
+            Menu {
+                Button {
+                    let repositoryPath = entry.isDirectory
+                        ? entry.path
+                        : (entry.path as NSString).deletingLastPathComponent
+                    KiteGitMergeWindowController.shared.show(model: model, path: repositoryPath)
+                } label: {
+                    Label("合并与冲突解决…", systemImage: "arrow.triangle.merge")
+                }
+            } label: {
+                Label("Git", systemImage: "arrow.triangle.branch")
+            }
+        }
+
         Divider()
 
         Button {
