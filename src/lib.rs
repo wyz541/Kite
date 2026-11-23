@@ -9,11 +9,14 @@ pub mod ffi;
 pub mod file_watcher;
 pub mod fs;
 pub mod git;
+pub mod git_branches;
+pub mod git_changes;
 pub mod global_name_search;
 pub mod indexed_search;
 pub mod name_index;
 pub mod perf_trace;
 pub mod platform;
+pub mod plugins;
 pub mod preview;
 #[cfg(windows)]
 pub mod recycle_bin;

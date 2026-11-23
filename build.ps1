@@ -12,7 +12,7 @@ $targetRoot = if ($env:CARGO_TARGET_DIR) {
     Join-Path $root 'target'
 }
 $binary = Join-Path $targetRoot 'release\kite-explorer.exe'
-$version = '0.6.88'
+$version = '0.6.89'
 $releaseName = "Kite-v$version-windows-x64"
 $staging = Join-Path $dist $releaseName
 $archive = Join-Path $dist "$releaseName.zip"
@@ -91,7 +91,11 @@ try {
     finally {
         $zipArchive.Dispose()
     }
-    foreach ($requiredEntry in @('Kite.exe', 'kensaku-cli.exe', 'kensaku-daemon.exe')) {
+    $requiredEntries = @('Kite.exe')
+    if (-not $SkipKensaku) {
+        $requiredEntries += @('kensaku-cli.exe', 'kensaku-daemon.exe')
+    }
+    foreach ($requiredEntry in $requiredEntries) {
         if ($zipEntries -notcontains $requiredEntry) {
             throw "Release ZIP is missing $requiredEntry"
         }
@@ -138,7 +142,7 @@ try {
     }
     try {
         Expand-Archive -LiteralPath $distBinary -DestinationPath $bootstrapValidation -Force
-        foreach ($requiredEntry in @('Kite.exe', 'kensaku-cli.exe', 'kensaku-daemon.exe')) {
+        foreach ($requiredEntry in $requiredEntries) {
             if (-not (Test-Path -LiteralPath (Join-Path $bootstrapValidation $requiredEntry))) {
                 throw "Standalone update asset is missing $requiredEntry"
             }

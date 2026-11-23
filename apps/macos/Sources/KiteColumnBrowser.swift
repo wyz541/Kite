@@ -1139,6 +1139,9 @@ private struct KiteBrowserRow: View {
         if let git = entry.gitStatus {
             parts.append("Git \(git)")
         }
+        if let submodule = entry.submoduleStatus {
+            parts.append("Submodule \(submodule)")
+        }
         if let svn = entry.svnStatus {
             parts.append("SVN \(svn)")
         }
@@ -1147,11 +1150,11 @@ private struct KiteBrowserRow: View {
 
     private var vcsBadge: KiteVcsBadge? {
         let git = KiteVcsBadge(value: entry.gitStatus, isSvn: false)
+        let submodule = KiteVcsBadge(value: entry.submoduleStatus, isSvn: false)
         let svn = KiteVcsBadge(value: entry.svnStatus, isSvn: true)
-        if let git, let svn {
-            return svn.rank > git.rank ? svn : git
-        }
-        return git ?? svn
+        return [git, submodule, svn]
+            .compactMap { $0 }
+            .max { $0.rank < $1.rank }
     }
 }
 
@@ -1176,6 +1179,15 @@ private struct KiteVcsBadge {
         let color: Color
         let rank: Int
         switch code {
+        case "✓":
+            color = .green
+            rank = 1
+        case "+":
+            color = .orange
+            rank = 4
+        case "-":
+            color = .gray
+            rank = 2
         case "C", "!", "D":
             color = .red
             rank = code == "C" ? 10 : (code == "!" ? 9 : 8)
@@ -1716,15 +1728,47 @@ private struct KiteEntryMenu: View {
 
         Divider()
 
+        if entry.gitStatus != nil || model.isGitAvailable(forEntryPath: entry.path) {
+            Button {
+                KiteGitClientWindowController.shared.show(
+                    model: model,
+                    repositoryPath: entry.isDirectory
+                        ? entry.path
+                        : (entry.path as NSString).deletingLastPathComponent
+                )
+            } label: {
+                Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
+            }
+
+            Button {
+                KiteGitMergeWindowController.shared.show(
+                    model: model,
+                    path: entry.isDirectory
+                        ? entry.path
+                        : (entry.path as NSString).deletingLastPathComponent
+                )
+            } label: {
+                Label("合并与冲突解决…", systemImage: "arrow.triangle.merge")
+            }
+        }
+
         Button {
             KitePlatform.open(entry.path)
         } label: {
             Label("打开", systemImage: "arrow.up.forward.app")
         }
 
+        if model.isGitAvailable(forEntryPath: entry.path) {
+            Button {
+                model.openGitLog(path: entry.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
+        }
+
         if KitePlatform.isEditableTextFile(entry.path) {
             Button {
-                KitePlatform.openTextEditor(entry.path)
+                KitePlatform.openTextEditor(entry.path, model: model)
             } label: {
                 Label("在 Kite 编辑器中打开", systemImage: "square.and.pencil")
             }
@@ -1746,21 +1790,6 @@ private struct KiteEntryMenu: View {
             KitePlatform.copyPath(entry.path)
         } label: {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
-        }
-
-        if model.isGitAvailable(forEntryPath: entry.path) {
-            Menu {
-                Button {
-                    let repositoryPath = entry.isDirectory
-                        ? entry.path
-                        : (entry.path as NSString).deletingLastPathComponent
-                    KiteGitMergeWindowController.shared.show(model: model, path: repositoryPath)
-                } label: {
-                    Label("合并与冲突解决…", systemImage: "arrow.triangle.merge")
-                }
-            } label: {
-                Label("Git", systemImage: "arrow.triangle.branch")
-            }
         }
 
         Divider()
@@ -1932,6 +1961,26 @@ private struct KiteDirectoryMenu: View {
 
         Divider()
 
+        if column.gitAvailable {
+            Button {
+                KiteGitClientWindowController.shared.show(
+                    model: model,
+                    repositoryPath: column.path
+                )
+            } label: {
+                Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
+            }
+
+            Button {
+                KiteGitMergeWindowController.shared.show(
+                    model: model,
+                    path: column.path
+                )
+            } label: {
+                Label("合并与冲突解决…", systemImage: "arrow.triangle.merge")
+            }
+        }
+
         Button {
             KitePlatform.open(column.path)
         } label: {
@@ -1956,6 +2005,14 @@ private struct KiteDirectoryMenu: View {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
         }
 
+        if column.gitAvailable {
+            Divider()
+            Button {
+                model.openGitLog(path: column.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
+        }
         Divider()
 
         Button {

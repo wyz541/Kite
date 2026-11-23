@@ -480,6 +480,19 @@ impl ContextMenuProvider for RefreshMenuProvider {
 
 fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
     vec![
+        menu_item(
+            "打开 Git 客户端",
+            IconName::GitBranch,
+            VcsMenuCommand::GitClient,
+            enabled,
+        ),
+        menu_item(
+            "合并与冲突解决…",
+            IconName::GitBranch,
+            VcsMenuCommand::GitMerge,
+            enabled,
+        ),
+        ContextMenuNode::Separator,
         menu_item("添加", IconName::GitBranch, VcsMenuCommand::GitAdd, enabled),
         menu_item(
             "取消暂存",
@@ -512,12 +525,6 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
             VcsMenuCommand::GitFetch,
             enabled,
         ),
-        menu_item(
-            "合并与冲突解决…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitMerge,
-            enabled,
-        ),
         ContextMenuNode::Separator,
         menu_item(
             "显示差异",
@@ -529,6 +536,12 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
             "显示日志",
             IconName::GitBranch,
             VcsMenuCommand::GitLog,
+            enabled,
+        ),
+        menu_item(
+            "Worktree 与 Submodule…",
+            IconName::Boxes,
+            VcsMenuCommand::GitTools,
             enabled,
         ),
         ContextMenuNode::Separator,
@@ -911,15 +924,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClient)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitMerge)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitAdd)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitUnstage)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitCommit)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPull)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPush)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitFetch)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitMerge)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitDiff)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitLog)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitTools)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRevert)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClean)));
     }

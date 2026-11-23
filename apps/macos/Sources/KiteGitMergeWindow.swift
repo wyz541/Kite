@@ -73,7 +73,7 @@ private struct KiteGitMergeWindowView: View {
     @ObservedObject var model: KiteModel
     let path: String
 
-    @State private var branches: [GitBranchSummaryDto] = []
+    @State private var branches: [GitBranchDto] = []
     @State private var target = ""
     @State private var strategy: KiteMergeStrategyChoice = .merge
     @State private var mergeMessage = ""
@@ -192,7 +192,7 @@ private struct KiteGitMergeWindowView: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(minWidth: 220)
                     Menu {
-                        ForEach(branches, id: \.name) { branch in
+                        ForEach(branches, id: \.fullName) { branch in
                             Button(branchLabel(branch)) { target = branch.name }
                         }
                         if branches.isEmpty {
@@ -646,9 +646,10 @@ private struct KiteGitMergeWindowView: View {
         busy = true
         errorMessage = nil
         do {
-            async let loadedBranches = model.gitMergeBranches(path: path)
+            async let loadedBranches = model.gitBranchSnapshot(path: path)
             async let loadedState = model.gitConflicts(path: path)
-            branches = try await loadedBranches
+            let branchSnapshot = try await loadedBranches
+            branches = branchSnapshot.localBranches + branchSnapshot.remoteBranches
             conflictState = try await loadedState
             if target.isEmpty, let first = branches.first {
                 target = first.name
@@ -824,8 +825,8 @@ private struct KiteGitMergeWindowView: View {
         return (value as NSString).lastPathComponent
     }
 
-    private func branchLabel(_ branch: GitBranchSummaryDto) -> String {
-        let scope = branch.isRemote ? "远程" : "本地"
+    private func branchLabel(_ branch: GitBranchDto) -> String {
+        let scope = branch.remote == nil ? "本地" : "远程"
         return "\(branch.name)  \(scope) · \(branch.shortHash)"
     }
 

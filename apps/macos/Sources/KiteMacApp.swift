@@ -175,6 +175,23 @@ struct KiteMacApp: App {
                 .disabled(model.updateInProgress)
             }
             CommandMenu("导航") {
+                Button("打开 Git 客户端") {
+                    KiteGitClientWindowController.shared.show(
+                        model: model,
+                        repositoryPath: model.currentPath
+                    )
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+
+                Button("合并与冲突解决…") {
+                    KiteGitMergeWindowController.shared.show(
+                        model: model,
+                        path: model.currentPath
+                    )
+                }
+
+                Divider()
+
                 Button("聚焦路径栏") {
                     model.focusAddress()
                 }
@@ -191,15 +208,6 @@ struct KiteMacApp: App {
                     model.refresh()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
-            }
-            CommandMenu("Git") {
-                Button("合并与冲突解决…") {
-                    KiteGitMergeWindowController.shared.show(
-                        model: model,
-                        path: model.currentPath
-                    )
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
             }
             CommandMenu("页签") {
                 Button("新建页签") {

@@ -15,13 +15,26 @@ enum KitePlatform {
     }
 
     @MainActor
-    static func openTextEditor(_ path: String) {
+    static func openTextEditor(_ path: String, model: KiteModel? = nil) {
         do {
-            try TextEditorWindowController.open(path: path)
+            try TextEditorWindowController.open(path: path, model: model)
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "无法打开文本编辑器"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    @MainActor
+    static func openWorkspaceEditor(_ path: String) {
+        do {
+            try WorkspaceEditorWindowController.open(path: path)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "无法打开工作区编辑器"
             alert.informativeText = error.localizedDescription
             alert.runModal()
         }

@@ -641,6 +641,7 @@ impl NameIndexService {
                 modified: metadata.modified().ok(),
                 extension,
                 git_status: None,
+                submodule_status: None,
                 svn_status: None,
             });
         }

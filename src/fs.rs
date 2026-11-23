@@ -141,6 +141,7 @@ pub struct FileEntry {
     pub modified: Option<SystemTime>,
     pub extension: String,
     pub git_status: Option<VcsStatus>,
+    pub submodule_status: Option<crate::git::GitSubmoduleState>,
     pub svn_status: Option<VcsStatus>,
 }
 
@@ -714,6 +715,7 @@ pub(crate) fn file_entry_from_metadata(
         modified: metadata.modified().ok(),
         extension,
         git_status: None,
+        submodule_status: None,
         svn_status: None,
     }
 }
@@ -932,6 +934,7 @@ mod tests {
                 .map(|value| value.to_string_lossy().to_lowercase())
                 .unwrap_or_default(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         }
     }

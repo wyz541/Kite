@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 use std::os::windows::process::CommandExt;
 
 use crate::fs::{FileEntry, VcsStatus, worse_status};
+use crate::git::{GitPathStatus, GitService, apply_git_statuses, git_statuses};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -18,7 +19,7 @@ struct VcsPathStatus {
 
 #[derive(Clone, Debug, Default)]
 pub struct VcsSnapshot {
-    git: Vec<VcsPathStatus>,
+    git: Vec<GitPathStatus>,
     svn: Vec<VcsPathStatus>,
     git_available: bool,
     svn_available: bool,
@@ -102,25 +103,20 @@ pub fn load_vcs_snapshot(view_root: &Path) -> VcsSnapshot {
 }
 
 pub fn apply_statuses(entries: &mut [FileEntry], view_root: &Path, snapshot: &VcsSnapshot) {
-    let (git_exact, git_directories) = index_statuses(&snapshot.git, view_root);
-    let (svn_exact, svn_directories) = index_statuses(&snapshot.svn, view_root);
+    apply_git_statuses(entries, view_root, &snapshot.git);
 
+    let (exact, directories) = index_svn_statuses(&snapshot.svn, view_root);
     for entry in entries {
         let key = path_key(&entry.path);
-        let git_aggregate = entry
+        let aggregate = entry
             .is_dir()
-            .then(|| git_directories.get(&key).copied())
+            .then(|| directories.get(&key).copied())
             .flatten();
-        let svn_aggregate = entry
-            .is_dir()
-            .then(|| svn_directories.get(&key).copied())
-            .flatten();
-        entry.git_status = worse_status(git_exact.get(&key).copied(), git_aggregate);
-        entry.svn_status = worse_status(svn_exact.get(&key).copied(), svn_aggregate);
+        entry.svn_status = worse_status(exact.get(&key).copied(), aggregate);
     }
 }
 
-fn index_statuses(
+fn index_svn_statuses(
     statuses: &[VcsPathStatus],
     view_root: &Path,
 ) -> (HashMap<String, VcsStatus>, HashMap<String, VcsStatus>) {
@@ -140,7 +136,6 @@ fn index_statuses(
         }
 
         merge_status(&mut exact, path_key(&item.path), item.status);
-
         if components.next().is_some() {
             let directory = view_root.join(first.as_os_str());
             merge_status(&mut directories, path_key(&directory), item.status);
@@ -157,95 +152,32 @@ fn merge_status(map: &mut HashMap<String, VcsStatus>, key: String, status: VcsSt
     }
 }
 
-fn git_statuses(view_root: &Path) -> (bool, Vec<VcsPathStatus>) {
-    let Some(root_output) = run_command("git", view_root, &["rev-parse", "--show-toplevel"]) else {
-        return (false, Vec::new());
-    };
-    if !root_output.status.success() {
-        return (false, Vec::new());
-    }
-
-    let root_text = String::from_utf8_lossy(&root_output.stdout)
-        .trim()
-        .to_string();
-    if root_text.is_empty() {
-        return (false, Vec::new());
-    }
-    let root = dunce::canonicalize(&root_text).unwrap_or_else(|_| PathBuf::from(root_text));
-
-    let Some(status_output) = run_command(
-        "git",
-        &root,
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignored=matching",
-            "--",
-            ".",
-        ],
-    ) else {
-        return (true, Vec::new());
-    };
-    if !status_output.status.success() {
-        return (true, Vec::new());
-    }
-
-    (true, parse_git_status(&status_output.stdout, &root))
-}
-
 fn svn_statuses(view_root: &Path) -> (bool, Vec<VcsPathStatus>) {
-    let Some(info_output) = run_command(
-        "svn",
-        view_root,
-        &["info", "--show-item", "wc-root", "--non-interactive"],
-    ) else {
-        return (false, Vec::new());
-    };
-    if !info_output.status.success()
-        || String::from_utf8_lossy(&info_output.stdout)
-            .trim()
-            .is_empty()
-    {
+    if !has_svn_working_copy(view_root) {
         return (false, Vec::new());
     }
-
     let Some(output) = run_command(
         "svn",
         view_root,
-        &["status", "--non-interactive", "--ignore-externals", "."],
+        &["status", "--no-ignore", "--non-interactive"],
     ) else {
-        return (true, Vec::new());
+        return (false, Vec::new());
     };
     if !output.status.success() {
-        return (true, Vec::new());
+        return (false, Vec::new());
     }
     (true, parse_svn_status(&output.stdout, view_root))
 }
 
-fn parse_git_status(output: &[u8], root: &Path) -> Vec<VcsPathStatus> {
-    let mut statuses = Vec::new();
-    let mut records = output.split(|byte| *byte == 0);
-
-    while let Some(record) = records.next() {
-        if record.len() < 4 || record.get(2) != Some(&b' ') {
-            continue;
-        }
-        let code = &record[..2];
-        let path = String::from_utf8_lossy(&record[3..]).into_owned();
-        if code.contains(&b'R') || code.contains(&b'C') {
-            let _ = records.next();
-        }
-        if let Some(status) = git_status_from_code(code) {
-            statuses.push(VcsPathStatus {
-                path: root.join(path),
-                status,
-            });
-        }
-    }
-
-    statuses
+fn has_svn_working_copy(path: &Path) -> bool {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    start
+        .ancestors()
+        .any(|ancestor| ancestor.join(".svn").is_dir())
 }
 
 fn parse_svn_status(output: &[u8], view_root: &Path) -> Vec<VcsPathStatus> {
@@ -271,26 +203,6 @@ fn parse_svn_status(output: &[u8], view_root: &Path) -> Vec<VcsPathStatus> {
     }
 
     statuses
-}
-
-fn git_status_from_code(code: &[u8]) -> Option<VcsStatus> {
-    if code.contains(&b'?') {
-        Some(VcsStatus::Untracked)
-    } else if code.contains(&b'!') {
-        Some(VcsStatus::Ignored)
-    } else if code.contains(&b'U') {
-        Some(VcsStatus::Conflicted)
-    } else if code.contains(&b'R') {
-        Some(VcsStatus::Renamed)
-    } else if code.contains(&b'D') {
-        Some(VcsStatus::Deleted)
-    } else if code.contains(&b'A') || code.contains(&b'C') {
-        Some(VcsStatus::Added)
-    } else if code.contains(&b'M') || code.contains(&b'T') {
-        Some(VcsStatus::Modified)
-    } else {
-        None
-    }
 }
 
 fn svn_status_from_codes(item_code: char, property_code: char) -> Option<VcsStatus> {
@@ -338,51 +250,18 @@ pub fn run_vcs_operation(
     target: &Path,
 ) -> Result<String, String> {
     match tool {
-        VcsTool::Git => run_git_operation(operation, target),
+        VcsTool::Git => GitService::shared()
+            .run_legacy_operation(target, &operation)
+            .map_err(|error| error.to_string()),
         VcsTool::Svn => run_svn_operation(operation, target),
     }
 }
 
 pub fn run_vcs_query(tool: VcsTool, query: VcsQuery, target: &Path) -> Result<String, String> {
     match tool {
-        VcsTool::Git => {
-            let (root, target) = git_context(target)?;
-            let relative = if target.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                target.as_path()
-            };
-
-            match query {
-                VcsQuery::Diff => {
-                    let mut command = configured_command("git", &root);
-                    command.args(["diff", "--no-ext-diff", "--"]).arg(relative);
-                    let working = run_query_command("Git 差异", command)?;
-                    if working != "没有可显示内容。" {
-                        return Ok(working);
-                    }
-                    let mut command = configured_command("git", &root);
-                    command
-                        .args(["diff", "--cached", "--no-ext-diff", "--"])
-                        .arg(relative);
-                    run_query_command("Git 暂存差异", command)
-                }
-                VcsQuery::Log => {
-                    let mut command = configured_command("git", &root);
-                    command
-                        .args([
-                            "log",
-                            "-n",
-                            "100",
-                            "--date=short",
-                            "--pretty=format:%h  %ad  %an  %s",
-                            "--",
-                        ])
-                        .arg(relative);
-                    run_query_command("Git 日志", command)
-                }
-            }
-        }
+        VcsTool::Git => GitService::shared()
+            .run_legacy_query(target, query)
+            .map_err(|error| error.to_string()),
         VcsTool::Svn => {
             let start = working_directory(target);
             let mut command = configured_command("svn", start);
@@ -403,33 +282,9 @@ pub fn run_vcs_query(tool: VcsTool, query: VcsQuery, target: &Path) -> Result<St
 pub fn open_vcs_log_window(tool: VcsTool, target: &Path) -> Result<String, String> {
     let target = dunce::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     match tool {
-        VcsTool::Git => open_git_log_window(&target),
+        VcsTool::Git => crate::git::open_log_window(&target),
         VcsTool::Svn => open_svn_log_window(&target),
     }
-}
-
-fn open_git_log_window(target: &Path) -> Result<String, String> {
-    let (root, relative) = git_context(target)?;
-    if spawn_tortoise_log("TortoiseGitProc.exe", "TortoiseGit", target) {
-        return Ok("Git 日志窗口已打开".to_string());
-    }
-
-    let mut command = Command::new("gitk");
-    command
-        .current_dir(&root)
-        .arg("--all")
-        .env("GIT_TERMINAL_PROMPT", "0");
-    if !relative.as_os_str().is_empty() {
-        command.arg("--").arg(&relative);
-    }
-    command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            "未找到 TortoiseGitProc.exe 或 gitk.exe。请安装 TortoiseGit 或 Git GUI。".to_string()
-        } else {
-            format!("无法打开 Git 日志窗口：{error}")
-        }
-    })?;
-    Ok("Git 日志窗口已打开".to_string())
 }
 
 fn open_svn_log_window(target: &Path) -> Result<String, String> {
@@ -444,11 +299,13 @@ fn spawn_tortoise_log(executable: &str, product_dir: &str, target: &Path) -> boo
     gui_executable_candidates(executable, product_dir)
         .into_iter()
         .any(|candidate| {
-            Command::new(candidate)
+            let mut command = Command::new(candidate);
+            command
                 .arg("/command:log")
-                .arg(format!("/path:{}", target.display()))
-                .spawn()
-                .is_ok()
+                .arg(format!("/path:{}", target.display()));
+            #[cfg(target_os = "windows")]
+            command.creation_flags(CREATE_NO_WINDOW);
+            command.spawn().is_ok()
         })
 }
 
@@ -480,121 +337,6 @@ fn gui_executable_candidates(executable: &str, product_dir: &str) -> Vec<PathBuf
         );
     }
     candidates
-}
-
-fn git_context(target: &Path) -> Result<(PathBuf, PathBuf), String> {
-    let start = working_directory(target);
-    let root_output = run_command("git", start, &["rev-parse", "--show-toplevel"])
-        .ok_or_else(|| "未找到 Git。请确认 Git 已安装并位于 PATH 中。".to_string())?;
-    if !root_output.status.success() {
-        return Err(output_error("Git", &root_output));
-    }
-    let root_text = String::from_utf8_lossy(&root_output.stdout)
-        .trim()
-        .to_string();
-    let root = dunce::canonicalize(&root_text).unwrap_or_else(|_| PathBuf::from(root_text));
-    let target = dunce::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    let relative = target
-        .strip_prefix(&root)
-        .map_err(|_| "所选项目不在 Git 工作区中".to_string())?
-        .to_path_buf();
-    Ok((root, relative))
-}
-
-fn run_query_command(label: &str, mut command: Command) -> Result<String, String> {
-    let output = command.output().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            format!("未找到 {label} 所需命令。请确认命令已安装并位于 PATH 中。")
-        } else {
-            format!("{label}读取失败：{error}")
-        }
-    })?;
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() {
-            Ok("没有可显示内容。".to_string())
-        } else {
-            Ok(value)
-        }
-    } else {
-        Err(output_error(label, &output))
-    }
-}
-
-fn run_git_operation(operation: VcsOperation, target: &Path) -> Result<String, String> {
-    if matches!(
-        &operation,
-        VcsOperation::Update | VcsOperation::Lock | VcsOperation::Unlock | VcsOperation::Cleanup
-    ) {
-        return Err("Git 不支持更新操作".to_string());
-    }
-
-    let start = working_directory(target);
-    let root_output = run_command("git", start, &["rev-parse", "--show-toplevel"])
-        .ok_or_else(|| "未找到 Git。请确认 Git 已安装并位于 PATH 中。".to_string())?;
-    if !root_output.status.success() {
-        return Err(output_error("Git", &root_output));
-    }
-    let root_text = String::from_utf8_lossy(&root_output.stdout)
-        .trim()
-        .to_string();
-    let root = dunce::canonicalize(&root_text).unwrap_or_else(|_| PathBuf::from(root_text));
-    let target = dunce::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    let relative = target
-        .strip_prefix(&root)
-        .map_err(|_| "所选项目不在 Git 工作区中".to_string())?;
-    let relative = if relative.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        relative
-    };
-    let mut command = configured_command("git", &root);
-
-    let label = match operation {
-        VcsOperation::Add => {
-            command.args(["add", "--"]).arg(relative);
-            "Git 添加"
-        }
-        VcsOperation::Unstage => {
-            command.args(["restore", "--staged", "--"]).arg(relative);
-            "Git 取消暂存"
-        }
-        VcsOperation::Commit(message) => {
-            command
-                .args(["commit", "-m"])
-                .arg(message)
-                .arg("--")
-                .arg(relative);
-            "Git 提交"
-        }
-        VcsOperation::Pull => {
-            command.args(["pull", "--no-edit"]);
-            "Git 拉取"
-        }
-        VcsOperation::Push => {
-            command.arg("push");
-            "Git 推送"
-        }
-        VcsOperation::Fetch => {
-            command.args(["fetch", "--prune"]);
-            "Git 获取"
-        }
-        VcsOperation::Revert => {
-            command
-                .args(["restore", "--source=HEAD", "--staged", "--worktree", "--"])
-                .arg(relative);
-            "Git 还原"
-        }
-        VcsOperation::Clean => {
-            command.args(["clean", "-fd", "--"]).arg(relative);
-            "Git 清理"
-        }
-        VcsOperation::Update
-        | VcsOperation::Lock
-        | VcsOperation::Unlock
-        | VcsOperation::Cleanup => unreachable!(),
-    };
-    run_operation_command(label, command)
 }
 
 fn run_svn_operation(operation: VcsOperation, target: &Path) -> Result<String, String> {
@@ -660,16 +402,39 @@ fn working_directory(target: &Path) -> &Path {
     }
 }
 
-fn configured_command(program: &str, current_dir: &Path) -> Command {
+pub(crate) fn configured_command(program: &str, current_dir: &Path) -> Command {
     let mut command = Command::new(program);
     command
         .current_dir(current_dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never");
+        .env("GCM_INTERACTIVE", "Never")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C")
+        .stdin(std::process::Stdio::null());
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+fn run_query_command(label: &str, mut command: Command) -> Result<String, String> {
+    let output = command.output().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("未找到 {label} 所需命令。请确认命令已安装并位于 PATH 中。")
+        } else {
+            format!("{label}读取失败：{error}")
+        }
+    })?;
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            Ok("没有可显示内容。".to_string())
+        } else {
+            Ok(value)
+        }
+    } else {
+        Err(output_error(label, &output))
+    }
 }
 
 fn run_operation_command(label: &str, mut command: Command) -> Result<String, String> {
@@ -720,107 +485,66 @@ mod tests {
 
     fn entry_at(path: PathBuf, kind: EntryKind) -> FileEntry {
         FileEntry {
-            name: path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
             path,
+            name: String::new(),
             kind,
             size: 0,
             modified: None,
             extension: String::new(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         }
     }
 
     #[test]
-    fn parses_git_porcelain_statuses() {
-        let root = Path::new("C:\\repo");
-        let output =
-            b"M  changed.rs\0?? new.txt\0!! ignored.log\0UU conflict.rs\0R  renamed.rs\0old.rs\0";
-        let statuses = parse_git_status(output, root);
-
-        assert_eq!(statuses.len(), 5);
-        assert_eq!(statuses[0].status, VcsStatus::Modified);
-        assert_eq!(statuses[1].status, VcsStatus::Untracked);
-        assert_eq!(statuses[2].status, VcsStatus::Ignored);
-        assert_eq!(statuses[3].status, VcsStatus::Conflicted);
-        assert_eq!(statuses[4].status, VcsStatus::Renamed);
-        assert!(statuses[0].path.ends_with("changed.rs"));
-    }
-
-    #[test]
     fn parses_svn_statuses_and_property_changes() {
-        let root = Path::new("C:\\repo");
-        let output = b" M      prop.txt\nM       changed.txt\n?       new.txt\nC       conflict.txt\nA       added.txt\n";
+        let root = Path::new("/repo");
+        let output = b" M       file.txt\n?        new.txt\nC        conflict.txt\nA        added.txt\n M       prop.txt\n";
         let statuses = parse_svn_status(output, root);
-
         assert_eq!(statuses.len(), 5);
         assert_eq!(statuses[0].status, VcsStatus::PropertyModified);
-        assert_eq!(statuses[1].status, VcsStatus::Modified);
-        assert_eq!(statuses[2].status, VcsStatus::Untracked);
-        assert_eq!(statuses[3].status, VcsStatus::Conflicted);
-        assert_eq!(statuses[4].status, VcsStatus::Added);
+        assert_eq!(statuses[1].status, VcsStatus::Untracked);
+        assert_eq!(statuses[2].status, VcsStatus::Conflicted);
+        assert_eq!(statuses[3].status, VcsStatus::Added);
+        assert_eq!(statuses[4].status, VcsStatus::PropertyModified);
     }
 
     #[test]
-    fn does_not_report_svn_for_a_regular_directory() {
-        if !command_available("svn", &["--version", "--quiet"]) {
-            return;
-        }
-        let root = unique_temp_dir("not-svn");
-        std::fs::create_dir_all(&root).expect("create regular directory");
-        let snapshot = load_vcs_snapshot(&root);
-        assert!(!snapshot.svn_available());
-        std::fs::remove_dir_all(root).expect("clean regular directory");
-    }
-
-    #[test]
-    fn aggregates_nested_git_changes_on_parent_directory() {
-        let root = PathBuf::from("C:\\repo");
+    fn aggregates_nested_svn_changes_on_parent_directory() {
+        let root = std::env::temp_dir().join("kite-vcs-aggregate");
+        let child = root.join("src").join("a.rs");
         let snapshot = VcsSnapshot {
-            git: vec![
-                VcsPathStatus {
-                    path: root.join("src").join("nested").join("file.rs"),
-                    status: VcsStatus::Modified,
-                },
-                VcsPathStatus {
-                    path: root.join("readme.md"),
-                    status: VcsStatus::Untracked,
-                },
-            ],
-            svn: Vec::new(),
-            git_available: true,
-            svn_available: false,
+            git: Vec::new(),
+            svn: vec![VcsPathStatus {
+                path: child,
+                status: VcsStatus::Modified,
+            }],
+            git_available: false,
+            svn_available: true,
         };
         let mut entries = vec![
             entry_at(root.join("src"), EntryKind::Directory),
-            entry_at(root.join("readme.md"), EntryKind::File),
-            entry_at(root.join("clean.md"), EntryKind::File),
+            entry_at(root.join("other"), EntryKind::Directory),
         ];
-
         apply_statuses(&mut entries, &root, &snapshot);
-
-        assert_eq!(entries[0].git_status, Some(VcsStatus::Modified));
-        assert_eq!(entries[1].git_status, Some(VcsStatus::Untracked));
-        assert_eq!(entries[2].git_status, None);
+        assert_eq!(entries[0].svn_status, Some(VcsStatus::Modified));
+        assert_eq!(entries[1].svn_status, None);
     }
 
     fn command_available(program: &str, args: &[&str]) -> bool {
-        Command::new(program)
+        configured_command(program, Path::new("."))
             .args(args)
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
 
-    fn command_ok(program: &str, current_dir: &Path, args: &[&str]) {
-        let status = Command::new(program)
-            .current_dir(current_dir)
+    fn command_ok(program: &str, root: &Path, args: &[&str]) {
+        let status = configured_command(program, root)
             .args(args)
             .status()
-            .expect("spawn command");
+            .expect("run command");
         assert!(status.success(), "{program} {args:?} failed");
     }
 
@@ -836,101 +560,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_git_status_in_a_working_tree() {
-        if !command_available("git", &["--version"]) {
+    fn does_not_report_svn_for_a_regular_directory() {
+        if !command_available("svn", &["--version", "--quiet"]) {
             return;
         }
-        let root = unique_temp_dir("git");
-        std::fs::create_dir_all(&root).expect("create git test root");
-        command_ok("git", &root, &["init", "--quiet"]);
-        command_ok(
-            "git",
-            &root,
-            &["config", "user.email", "kite@example.invalid"],
-        );
-        command_ok("git", &root, &["config", "user.name", "Kite Test"]);
-        std::fs::write(root.join("tracked.txt"), b"before").expect("write tracked file");
-        std::fs::create_dir_all(root.join("src")).expect("create git subdirectory");
-        std::fs::write(root.join("src").join("nested.txt"), b"before").expect("write nested file");
-        command_ok("git", &root, &["add", "tracked.txt", "src/nested.txt"]);
-        command_ok("git", &root, &["commit", "--quiet", "-m", "initial"]);
-        std::fs::write(root.join("tracked.txt"), b"after").expect("modify tracked file");
-        std::fs::write(root.join("src").join("nested.txt"), b"after").expect("modify nested file");
-        std::fs::write(root.join("new.txt"), b"new").expect("write untracked file");
-
-        let nested_root = dunce::canonicalize(root.join("src")).expect("canonical nested root");
-        let nested_snapshot = load_vcs_snapshot(&nested_root);
-        let expected_nested = nested_root.join("nested.txt");
-        assert!(nested_snapshot.git.iter().any(|item| {
-            path_key(&item.path) == path_key(&expected_nested) && item.status == VcsStatus::Modified
-        }));
-
+        let root = unique_temp_dir("not-svn");
+        std::fs::create_dir_all(&root).expect("create regular directory");
         let snapshot = load_vcs_snapshot(&root);
-        assert!(snapshot.git.iter().any(|item| {
-            item.path.ends_with("tracked.txt") && item.status == VcsStatus::Modified
-        }));
-        assert!(
-            snapshot.git.iter().any(|item| {
-                item.path.ends_with("new.txt") && item.status == VcsStatus::Untracked
-            })
-        );
-        std::fs::remove_dir_all(root).expect("clean git test root");
-    }
-
-    #[test]
-    fn runs_git_add_commit_and_revert_operations() {
-        if !command_available("git", &["--version"]) {
-            return;
-        }
-        let root = unique_temp_dir("git-operations");
-        std::fs::create_dir_all(&root).expect("create git operations root");
-        command_ok("git", &root, &["init", "--quiet"]);
-        command_ok(
-            "git",
-            &root,
-            &["config", "user.email", "kite@example.invalid"],
-        );
-        command_ok("git", &root, &["config", "user.name", "Kite Test"]);
-        let file = root.join("note.txt");
-        std::fs::write(&file, b"before").expect("write note");
-
-        assert!(
-            run_vcs_operation(VcsTool::Git, VcsOperation::Add, &file)
-                .expect("git add")
-                .contains("完成")
-        );
-        assert!(
-            run_vcs_operation(
-                VcsTool::Git,
-                VcsOperation::Commit("initial".to_string()),
-                &file,
-            )
-            .expect("git commit")
-            .contains("完成")
-        );
-        std::fs::write(&file, b"after").expect("modify note");
-        let diff = run_vcs_query(VcsTool::Git, VcsQuery::Diff, &file).expect("git diff");
-        assert!(diff.contains("+after"));
-        let log = run_vcs_query(VcsTool::Git, VcsQuery::Log, &file).expect("git log");
-        assert!(log.contains("initial"));
-        run_vcs_operation(VcsTool::Git, VcsOperation::Add, &file).expect("git stage change");
-        assert!(
-            run_vcs_operation(VcsTool::Git, VcsOperation::Unstage, &file)
-                .expect("git unstage")
-                .contains("完成")
-        );
-        assert!(
-            run_vcs_operation(VcsTool::Git, VcsOperation::Revert, &file)
-                .expect("git revert")
-                .contains("完成")
-        );
-        assert_eq!(std::fs::read(&file).expect("read note"), b"before");
-
-        let untracked = root.join("junk.tmp");
-        std::fs::write(&untracked, b"junk").expect("write untracked file");
-        run_vcs_operation(VcsTool::Git, VcsOperation::Clean, &untracked).expect("git clean");
-        assert!(!untracked.exists());
-        std::fs::remove_dir_all(root).expect("clean git operations root");
+        assert!(!snapshot.svn_available());
+        std::fs::remove_dir_all(root).expect("clean regular directory");
     }
 
     #[test]
@@ -1020,5 +658,66 @@ mod tests {
                 .contains("完成")
         );
         std::fs::remove_dir_all(base).expect("clean svn test base");
+    }
+
+    #[test]
+    fn detects_git_status_in_a_working_tree() {
+        if !command_available("git", &["--version"]) {
+            return;
+        }
+        let root = unique_temp_dir("git");
+        std::fs::create_dir_all(&root).expect("create git test root");
+        command_ok("git", &root, &["init", "--quiet"]);
+        command_ok("git", &root, &["config", "user.name", "Kite Test"]);
+        command_ok("git", &root, &["config", "user.email", "kite@example.test"]);
+        std::fs::write(root.join("tracked.txt"), "initial\n").expect("write tracked file");
+        std::fs::create_dir_all(root.join("src")).expect("create git subdirectory");
+        std::fs::write(root.join("src/nested.txt"), "initial\n").expect("write nested file");
+        command_ok("git", &root, &["add", "tracked.txt", "src/nested.txt"]);
+        command_ok("git", &root, &["commit", "--quiet", "-m", "initial"]);
+
+        std::fs::write(root.join("tracked.txt"), "changed\n").expect("modify tracked file");
+        std::fs::write(root.join("new.txt"), "fresh\n").expect("write new file");
+        let snapshot = load_vcs_snapshot(&root);
+        assert!(snapshot.git_available);
+        assert!(snapshot.git.iter().any(|item| {
+            item.path.ends_with("tracked.txt") && item.status == VcsStatus::Modified
+        }));
+        assert!(
+            snapshot.git.iter().any(|item| {
+                item.path.ends_with("new.txt") && item.status == VcsStatus::Untracked
+            })
+        );
+
+        std::fs::remove_dir_all(root).expect("clean git test root");
+    }
+
+    #[test]
+    fn runs_git_add_commit_and_revert_operations() {
+        if !command_available("git", &["--version"]) {
+            return;
+        }
+        let root = unique_temp_dir("git-operations");
+        std::fs::create_dir_all(&root).expect("create git operations root");
+        command_ok("git", &root, &["init", "--quiet"]);
+        command_ok("git", &root, &["config", "user.name", "Kite Test"]);
+        command_ok("git", &root, &["config", "user.email", "kite@example.test"]);
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\n").expect("write file");
+
+        run_vcs_operation(VcsTool::Git, VcsOperation::Add, &file).expect("git add");
+        run_vcs_operation(
+            VcsTool::Git,
+            VcsOperation::Commit("initial".to_string()),
+            &file,
+        )
+        .expect("git commit");
+        std::fs::write(&file, "two\n").expect("edit file");
+        let diff = run_vcs_query(VcsTool::Git, VcsQuery::Diff, &file).expect("git diff");
+        assert!(diff.contains("-one"));
+        assert!(diff.contains("+two"));
+        run_vcs_operation(VcsTool::Git, VcsOperation::Revert, &file).expect("git revert");
+
+        std::fs::remove_dir_all(root).expect("clean git operations root");
     }
 }

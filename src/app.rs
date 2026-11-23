@@ -22,7 +22,12 @@ use crate::fs::{
     format_size, load_directory, open_file, recycle_entry, rename_entry, search_directory,
     sort_entries, transfer_entry, validate_name, worse_status,
 };
-use crate::git_merge_window::GitMergeWindow;
+
+use crate::git_branches::GitHeadSummary;
+use crate::git_branches_window;
+use crate::git_client_window::open_git_client_window;
+use crate::git_log_window;
+use crate::git_tools_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -40,6 +45,7 @@ use crate::vcs::{
     VcsOperation, VcsQuery, VcsTool, apply_statuses, load_vcs_snapshot, open_vcs_log_window,
     run_vcs_operation, run_vcs_query,
 };
+use crate::workspace_window::WorkspaceWindow;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{SelectableText, TextSelectionHandle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -59,7 +65,8 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
-    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, git_file_diff, git_path_summary,
+    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, GitService, GitWorktree,
+    apply_submodule_statuses, git_file_diff, git_path_summary, git_submodules, git_worktrees,
 };
 pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
@@ -796,6 +803,11 @@ struct ColumnGitPreview {
     diff: Option<Result<Arc<Vec<GitDiffLine>>, SharedString>>,
 }
 
+#[derive(Clone)]
+struct GitToolbarState {
+    worktrees: Vec<GitWorktree>,
+}
+
 enum PreviewScrollbar {
     Lines(UniformListScrollHandle),
     Markdown(ScrollHandle),
@@ -865,6 +877,9 @@ pub struct KiteApp {
     _search_task: Task<()>,
     _column_search_task: Task<()>,
     _vcs_task: Task<()>,
+    git_head: Option<GitHeadSummary>,
+    pending_git_refresh: bool,
+    pending_git_open: Option<PathBuf>,
     view_mode: ViewMode,
     show_path_bar: bool,
     show_sidebar: bool,
@@ -888,6 +903,8 @@ pub struct KiteApp {
     _preview_task: Task<()>,
     column_git_preview: Option<ColumnGitPreview>,
     _git_preview_task: Task<()>,
+    git_toolbar: Option<GitToolbarState>,
+    _git_toolbar_task: Task<()>,
     path_bar_scroll: ScrollHandle,
     path_bar_scroll_pending: bool,
     column_generation: u64,
@@ -1131,6 +1148,9 @@ impl KiteApp {
             _search_task: Task::ready(()),
             _column_search_task: Task::ready(()),
             _vcs_task: Task::ready(()),
+            git_head: None,
+            pending_git_refresh: false,
+            pending_git_open: None,
             view_mode,
             show_path_bar,
             show_sidebar: ui_preferences.sidebar_visible,
@@ -1154,6 +1174,8 @@ impl KiteApp {
             _preview_task: Task::ready(()),
             column_git_preview: None,
             _git_preview_task: Task::ready(()),
+            git_toolbar: None,
+            _git_toolbar_task: Task::ready(()),
             path_bar_scroll: ScrollHandle::new(),
             path_bar_scroll_pending: false,
             column_generation: 0,
@@ -1453,6 +1475,7 @@ impl KiteApp {
             KeyBinding::new("secondary-l", FocusAddress, Some("Kite")),
             KeyBinding::new("secondary-f", FocusSearch, Some("Kite")),
             KeyBinding::new("secondary-shift-f", OpenGlobalSearch, Some("Kite")),
+            KeyBinding::new("secondary-shift-g", OpenGitClient, Some("Kite")),
             KeyBinding::new("secondary-1", ShowListView, Some("Kite")),
             KeyBinding::new("secondary-2", ShowColumnsView, Some("Kite")),
             KeyBinding::new("secondary-t", NewTab, Some("Kite")),
@@ -1485,6 +1508,7 @@ impl KiteApp {
                 MenuItem::action("聚焦路径栏", FocusAddress),
                 MenuItem::separator(),
                 MenuItem::action("全局搜索…", OpenGlobalSearch),
+                MenuItem::action("打开 Git 客户端", OpenGitClient),
             ]),
             Menu::new("显示").items([
                 MenuItem::action("列表视图", ShowListView),
@@ -1494,6 +1518,7 @@ impl KiteApp {
             ]),
             Menu::new("Kite").items([
                 MenuItem::action("设置…", OpenSettings),
+                MenuItem::action("工作区编辑器…", OpenWorkspaceEditor),
                 MenuItem::separator(),
                 MenuItem::action("检查更新…", CheckForUpdates),
                 MenuItem::separator(),
@@ -2247,26 +2272,44 @@ impl KiteApp {
     fn invalidate_vcs(&mut self) {
         self.vcs_generation = self.vcs_generation.wrapping_add(1);
         self._vcs_task = Task::ready(());
+        self.git_head = None;
     }
 
     fn refresh_vcs_statuses(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.vcs_generation = self.vcs_generation.wrapping_add(1);
         if shell_fs::is_shell_namespace_path(&root) {
             self._vcs_task = Task::ready(());
+            self.git_head = None;
             return;
         }
         let generation = self.vcs_generation;
         let status_root = root.clone();
+        let head_root = root.clone();
         self._vcs_task = cx.spawn(async move |this, cx| {
-            let snapshot = cx
-                .background_spawn(async move { load_vcs_snapshot(&status_root) })
+            let (snapshot, git_head, submodules) = cx
+                .background_spawn(async move {
+                    let snapshot = load_vcs_snapshot(&status_root);
+                    let git_head = crate::git_branches::git_head_summary(&head_root)
+                        .ok()
+                        .flatten();
+                    let submodules = if snapshot.git_available() {
+                        git_submodules(&status_root).ok().flatten()
+                    } else {
+                        None
+                    };
+                    (snapshot, git_head, submodules)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.vcs_generation != generation {
                     return;
                 }
+                this.git_head = git_head;
                 this.table.update(cx, |state, cx| {
                     state.delegate_mut().apply_vcs_statuses(&root, &snapshot);
+                    if let Some(submodules) = submodules.as_ref() {
+                        state.delegate_mut().apply_submodule_statuses(submodules);
+                    }
                     state.refresh(cx);
                     cx.notify();
                 });
@@ -2279,10 +2322,43 @@ impl KiteApp {
                     if let Some(search_entries) = pane.search_entries.as_mut() {
                         apply_statuses(search_entries, &root, &snapshot);
                     }
+                    if let Some(submodules) = submodules.as_ref() {
+                        apply_submodule_statuses(&mut pane.directory_entries, submodules);
+                        if let Some(search_entries) = pane.search_entries.as_mut() {
+                            apply_submodule_statuses(search_entries, submodules);
+                        }
+                    }
                     pane.git_available = snapshot.git_available();
                     pane.svn_available = snapshot.svn_available();
                     pane.refresh_view();
                 }
+                this.refresh_git_toolbar(root.clone(), snapshot.git_available(), cx);
+                cx.notify();
+            });
+        });
+    }
+
+    fn refresh_git_toolbar(&mut self, root: PathBuf, git_available: bool, cx: &mut Context<Self>) {
+        if !git_available {
+            self._git_toolbar_task = Task::ready(());
+            self.git_toolbar = None;
+            return;
+        }
+        let generation = self.vcs_generation;
+        self._git_toolbar_task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { git_worktrees(&root) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.vcs_generation != generation {
+                    return;
+                }
+                this.git_toolbar = match result {
+                    Ok(Some(list)) => Some(GitToolbarState {
+                        worktrees: list.worktrees,
+                    }),
+                    _ => None,
+                };
                 cx.notify();
             });
         });
@@ -2696,32 +2772,22 @@ impl KiteApp {
         cx.notify();
     }
 
-    fn open_git_merge_window(
-        &mut self,
-        path: PathBuf,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let title = "Git 合并与冲突解决";
+    fn open_workspace_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.current_dir.clone();
+        let title = format!("Kite 工作区 — {}", root.display());
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some(title.into()),
                 ..Default::default()
             }),
-            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
-            window_min_size: Some(size(px(980.), px(640.))),
+            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+            window_min_size: Some(size(px(860.), px(560.))),
             ..Default::default()
         };
-        match gpui_kit::open_window(options, cx, move |window, cx| {
-            cx.new(|cx| GitMergeWindow::new(path, window, cx))
+        if let Err(error) = gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| WorkspaceWindow::new(root, window, cx))
         }) {
-            Ok(_) => {
-                self.error = None;
-            }
-            Err(error) => {
-                self.notice = None;
-                self.error = Some(format!("无法打开 Git 合并窗口：{error}").into());
-            }
+            self.error = Some(format!("无法打开工作区编辑器：{error}").into());
         }
         cx.notify();
     }
@@ -2757,6 +2823,19 @@ impl KiteApp {
             });
         })
         .detach();
+    }
+
+    pub(crate) fn open_directory_from_git_tools(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_to(path, NavigationIntent::Push, window, cx);
+    }
+
+    pub(crate) fn refresh_git_metadata_after_tool_change(&mut self, cx: &mut Context<Self>) {
+        self.refresh_vcs_statuses(self.current_dir.clone(), cx);
     }
 
     fn selected_entries(&self, cx: &App) -> Vec<FileEntry> {
@@ -3236,6 +3315,44 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         match command {
+            VcsMenuCommand::GitClient => {
+                match open_git_client_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开 Git 客户端窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
+            VcsMenuCommand::GitMerge => {
+                match crate::git_merge_window::open_git_merge_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开 Git 合并窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
+            VcsMenuCommand::GitTools => {
+                match git_tools_window::open_git_tools_window(cx.entity(), path.clone(), cx) {
+                    Ok(()) => {
+                        self.error = None;
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitAdd => {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Add, path, window, cx)
             }
@@ -3252,11 +3369,22 @@ impl KiteApp {
             VcsMenuCommand::GitFetch => {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Fetch, path, window, cx)
             }
-            VcsMenuCommand::GitMerge => self.open_git_merge_window(path, window, cx),
             VcsMenuCommand::GitDiff => {
                 self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
             }
-            VcsMenuCommand::GitLog => self.open_vcs_log_window_task(VcsTool::Git, path, window, cx),
+            VcsMenuCommand::GitLog => {
+                match git_log_window::open_git_log_window(path, None, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开提交历史窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitRevert => self.confirm_vcs_revert(VcsTool::Git, path, window, cx),
             VcsMenuCommand::GitClean => self.confirm_git_clean(path, window, cx),
             VcsMenuCommand::SvnUpdate => {
@@ -3311,7 +3439,7 @@ impl KiteApp {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { run_vcs_operation(tool, operation, &path) })
+                .background_spawn(async move { run_vcs_operation_for_ui(tool, operation, &path) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(message) => {
@@ -3451,9 +3579,9 @@ impl KiteApp {
                 return;
             }
             let result = cx
-                .background_spawn(
-                    async move { run_vcs_operation(tool, VcsOperation::Revert, &path) },
-                )
+                .background_spawn(async move {
+                    run_vcs_operation_for_ui(tool, VcsOperation::Revert, &path)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(message) => {
@@ -3484,7 +3612,7 @@ impl KiteApp {
             }
             let result = cx
                 .background_spawn(async move {
-                    run_vcs_operation(VcsTool::Git, VcsOperation::Clean, &path)
+                    run_vcs_operation_for_ui(VcsTool::Git, VcsOperation::Clean, &path)
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
@@ -4848,6 +4976,7 @@ impl KiteApp {
         let can_modify_current = !self.current_dir.as_os_str().is_empty();
         let has_clipboard = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let current_favorite = self.current_dir_is_favorite();
+        let git_head = self.git_head.clone();
         let loading = self.loading;
         let search_expanded = self.search_visible
             || self.active_search.is_some()
@@ -4905,13 +5034,83 @@ impl KiteApp {
             .items_center()
             .child(navigation_group);
 
-        let actions = h_flex()
+        let git_control = self.git_toolbar.as_ref().map(|git| {
+            let branch = git
+                .worktrees
+                .iter()
+                .find(|worktree| worktree.is_current)
+                .and_then(|worktree| worktree.branch.clone())
+                .unwrap_or_else(|| "Git".to_string());
+            let worktrees = git.worktrees.clone();
+            let manage_target = self.current_dir.clone();
+            Button::new("git-worktree-menu")
+                .ghost()
+                .compact()
+                .icon(IconName::GitBranch)
+                .label(branch)
+                .tooltip("切换 Worktree 或打开 Git 工具")
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu
+                        .min_w(px(300.))
+                        .max_w(px(420.))
+                        .label("Worktree")
+                        .separator();
+                    for worktree in &worktrees {
+                        let label = format!(
+                            "{} · {}",
+                            worktree
+                                .branch
+                                .clone()
+                                .unwrap_or_else(|| "分离 HEAD".into()),
+                            if worktree.is_primary {
+                                "主工作区".to_string()
+                            } else {
+                                worktree
+                                    .path
+                                    .file_name()
+                                    .map(|value| value.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| worktree.path.display().to_string())
+                            }
+                        );
+                        menu = menu.item(
+                            PopupMenuItem::new(label)
+                                .icon(IconName::GitBranch)
+                                .checked(worktree.is_current)
+                                .disabled(worktree.is_current || worktree.prunable_reason.is_some())
+                                .action(Box::new(ContextMenuAction {
+                                    target: worktree.path.clone(),
+                                    working_directory: manage_target.clone(),
+                                    command: ContextMenuCommand::Open,
+                                })),
+                        );
+                    }
+                    menu.separator().item(
+                        PopupMenuItem::new("管理 Worktree 与 Submodule…")
+                            .icon(IconName::Boxes)
+                            .action(Box::new(ContextMenuAction {
+                                target: manage_target.clone(),
+                                working_directory: manage_target.clone(),
+                                command: ContextMenuCommand::Vcs(VcsMenuCommand::GitTools),
+                            })),
+                    )
+                })
+                .into_any_element()
+        });
+
+        let mut actions = h_flex()
             .h(px(TOOLBAR_CONTROL_HEIGHT))
             .gap_0p5()
             .px_1()
             .items_center()
             .rounded_md()
-            .bg(cx.theme().background.opacity(0.42))
+            .bg(cx.theme().background.opacity(0.42));
+        if let Some(git_control) = git_control {
+            actions = actions
+                .child(git_control)
+                .child(div().w(px(1.)).h(px(18.)).bg(cx.theme().border).mx_1());
+        }
+        let actions = actions
             .child(
                 Button::new("favorite-current-directory")
                     .ghost()
@@ -4928,6 +5127,39 @@ impl KiteApp {
                     })
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.toggle_current_favorite(cx)
+                    })),
+            )
+            .when_some(git_head, |this, head| {
+                let branch = head.branch.clone().unwrap_or_else(|| {
+                    head.short_hash
+                        .map(|hash| format!("HEAD {hash}"))
+                        .unwrap_or_else(|| "分离 HEAD".to_string())
+                });
+                let label = if head.ahead > 0 || head.behind > 0 {
+                    format!("{branch}  ↑{} ↓{}", head.ahead, head.behind)
+                } else {
+                    branch
+                };
+                this.child(
+                    Button::new("git-branches")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::GitBranch)
+                        .label(label)
+                        .tooltip("分支与标签")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_git_branches_window(window, cx)
+                        })),
+                )
+            })
+            .child(
+                Button::new("open-workspace-editor")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::FilePen)
+                    .tooltip("打开工作区编辑器（目录树）")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_workspace_editor(window, cx)
                     })),
             )
             .child(
@@ -5114,6 +5346,20 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn open_git_client(&mut self, _: &OpenGitClient, _window: &mut Window, cx: &mut Context<Self>) {
+        match open_git_client_window(self.current_dir.clone(), cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("已打开 Git 客户端窗口".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
+
     fn open_settings_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let initial_update_state = self.settings_update_state();
         match settings_window::open_settings_window(cx.entity(), initial_update_state, cx) {
@@ -5128,6 +5374,32 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn open_git_branches_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(head) = self.git_head.as_ref() else {
+            self.notice = None;
+            self.error = Some("当前文件夹不在 Git 工作区中".into());
+            cx.notify();
+            return;
+        };
+        git_branches_window::open_git_branches_window(
+            cx.entity(),
+            head.repository_root.clone(),
+            cx,
+        );
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn request_git_refresh(&mut self, cx: &mut Context<Self>) {
+        self.pending_git_refresh = true;
+        self.git_head = None;
+        cx.notify();
+    }
+
+    pub(crate) fn open_git_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.pending_git_open = Some(path);
+        cx.notify();
+    }
     pub(crate) fn apply_ui_preferences(
         &mut self,
         preferences: UiPreferences,
@@ -6348,8 +6620,6 @@ impl KiteApp {
 
         if !summary.is_directory && !summary.ignored {
             let changed = summary.staged_status.is_some() || summary.unstaged_status.is_some();
-            let conflicted = summary.staged_status == Some(VcsStatus::Conflicted)
-                || summary.unstaged_status == Some(VcsStatus::Conflicted);
             let path = preview.path.clone();
             let mut actions = h_flex().gap_1().flex_wrap();
             if changed {
@@ -6367,18 +6637,7 @@ impl KiteApp {
                         })),
                 );
             }
-            if conflicted {
-                let path = path.clone();
-                actions = actions.child(
-                    Button::new("column-preview-git-resolve")
-                        .ghost()
-                        .compact()
-                        .label("解决冲突")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.open_git_merge_window(path.clone(), window, cx);
-                        })),
-                );
-            } else if summary.unstaged_status.is_some() {
+            if summary.unstaged_status.is_some() {
                 let path = path.clone();
                 actions = actions.child(
                     Button::new("column-preview-git-stage")
@@ -6396,7 +6655,7 @@ impl KiteApp {
                         })),
                 );
             }
-            if !conflicted && summary.staged_status.is_some() {
+            if summary.staged_status.is_some() {
                 let path = path.clone();
                 actions = actions.child(
                     Button::new("column-preview-git-unstage")
@@ -7608,9 +7867,31 @@ fn path_after_recycle_paths(current_dir: &Path, removed: &[PathBuf]) -> PathBuf 
         })
 }
 
+fn run_vcs_operation_for_ui(
+    tool: VcsTool,
+    operation: VcsOperation,
+    path: &Path,
+) -> Result<String, String> {
+    match tool {
+        VcsTool::Git => GitService::shared()
+            .run_legacy_operation(path, &operation)
+            .map_err(|error| error.to_string()),
+        VcsTool::Svn => run_vcs_operation(tool, operation, path),
+    }
+}
+
+fn run_vcs_query_for_ui(tool: VcsTool, query: VcsQuery, path: &Path) -> Result<String, String> {
+    match tool {
+        VcsTool::Git => GitService::shared()
+            .run_legacy_query(path, query)
+            .map_err(|error| error.to_string()),
+        VcsTool::Svn => run_vcs_query(tool, query, path),
+    }
+}
+
 fn open_vcs_query_text(tool: VcsTool, query: VcsQuery, path: &Path) -> Result<String, String> {
     let title = format!("{} {}", tool.label(), query.label());
-    let content = run_vcs_query(tool, query, path)?;
+    let content = run_vcs_query_for_ui(tool, query, path)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -7933,6 +8214,9 @@ fn preview_info_text(entry: &FileEntry) -> String {
     ];
     if let Some(status) = entry.git_status {
         lines.push(format!("Git：{} ({})", status.label(), status.code()));
+    }
+    if let Some(status) = entry.submodule_status {
+        lines.push(format!("Submodule：{} ({})", status.label(), status.code()));
     }
     if let Some(status) = entry.svn_status {
         lines.push(format!("SVN：{} ({})", status.label(), status.code()));
@@ -8427,6 +8711,21 @@ impl Render for KiteApp {
         let active_search = self.active_search.clone();
         let search_truncated = self.search_truncated;
         let skipped = self.skipped;
+        if self.pending_git_refresh {
+            self.pending_git_refresh = false;
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |this, cx| this.refresh(window, cx));
+            });
+        }
+        if let Some(path) = self.pending_git_open.take() {
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |this, cx| {
+                    this.navigate_to(path.clone(), NavigationIntent::Push, window, cx)
+                });
+            });
+        }
         if self.column_scroll_pending {
             self.column_scroll_pending = false;
             let handle = self.column_scroll.clone();
@@ -8581,6 +8880,9 @@ impl Render for KiteApp {
             .on_action(cx.listener(|this, action: &OpenGlobalSearch, window, cx| {
                 this.open_global_search(action, window, cx)
             }))
+            .on_action(cx.listener(|this, action: &OpenGitClient, window, cx| {
+                this.open_git_client(action, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &CreateFolder, window, cx| this.begin_new_folder(window, cx)),
             )
@@ -8605,6 +8907,9 @@ impl Render for KiteApp {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings_window(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenWorkspaceEditor, window, cx| {
+                this.open_workspace_editor(window, cx)
             }))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::set_default_explorer))
@@ -8978,6 +9283,7 @@ mod path_bar_tests {
             size: 0,
             modified: None,
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         }
     }
@@ -9326,6 +9632,7 @@ otes.{extension}"
             modified: None,
             extension: extension.to_string(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         };
 
@@ -9376,6 +9683,7 @@ otes.{extension}"
             modified: None,
             extension: "txt".to_string(),
             git_status: Some(VcsStatus::Modified),
+            submodule_status: None,
             svn_status: None,
         };
 
@@ -9420,6 +9728,7 @@ otes.{extension}"
             modified: None,
             extension: extension.to_string(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         };
 
@@ -9451,6 +9760,7 @@ mod column_details_tests {
             modified: Some(UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
             extension: "mp4".to_string(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         }
     }

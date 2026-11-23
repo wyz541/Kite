@@ -149,9 +149,12 @@ macOS 可与 Finder 共享文件剪贴板。
 ### 开发者工作流
 
 - 显示 Git 和 SVN 文件状态。
+- 管理 Git 本地/远程分支、标签、上游、比较和 worktree。
+- 工作区有未提交更改时，Git 检出会要求取消或先 stash 再恢复。
+- 在应用内查看提交历史、提交图、引用、提交详情、变更文件和文件历史。
 - 文件夹显示子项目中优先级最高的状态。
 - 右键菜单支持 Git 和 SVN 常用操作。
-- Windows 可调用 TortoiseGit、TortoiseSVN 和系统扩展。
+- Git 提交历史不再依赖 TortoiseGit；Windows 仍可调用 TortoiseGit、TortoiseSVN 和系统扩展。
 - Windows 搜索和文件读取在后台执行，界面不会等待磁盘响应。
 
 ### 原生平台集成
@@ -184,7 +187,11 @@ macOS 可与 Finder 共享文件剪贴板。
 | 列宽预设与布局恢复 | 已支持 | 已支持 |
 | 文件预览 | 内置预览 | 系统快速预览 |
 | 预览 Git 状态 | 已支持 | 已支持 |
+| Git 分支与标签 | 已支持 | 已支持 |
+| Git 客户端变更与行级暂存 | 已支持 | 已支持 |
 | Git 合并与冲突解决 | 已支持 | 已支持 |
+| 提交历史与提交图 | 已支持 | 已支持 |
+| Blame、Worktree 与 Submodule | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |
@@ -318,6 +325,7 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [macOS 分栏显示规则](docs/architecture/macos-column-rules.md)
 - [macOS 分栏搜索](docs/architecture/macos-column-search.md)
 - [全局文件内容搜索](docs/architecture/content-search.md)
+- [Git Blame、Worktree 与 Submodule](docs/architecture/git-blame-worktree-submodule.md)
 - [分栏自动刷新](docs/architecture/auto-refresh.md)
 - [图标系统](docs/design/icon-system.md)
 - [搜索实现调研](docs/RUST_SEARCH_ENGINE_RESEARCH.md)

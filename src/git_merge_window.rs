@@ -12,16 +12,17 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kite_core::git::{
-    self, GitBranchSummary, GitConflictChoice, GitConflictChoiceSide, GitConflictEntry,
-    GitConflictKind, GitConflictSide, GitConflictSides, GitConflictState, GitMergeSpec,
-    GitMergeStrategy, GitThreeWayMerge,
+    self, GitConflictChoice, GitConflictChoiceSide, GitConflictEntry, GitConflictKind,
+    GitConflictSide, GitConflictSides, GitConflictState, GitMergeSpec, GitMergeStrategy,
+    GitThreeWayMerge,
 };
+use kite_core::git_branches::{self, GitBranch};
 
 const CONFLICT_SIDEBAR_WIDTH: f32 = 238.0;
 
 pub(crate) struct GitMergeWindow {
     path: PathBuf,
-    branches: Vec<GitBranchSummary>,
+    branches: Vec<GitBranch>,
     target_input: Entity<InputState>,
     message_input: Entity<InputState>,
     strategy: GitMergeStrategy,
@@ -88,8 +89,14 @@ impl GitMergeWindow {
         self._load_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let branches = git::git_merge_branches(&path);
-                    let conflicts = git::git_conflicts(&path);
+                    let branches = git_branches::git_branch_snapshot(&path).map(|snapshot| {
+                        let mut branches = snapshot.local_branches;
+                        branches.extend(snapshot.remote_branches);
+                        branches
+                    });
+                    let conflicts = git::GitService::shared()
+                        .conflicts(&path)
+                        .map_err(git_error_message);
                     (branches, conflicts)
                 })
                 .await;
@@ -146,9 +153,16 @@ impl GitMergeWindow {
         self._selection_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let sides = git::git_conflict_sides(&path, &entry)?;
+                    let service = git::GitService::shared();
+                    let sides = service
+                        .conflict_sides(&path, &entry)
+                        .map_err(git_error_message)?;
                     let document = if !entry.binary && entry.kind != GitConflictKind::Rename {
-                        Some(git::git_three_way_merge(&path, &entry)?)
+                        Some(
+                            service
+                                .three_way_merge(&path, &entry)
+                                .map_err(git_error_message)?,
+                        )
                     } else {
                         None
                     };
@@ -191,7 +205,11 @@ impl GitMergeWindow {
         self.status = Some("正在合并…".into());
         self._operation_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { git::git_merge(&path, &request) })
+                .background_spawn(async move {
+                    git::GitService::shared()
+                        .merge(&path, &request)
+                        .map_err(git_error_message)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
@@ -234,7 +252,11 @@ impl GitMergeWindow {
         self.error = None;
         self._operation_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { git::git_choose_conflict_side(&path, &entry, side) })
+                .background_spawn(async move {
+                    git::GitService::shared()
+                        .choose_conflict_side(&path, &entry, side)
+                        .map_err(git_error_message)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
@@ -263,7 +285,11 @@ impl GitMergeWindow {
         self.error = None;
         self._operation_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { git::git_open_merge_tool(&path, &entry) })
+                .background_spawn(async move {
+                    git::GitService::shared()
+                        .open_merge_tool(&path, &entry)
+                        .map_err(git_error_message)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
@@ -344,7 +370,9 @@ impl GitMergeWindow {
         self._operation_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    git::git_resolve_conflict(&path, &relative_path, Some(&content))
+                    git::GitService::shared()
+                        .resolve_conflict(&path, &relative_path, Some(&content))
+                        .map_err(git_error_message)
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -367,7 +395,11 @@ impl GitMergeWindow {
         self.error = None;
         self._operation_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { git::git_continue_operation(&path) })
+                .background_spawn(async move {
+                    git::GitService::shared()
+                        .continue_operation(&path)
+                        .map_err(git_error_message)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
@@ -402,7 +434,11 @@ impl GitMergeWindow {
                 cx.notify();
             });
             let result = cx
-                .background_spawn(async move { git::git_abort_operation(&path) })
+                .background_spawn(async move {
+                    git::GitService::shared()
+                        .abort_operation(&path)
+                        .map_err(git_error_message)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
@@ -1183,6 +1219,32 @@ impl Render for GitMergeWindow {
             .child(body)
             .child(self.render_footer(cx))
     }
+}
+
+pub(crate) fn open_git_merge_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
+    let title = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.display().to_string());
+    let options = WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: Some(format!("Git 合并 · {title}").into()),
+            ..Default::default()
+        }),
+        window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+        window_min_size: Some(size(px(980.), px(640.))),
+        ..Default::default()
+    };
+    gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| GitMergeWindow::new(path, window, cx))
+    })
+    .map(|_| ())
+    .map_err(|error| format!("无法打开 Git 合并窗口：{error}"))
+}
+
+fn git_error_message(error: git::GitError) -> String {
+    error.message
 }
 
 fn render_text_pane(
