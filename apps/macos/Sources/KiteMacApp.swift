@@ -205,6 +205,63 @@ struct KiteMacApp: App {
                     KiteGitClientWindowController.show(model: model, repositoryPath: model.currentPath)
                 }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("拉取…") {
+                    presentGitPullChoice(model: model, path: model.currentPath)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+
+                Button("推送…") {
+                    KiteGitWindows.shared.showPush(model: model, path: model.currentPath)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+
+                Menu("获取") {
+                    Button("获取当前远程") {
+                        KiteGitService.shared.fetch(
+                            model: model,
+                            path: model.currentPath,
+                            allRemotes: false
+                        )
+                    }
+                    Button("获取全部远程") {
+                        KiteGitService.shared.fetch(
+                            model: model,
+                            path: model.currentPath,
+                            allRemotes: true
+                        )
+                    }
+                }
+
+                Button("管理远程…") {
+                    KiteGitWindows.shared.showRemotes(model: model, path: model.currentPath)
+                }
+
+                Divider()
+
+                Button("克隆仓库…") {
+                    KiteGitWindows.shared.showClone(
+                        model: model,
+                        directory: model.currentPath
+                    )
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+
+                Button("初始化仓库") {
+                    Task {
+                        do {
+                            let path = try await KiteGitService.shared.initRepository(
+                                path: model.currentPath
+                            )
+                            model.updateGitOperationStatus("Git 仓库已初始化：\(path)")
+                            model.refresh()
+                        } catch {
+                            model.errorMessage = error.localizedDescription
+                        }
+                    }
+                }
             }
             CommandMenu("页签") {
                 Button("新建页签") {

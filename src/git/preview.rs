@@ -966,7 +966,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         if !git_available() {
             return;
         }
-        let root = temp_repo("snapshot");
+        let root = std::fs::canonicalize(temp_repo("snapshot")).expect("canonical temp repo");
         std::fs::write(root.join("tracked.txt"), "one\n").expect("write tracked");
         git_ok(&root, &["add", "."]);
         git_ok(&root, &["commit", "--quiet", "-m", "initial commit"]);

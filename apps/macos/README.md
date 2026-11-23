@@ -63,6 +63,9 @@ The build script creates `apps/macos/build/Kite.app`.
 - File and folder drag and drop with Finder integration.
 - macOS pasteboard.
 - macOS Trash API.
+- Git remote management, Fetch, merge/rebase/ff-only Pull, push preview, and force-with-lease.
+- Cancellable full and shallow Git clone with incomplete-directory cleanup confirmation.
+- Git repository initialization and optional 15-minute background Fetch.
 - UniFFI-generated Swift bindings.
 
 ## Default file viewer

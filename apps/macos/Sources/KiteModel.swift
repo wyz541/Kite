@@ -743,6 +743,7 @@ struct UpdateDownloadState: Equatable {
 final class KiteModel: ObservableObject {
     static let restoreSessionDefaultsKey = "kite.macos.restore-session"
     static let appearanceDefaultsKey = "kite.macos.appearance"
+    static let gitAutoFetchDefaultsKey = "kite.macos.git-auto-fetch"
     private static let sessionSchemaVersion: UInt32 = 1
     private static let columnSearchDebounceNanoseconds: UInt64 = 180_000_000
     private static let columnViewRulesDefaultsKey = "kite.macos.column-view-rules-v1"
@@ -758,6 +759,7 @@ final class KiteModel: ObservableObject {
     private var columnAutoRefreshGeneration: UInt64 = 0
     private var columnAutoRefreshTask: Task<Void, Never>?
     private var contentSearchPowerPolicyTask: Task<Void, Never>?
+    private var gitAutoFetchTask: Task<Void, Never>?
     private lazy var columnDirectoryWatcher = DirectoryWatcher { [weak self] in
         self?.directoryContentsDidChange()
     }
@@ -787,17 +789,21 @@ final class KiteModel: ObservableObject {
     @Published private(set) var globalSearchLoading = false
     @Published private(set) var contentSearch: BrowserContentSearchState?
     @Published private(set) var contentSearchLoading = false
+    @Published private(set) var gitStatusMessage: String?
+    @Published private(set) var gitAutoFetchEnabled: Bool
 
     init(core: KiteCore = KiteCore()) {
         PerformanceTrace.mark("macos.model_start")
         let storedColumnViewRules = Self.loadStoredColumnViewRules()
         self.core = core
         self.storedColumnViewRules = storedColumnViewRules
+        self.gitAutoFetchEnabled = UserDefaults.standard.bool(forKey: Self.gitAutoFetchDefaultsKey)
         self.favorites = core.favorites()
         self.volumes = core.devices().volumes
         restoreOrCreateTabs()
         syncColumnDirectoryWatchers()
         updateContentSearchPowerPolicy()
+        scheduleGitAutoFetch()
         contentSearchPowerPolicyTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -811,6 +817,52 @@ final class KiteModel: ObservableObject {
     deinit {
         contentSearchPowerPolicyTask?.cancel()
         globalSearchDebounceTask?.cancel()
+        gitAutoFetchTask?.cancel()
+    }
+
+    func setGitAutoFetchEnabled(_ enabled: Bool) {
+        gitAutoFetchEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.gitAutoFetchDefaultsKey)
+        scheduleGitAutoFetch()
+    }
+
+    func updateGitOperationStatus(_ message: String) {
+        errorMessage = nil
+        gitStatusMessage = message
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard let self, self.gitStatusMessage == message else { return }
+            self.gitStatusMessage = nil
+        }
+    }
+
+    private func scheduleGitAutoFetch() {
+        gitAutoFetchTask?.cancel()
+        gitAutoFetchTask = nil
+        guard gitAutoFetchEnabled else { return }
+        gitAutoFetchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15 * 60 * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                guard KiteGitService.shared.operation == nil else { continue }
+                let path = self.currentPath
+                let core = self.core
+                _ = await Task.detached(priority: .utility) {
+                    guard let repository = try? core.gitRepository(path: path) else {
+                        return
+                    }
+                    let monitor = GitProgressMonitor()
+                    _ = try? core.gitFetch(
+                        path: repository.root,
+                        options: GitFetchOptionsDto(remote: nil, allRemotes: false, prune: true),
+                        credentials: nil,
+                        monitor: monitor
+                    )
+                }.value
+                guard !Task.isCancelled else { return }
+                self.refresh()
+            }
+        }
     }
 
     var activeTab: BrowserTab? {

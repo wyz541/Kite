@@ -151,6 +151,8 @@ macOS 可与 Finder 共享文件剪贴板。
 - 显示 Git 和 SVN 文件状态。
 - 文件夹显示子项目中优先级最高的状态。
 - 右键菜单支持 Git 和 SVN 常用操作。
+- 支持远程管理、Fetch、三种 Pull 策略、推送预览和推送被拒绝后的恢复。
+- 支持可取消的浅克隆、完整克隆和当前目录 Git 初始化。
 - Windows 可调用 TortoiseGit、TortoiseSVN 和系统扩展。
 - 独立 Git 客户端窗口采用变更 / 差异两段布局，并提供可折叠 Git 控制台。
 - Windows 使用 `Ctrl+Shift+G`、macOS 使用 `Command+Shift+G` 打开 Git 客户端。
@@ -192,6 +194,7 @@ macOS 可与 Finder 共享文件剪贴板。
 | Git 客户端 | 已支持 | 已支持 |
 | Git 客户端变更与行级暂存 | 已支持 | 已支持 |
 | Git Stash、Reset、Revert 与 Cherry-pick | 已支持 | 已支持 |
+| Git 远程、Fetch/Pull/Push、克隆与初始化 | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |

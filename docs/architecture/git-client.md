@@ -7,16 +7,16 @@ Kite 的 Git 能力分两层交付：
 - 预览层：文件预览显示所选文件的 Git 状态、最近提交、增删行数和工作区差异。
 - 客户端层：独立 Git 客户端窗口，能力参照 DetachHead/rebased。
 
-本文件记录当前已实现的 Core Git 服务、FFI 事件边界、仓库模型和后续客户端拆分。客户端层的其余拆分见 #115 的子 issue #116–#129。
+本文件记录当前已实现的 Core Git 服务、FFI 事件边界、仓库模型、远程同步层和后续客户端拆分。客户端层的其余拆分见 #115 的子 issue #116–#129。
 
 ## 跨平台边界
 
 Git 逻辑只在 Rust Core 实现一次。
 
-- Core：`src/git/` 提供命令执行器、仓库发现、状态、操作、凭据桥、控制台和仓库监听。`src/vcs.rs` 只保留 SVN 实现及共享的 VCS 枚举。
-- FFI：`src/ffi.rs` 导出 `GitService`、同步操作、后台 `GitOperationHandle`、`GitRepositoryWatchHandle`，以及进度、凭据、错误和仓库状态事件回调。
-- Windows：GPUI 的 Git 菜单写入和查询委托给 `kite_core::git::GitService`。SVN 继续走 `vcs.rs`。
-- macOS：现有 `run_vcs_operation` / `run_vcs_query` 已补齐并委托给同一 Git 服务；SwiftUI 预览继续使用 `git_path_summary` 和 `git_file_diff`。
+- Core：`src/git/` 提供命令执行器、仓库发现、状态、操作、凭据桥、控制台、仓库监听，以及 `remote` 远程同步模块。`src/vcs.rs` 只保留 SVN 实现及共享的 VCS 枚举。
+- FFI：`src/ffi.rs` 导出 `GitService`、同步操作、后台 `GitOperationHandle`、远程同步、进度监视器和仓库事件回调。
+- Windows：GPUI 的 Git 菜单写入和远程同步委托给 `kite_core::git::GitService`。SVN 继续走 `vcs.rs`。
+- macOS：SwiftUI 通过同一 Git 服务和 UniFFI 调用预览、远程同步与仓库操作。
 
 ## 服务边界
 
@@ -397,3 +397,61 @@ todo 可以调整顺序。Windows 使用上下按钮，macOS 使用列表拖动�
 - 合并提交的 reword/squash/fixup 暂不支持；会明确报错，而不是悄悄降级。
 - 冲突处理依赖 #127 的三方合并视图。当前发生冲突时不会更新分支引用。
 - 未运行 Git hooks 的内存改写和 `git commit-tree` 语义一致；GPG 签名未强制开启。
+## 远程同步层
+
+### 服务边界
+
+`src/git/remote.rs` 负责 Git 远程、同步和仓库创建命令，Windows GPUI 和 macOS SwiftUI 只调用共享 FFI：
+
+- 仓库：`git_repository`。
+- 远程：`git_list_remotes`、`git_add_remote`、`git_rename_remote`、`git_remove_remote`、`git_set_remote_url`。
+- 同步：`git_fetch`、`git_pull`、`git_push_preview`、`git_commit_files`、`git_push`。
+- 仓库创建：`git_clone`、`git_init`、`git_delete_partial_clone`、`git_adopt_partial_clone`。
+- 进度：`GitProgressMonitor.snapshot()` 和 `GitProgressMonitor.cancel()`。
+
+所有网络操作设置 `GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=Never`、`LC_ALL=C`，并按行解析 `--progress` 输出。调用方在后台执行这些同步 FFI，并每 100–120 毫秒读取进度监视器。
+
+### Pull 与本地更改
+
+Pull 支持合并、变基和仅快进。工作区有未提交更改时，Core 执行：
+
+1. `git stash push --include-untracked`。
+2. 按所选策略执行 `git pull`。
+3. 无论拉取成功或失败，都尝试 `git stash pop`。
+
+恢复失败会返回冲突类错误，保留 stash，让用户可以从 Git 客户端继续处理。
+
+### Push 安全
+
+- 推送前由 `git_push_preview` 返回待推送提交、选中提交的文件和本地标签。
+- 目标远程和分支可由用户修改；未指定时使用上游、`origin` 或当前分支。
+- UI 的“只推送到所选提交”把该提交 OID 作为 refspec 源。
+- 强制推送只有 `--force-with-lease=<目标 ref>`，代码中不存在 `--force`。
+- `main`、`master`、`trunk`、`release/*`、`hotfix/*`，以及 `branch.<name>.kiteProtected=true` 或 `kite.protectedBranch` 配置的分支禁止强制推送。
+- 推送被拒绝时，Core 返回结构化的 `GitPushRejected`，两端都提供“合并后重试”和“变基后重试”。
+
+### 克隆取消
+
+克隆先写入同级的隐藏 staging 目录（`.<name>.kite-clone-*`），成功后再原子改名为目标目录。取消时进程被终止：
+
+- 返回 `GitCancelled` 和 `partial_clone_path`。
+- UI 明确询问“删除”或“保留”。
+- 删除操作只接受 Kite staging 目录命名，拒绝删除任意用户目录。
+- 选择保留时，staging 目录会改名为用户选择的目标目录。
+
+### 凭据与定时 Fetch
+
+认证失败返回 `GitAuthenticationRequired`。两端弹出原生用户名/密码对话框，凭据只通过环境变量和临时 askpass helper 传给一次 Git 进程，不写入配置或日志。
+
+定时 Fetch 默认关闭，可在设置中启用；启用后每 15 分钟对当前仓库执行只读 Fetch，不自动合并，也不显示凭据弹窗。
+
+### 测试
+
+`src/git/remote.rs` 的测试使用本机 bare 仓库模拟远程，覆盖：
+
+- 推送被拒绝。
+- 受保护分支阻止强制推送。
+- 强制推送参数只包含 `--force-with-lease`。
+- Pull 自动 stash 并恢复未提交文件。
+- 远程增删改。
+- 进度进程取消和未完成克隆目录的安全删除边界。

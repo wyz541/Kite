@@ -42,7 +42,7 @@ use crate::vcs::{
 };
 use crate::workspace_window::WorkspaceWindow;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{SelectableText, TextSelectionHandle};
+use gpui_kit::base::{Selectable as _, SelectableText, TextSelectionHandle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -179,12 +179,206 @@ enum ModalKind {
 
     GitCommit(PathBuf),
     SvnCommit(PathBuf),
+    GitUsername(GitNetworkRequest),
+    GitPassword {
+        request: GitNetworkRequest,
+        username: String,
+    },
 }
 
 struct ModalState {
     kind: ModalKind,
     input: Entity<InputState>,
     _subscription: Subscription,
+}
+
+#[derive(Clone)]
+enum GitOperationCommand {
+    Fetch {
+        path: PathBuf,
+        all_remotes: bool,
+    },
+    Pull {
+        path: PathBuf,
+        options: kite_core::git::remote::GitPullOptions,
+    },
+    Push {
+        path: PathBuf,
+        options: kite_core::git::remote::GitPushOptions,
+    },
+    Clone {
+        url: String,
+        target: PathBuf,
+        shallow_depth: Option<u32>,
+    },
+    PullThenPush {
+        path: PathBuf,
+        pull: kite_core::git::remote::GitPullOptions,
+        push: kite_core::git::remote::GitPushOptions,
+    },
+}
+
+impl GitOperationCommand {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Fetch { .. } => "获取远程更新",
+            Self::Pull { .. } | Self::PullThenPush { .. } => "拉取远程更新",
+            Self::Push { .. } => "推送提交",
+            Self::Clone { .. } => "克隆仓库",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct GitNetworkRequest {
+    command: GitOperationCommand,
+    credentials: Option<kite_core::git::remote::GitCredentials>,
+}
+
+struct GitOperationOutcome {
+    message: String,
+    open_path: Option<PathBuf>,
+}
+
+impl GitNetworkRequest {
+    fn new(command: GitOperationCommand) -> Self {
+        Self {
+            command,
+            credentials: None,
+        }
+    }
+
+    fn with_credentials(mut self, username: String, password: String) -> Self {
+        self.credentials = Some(kite_core::git::remote::GitCredentials { username, password });
+        self
+    }
+
+    fn execute(
+        &self,
+        monitor: &kite_core::git::remote::GitOperationMonitor,
+    ) -> Result<GitOperationOutcome, kite_core::git::remote::GitFailure> {
+        use kite_core::git::remote::{self as git_remote, GitFetchOptions};
+        let credentials = self.credentials.as_ref();
+        match &self.command {
+            GitOperationCommand::Fetch { path, all_remotes } => {
+                let message = git_remote::fetch(
+                    path,
+                    &GitFetchOptions {
+                        remote: None,
+                        all_remotes: *all_remotes,
+                        prune: true,
+                    },
+                    credentials,
+                    monitor,
+                )?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+            GitOperationCommand::Pull { path, options } => {
+                let message = git_remote::pull(path, options, credentials, monitor)?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+            GitOperationCommand::Push { path, options } => {
+                let message = git_remote::push(path, options, credentials, monitor)?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+            GitOperationCommand::Clone {
+                url,
+                target,
+                shallow_depth,
+            } => {
+                let result = git_remote::clone_repository(
+                    url,
+                    target,
+                    &git_remote::GitCloneOptions {
+                        shallow_depth: *shallow_depth,
+                    },
+                    credentials,
+                    monitor,
+                )?;
+                Ok(GitOperationOutcome {
+                    message: format!("已克隆到 {}", result.path.display()),
+                    open_path: Some(result.path),
+                })
+            }
+            GitOperationCommand::PullThenPush { path, pull, push } => {
+                git_remote::pull(path, pull, credentials, monitor)?;
+                let message = git_remote::push(path, push, credentials, monitor)?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+        }
+    }
+}
+
+struct ActiveGitOperation {
+    label: SharedString,
+    monitor: Arc<kite_core::git::remote::GitOperationMonitor>,
+    progress: kite_core::git::remote::GitOperationProgress,
+    _task: Task<()>,
+}
+
+struct CloneCleanupPrompt {
+    partial_path: PathBuf,
+    target: PathBuf,
+}
+
+struct GitRecoveryPrompt {
+    path: PathBuf,
+    push: kite_core::git::remote::GitPushOptions,
+    credentials: Option<kite_core::git::remote::GitCredentials>,
+}
+
+struct GitPushDialogState {
+    path: PathBuf,
+    remote_input: Entity<InputState>,
+    branch_input: Entity<InputState>,
+    preview: Option<kite_core::git::remote::GitPushPreview>,
+    selected_commit: Option<usize>,
+    files: Vec<kite_core::git::remote::GitFileChange>,
+    include_tags: bool,
+    force_with_lease: bool,
+    loading: bool,
+    error: Option<SharedString>,
+    _preview_task: Task<()>,
+    _files_task: Task<()>,
+}
+
+struct GitCloneDialogState {
+    directory: PathBuf,
+    url_input: Entity<InputState>,
+    target_input: Entity<InputState>,
+    depth_input: Entity<InputState>,
+    shallow: bool,
+    error: Option<SharedString>,
+}
+
+struct GitRemotesDialogState {
+    path: PathBuf,
+    remotes: Vec<kite_core::git::remote::GitRemote>,
+    name_input: Entity<InputState>,
+    fetch_url_input: Entity<InputState>,
+    push_url_input: Entity<InputState>,
+    selected: Option<String>,
+    loading: bool,
+    error: Option<SharedString>,
+    _task: Task<()>,
+}
+
+enum GitDialogState {
+    Push(GitPushDialogState),
+    Clone(GitCloneDialogState),
+    Remotes(GitRemotesDialogState),
 }
 
 #[derive(Clone)]
@@ -899,6 +1093,11 @@ pub struct KiteApp {
     _column_refresh_task: Task<()>,
     column_refresh_generation: u64,
     _device_task: Task<()>,
+    _git_auto_fetch_task: Task<()>,
+    git_dialog: Option<GitDialogState>,
+    active_git_operation: Option<ActiveGitOperation>,
+    clone_cleanup_prompt: Option<CloneCleanupPrompt>,
+    git_recovery_prompt: Option<GitRecoveryPrompt>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1165,6 +1364,11 @@ impl KiteApp {
             _column_refresh_task: Task::ready(()),
             column_refresh_generation: 0,
             _device_task: Task::ready(()),
+            _git_auto_fetch_task: Task::ready(()),
+            git_dialog: None,
+            active_git_operation: None,
+            clone_cleanup_prompt: None,
+            git_recovery_prompt: None,
             _subscriptions: vec![
                 address_subscription,
                 search_subscription,
@@ -1174,6 +1378,11 @@ impl KiteApp {
         };
         app.start_device_watcher(cx);
         app.start_directory_watcher(cx);
+        app.start_git_auto_fetch(
+            ui_preferences.git_auto_fetch,
+            ui_preferences.git_auto_fetch_minutes,
+            cx,
+        );
         app.request_load_with_file_selection(
             home,
             NavigationIntent::Initial,
@@ -2263,6 +2472,58 @@ impl KiteApp {
         self._vcs_task = Task::ready(());
     }
 
+    fn start_git_auto_fetch(
+        &mut self,
+        enabled: bool,
+        interval_minutes: u32,
+        cx: &mut Context<Self>,
+    ) {
+        self._git_auto_fetch_task = Task::ready(());
+        if !enabled {
+            return;
+        }
+        let interval = Duration::from_secs(u64::from(interval_minutes.clamp(5, 240)) * 60);
+        self._git_auto_fetch_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(interval).await;
+                let Ok(path) = this.update(cx, |this, _| {
+                    this.active_git_operation
+                        .is_none()
+                        .then(|| this.current_dir.clone())
+                }) else {
+                    return;
+                };
+                let Some(path) = path else {
+                    continue;
+                };
+                let fetched = cx
+                    .background_spawn(async move {
+                        let repository = kite_core::git::remote::repository(&path).ok()?;
+                        let monitor = kite_core::git::remote::GitOperationMonitor::new();
+                        kite_core::git::remote::fetch(
+                            &repository.root,
+                            &kite_core::git::remote::GitFetchOptions {
+                                remote: None,
+                                all_remotes: false,
+                                prune: true,
+                            },
+                            None,
+                            &monitor,
+                        )
+                        .ok()
+                    })
+                    .await
+                    .is_some();
+                if fetched {
+                    let _ = this.update(cx, |this, cx| {
+                        this.invalidate_vcs();
+                        this.refresh_vcs_statuses(this.current_dir.clone(), cx);
+                    });
+                }
+            }
+        });
+    }
+
     fn refresh_vcs_statuses(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.vcs_generation = self.vcs_generation.wrapping_add(1);
         if shell_fs::is_shell_namespace_path(&root) {
@@ -3248,14 +3509,30 @@ impl KiteApp {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Unstage, path, window, cx)
             }
             VcsMenuCommand::GitCommit => self.begin_vcs_commit(VcsTool::Git, path, window, cx),
-            VcsMenuCommand::GitPull => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Pull, path, window, cx)
+            VcsMenuCommand::GitPull => self.begin_git_pull(path, window, cx),
+            VcsMenuCommand::GitPush => self.open_git_push_dialog(path, window, cx),
+            VcsMenuCommand::GitFetch => self.start_git_network(
+                GitNetworkRequest::new(GitOperationCommand::Fetch {
+                    path,
+                    all_remotes: false,
+                }),
+                window,
+                cx,
+            ),
+            VcsMenuCommand::GitFetchAll => self.start_git_network(
+                GitNetworkRequest::new(GitOperationCommand::Fetch {
+                    path,
+                    all_remotes: true,
+                }),
+                window,
+                cx,
+            ),
+            VcsMenuCommand::GitManageRemotes => self.open_git_remotes_dialog(path, window, cx),
+            VcsMenuCommand::GitClone => {
+                self.open_git_clone_dialog(working_directory_for_path(&path), window, cx)
             }
-            VcsMenuCommand::GitPush => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Push, path, window, cx)
-            }
-            VcsMenuCommand::GitFetch => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Fetch, path, window, cx)
+            VcsMenuCommand::GitInit => {
+                self.initialize_git_repository(working_directory_for_path(&path), window, cx)
             }
             VcsMenuCommand::GitDiff => {
                 self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
@@ -4594,6 +4871,12 @@ impl KiteApp {
                 Err("请输入提交说明".to_string())
             }
             ModalKind::GitCommit(_) | ModalKind::SvnCommit(_) => Ok(()),
+            ModalKind::GitUsername(_) if value.is_empty() => Err("请输入用户名".to_string()),
+            ModalKind::GitUsername(_) => Ok(()),
+            ModalKind::GitPassword { .. } if value.is_empty() => {
+                Err("请输入密码或令牌".to_string())
+            }
+            ModalKind::GitPassword { .. } => Ok(()),
         };
         if let Err(error) = validation {
             self.error = Some(error.into());
@@ -4704,6 +4987,14 @@ impl KiteApp {
             ModalKind::SvnCommit(path) => {
                 self.close_modal(window, cx);
                 self.run_vcs_task(VcsTool::Svn, VcsOperation::Commit(value), path, window, cx);
+            }
+            ModalKind::GitUsername(request) => {
+                self.close_modal(window, cx);
+                self.begin_git_password(request, value, window, cx);
+            }
+            ModalKind::GitPassword { request, username } => {
+                self.close_modal(window, cx);
+                self.start_git_network(request.with_credentials(username, value), window, cx);
             }
         }
     }
@@ -5247,6 +5538,8 @@ impl KiteApp {
         preferences: UiPreferences,
         cx: &mut Context<Self>,
     ) {
+        let git_auto_fetch = preferences.git_auto_fetch;
+        let git_auto_fetch_minutes = preferences.git_auto_fetch_minutes;
         self.show_sidebar = preferences.sidebar_visible;
         self.show_preview = preferences.preview_visible;
         self.show_column_details = preferences.column_details_visible;
@@ -5254,6 +5547,7 @@ impl KiteApp {
         self.show_kind_column = preferences.kind_column_visible;
         self.show_size_column = preferences.size_column_visible;
         self.preferred_column_width = preferences.column_width;
+        self.start_git_auto_fetch(git_auto_fetch, git_auto_fetch_minutes, cx);
         cx.notify();
     }
 
@@ -7406,6 +7700,16 @@ impl KiteApp {
                 "输入提交说明。SVN 将提交所选路径的本地更改。",
                 "提交",
             ),
+            ModalKind::GitUsername(_) => (
+                "Git 认证",
+                "输入远程仓库的用户名。凭据只用于本次操作，不会保存。",
+                "继续",
+            ),
+            ModalKind::GitPassword { .. } => (
+                "Git 认证",
+                "输入密码或个人访问令牌。凭据只用于本次操作，不会保存。",
+                "连接",
+            ),
         };
         let input = Input::new(&modal.input)
             .aria_label(title)
@@ -7485,6 +7789,1510 @@ impl KiteApp {
                     ),
             )
             .into_any_element()
+    }
+    fn begin_git_pull(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let answers = [
+            PromptButton::ok("合并"),
+            PromptButton::new("变基"),
+            PromptButton::new("仅快进"),
+            PromptButton::cancel("取消"),
+        ];
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "选择拉取方式",
+            Some("工作区有未提交更改时会先自动暂存，并在拉取后恢复。"),
+            &answers,
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            let strategy = match choice {
+                0 => kite_core::git::remote::GitPullStrategy::Merge,
+                1 => kite_core::git::remote::GitPullStrategy::Rebase,
+                2 => kite_core::git::remote::GitPullStrategy::FastForwardOnly,
+                _ => return,
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.start_git_network(
+                    GitNetworkRequest::new(GitOperationCommand::Pull {
+                        path,
+                        options: kite_core::git::remote::GitPullOptions {
+                            strategy,
+                            auto_stash: true,
+                            remote: None,
+                            branch: None,
+                        },
+                    }),
+                    window,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn open_git_push_dialog(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let remote_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("自动选择（通常为 origin）")
+                .clean_on_escape()
+        });
+        let branch_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("自动选择当前分支")
+                .clean_on_escape()
+        });
+        self.git_dialog = Some(GitDialogState::Push(GitPushDialogState {
+            path,
+            remote_input: remote_input.clone(),
+            branch_input,
+            preview: None,
+            selected_commit: None,
+            files: Vec::new(),
+            include_tags: false,
+            force_with_lease: false,
+            loading: true,
+            error: None,
+            _preview_task: Task::ready(()),
+            _files_task: Task::ready(()),
+        }));
+        remote_input.update(cx, |input, cx| input.focus(window, cx));
+        self.refresh_git_push_preview(cx);
+        cx.notify();
+    }
+
+    fn refresh_git_push_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let remote = nonempty_input(dialog.remote_input.read(cx));
+        let branch = nonempty_input(dialog.branch_input.read(cx));
+        let include_tags = dialog.include_tags;
+        let force_with_lease = dialog.force_with_lease;
+        dialog.loading = true;
+        dialog.error = None;
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    kite_core::git::remote::push_preview(
+                        &path,
+                        &kite_core::git::remote::GitPushOptions {
+                            remote,
+                            branch,
+                            include_tags,
+                            force_with_lease,
+                            up_to_commit: None,
+                        },
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let selected_oid = {
+                    let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut() else {
+                        return;
+                    };
+                    dialog.loading = false;
+                    match result {
+                        Ok(preview) => {
+                            let selected = preview.commits.len().checked_sub(1);
+                            dialog.selected_commit = selected;
+                            let oid =
+                                selected.and_then(|index| preview.commits.get(index).cloned());
+                            dialog.preview = Some(preview);
+                            dialog.error = None;
+                            oid.map(|commit| commit.oid)
+                        }
+                        Err(error) => {
+                            dialog.preview = None;
+                            dialog.files.clear();
+                            dialog.error = Some(error.message.into());
+                            None
+                        }
+                    }
+                };
+                if let Some(oid) = selected_oid {
+                    this.load_git_commit_files(oid, cx);
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+            dialog._preview_task = task;
+        }
+    }
+
+    fn select_git_push_commit(&mut self, index: usize, cx: &mut Context<Self>) {
+        let oid = {
+            let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() else {
+                return;
+            };
+            let Some(commit) = dialog
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.commits.get(index))
+            else {
+                return;
+            };
+            let oid = commit.oid.clone();
+            dialog.selected_commit = Some(index);
+            dialog.files.clear();
+            oid
+        };
+        self.load_git_commit_files(oid, cx);
+        cx.notify();
+    }
+
+    fn load_git_commit_files(&mut self, oid: String, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let requested_oid = oid.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    kite_core::git::remote::commit_files(&path, &requested_oid)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut() else {
+                    return;
+                };
+                let still_selected = dialog
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| {
+                        dialog
+                            .selected_commit
+                            .and_then(|index| preview.commits.get(index))
+                    })
+                    .is_some_and(|commit| commit.oid == oid);
+                if still_selected {
+                    match result {
+                        Ok(files) => dialog.files = files,
+                        Err(error) => dialog.error = Some(error.message.into()),
+                    }
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+            dialog._files_task = task;
+        }
+    }
+
+    fn submit_git_push(
+        &mut self,
+        up_to_selected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let remote = nonempty_input(dialog.remote_input.read(cx));
+        let branch = nonempty_input(dialog.branch_input.read(cx));
+        let include_tags = dialog.include_tags;
+        let force_with_lease = dialog.force_with_lease;
+        let up_to_commit = up_to_selected
+            .then(|| {
+                dialog
+                    .selected_commit
+                    .and_then(|index| dialog.preview.as_ref()?.commits.get(index))
+                    .map(|commit| commit.oid.clone())
+            })
+            .flatten();
+        if up_to_selected && up_to_commit.is_none() {
+            if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("请先选择要推送到的提交".into());
+            }
+            cx.notify();
+            return;
+        }
+        if force_with_lease
+            && dialog
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.protected_branch)
+        {
+            if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("受保护分支不能强制推送".into());
+            }
+            cx.notify();
+            return;
+        }
+        self.git_dialog = None;
+        self.start_git_network(
+            GitNetworkRequest::new(GitOperationCommand::Push {
+                path,
+                options: kite_core::git::remote::GitPushOptions {
+                    remote,
+                    branch,
+                    include_tags,
+                    force_with_lease,
+                    up_to_commit,
+                },
+            }),
+            window,
+            cx,
+        );
+    }
+
+    fn open_git_clone_dialog(
+        &mut self,
+        directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("https://example.com/repository.git 或 SSH URL")
+                .clean_on_escape()
+        });
+        let target_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("目标目录（留空则使用仓库名称）")
+                .clean_on_escape()
+        });
+        let depth_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("1")
+                .clean_on_escape()
+        });
+        self.git_dialog = Some(GitDialogState::Clone(GitCloneDialogState {
+            directory,
+            url_input: url_input.clone(),
+            target_input,
+            depth_input,
+            shallow: false,
+            error: None,
+        }));
+        url_input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn submit_git_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Clone(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let url = dialog.url_input.read(cx).value().trim().to_string();
+        let target_value = dialog.target_input.read(cx).value().trim().to_string();
+        let directory = dialog.directory.clone();
+        let shallow = dialog.shallow;
+        let depth = if shallow {
+            dialog
+                .depth_input
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|depth| *depth > 0)
+        } else {
+            None
+        };
+        if url.is_empty() {
+            if let Some(GitDialogState::Clone(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("请输入仓库 URL".into());
+            }
+            cx.notify();
+            return;
+        }
+        if shallow && depth.is_none() {
+            if let Some(GitDialogState::Clone(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("浅克隆深度必须是大于 0 的整数".into());
+            }
+            cx.notify();
+            return;
+        }
+        let target_name = clone_target_name(&url);
+        let target = if target_value.is_empty() {
+            directory.join(target_name)
+        } else {
+            let path = PathBuf::from(target_value);
+            if path.is_absolute() {
+                path
+            } else {
+                directory.join(path)
+            }
+        };
+        self.git_dialog = None;
+        self.start_git_network(
+            GitNetworkRequest::new(GitOperationCommand::Clone {
+                url,
+                target,
+                shallow_depth: depth,
+            }),
+            window,
+            cx,
+        );
+    }
+
+    fn initialize_git_repository(
+        &mut self,
+        path: PathBuf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = None;
+        self.notice = Some("正在初始化 Git 仓库…".into());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { kite_core::git::remote::init_repository(&path) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(path) => {
+                        this.notice = Some(format!("Git 仓库已初始化：{}", path.display()).into());
+                        this.invalidate_vcs();
+                        this.refresh_vcs_statuses(this.current_dir.clone(), cx);
+                    }
+                    Err(error) => {
+                        this.notice = None;
+                        this.error = Some(error.message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_git_remotes_dialog(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("远程名称，例如 origin")
+                .clean_on_escape()
+        });
+        let fetch_url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Fetch URL")
+                .clean_on_escape()
+        });
+        let push_url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Push URL（可选）")
+                .clean_on_escape()
+        });
+        self.git_dialog = Some(GitDialogState::Remotes(GitRemotesDialogState {
+            path,
+            remotes: Vec::new(),
+            name_input: name_input.clone(),
+            fetch_url_input,
+            push_url_input,
+            selected: None,
+            loading: true,
+            error: None,
+            _task: Task::ready(()),
+        }));
+        name_input.update(cx, |input, cx| input.focus(window, cx));
+        self.reload_git_remotes(cx);
+        cx.notify();
+    }
+
+    fn reload_git_remotes(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        dialog.loading = true;
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { kite_core::git::remote::list_remotes(&path) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(GitDialogState::Remotes(dialog)) = this.git_dialog.as_mut() else {
+                    return;
+                };
+                dialog.loading = false;
+                match result {
+                    Ok(remotes) => {
+                        if dialog.selected.as_ref().is_some_and(|selected| {
+                            !remotes.iter().any(|remote| &remote.name == selected)
+                        }) {
+                            dialog.selected = None;
+                        }
+                        dialog.remotes = remotes;
+                        dialog.error = None;
+                    }
+                    Err(error) => dialog.error = Some(error.message.into()),
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog._task = task;
+        }
+    }
+
+    fn select_git_remote(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let Some(remote) = dialog.remotes.iter().find(|remote| remote.name == name) else {
+            return;
+        };
+        dialog.selected = Some(remote.name.clone());
+        dialog.name_input.update(cx, |input, cx| {
+            input.set_value(remote.name.clone(), window, cx);
+        });
+        dialog.fetch_url_input.update(cx, |input, cx| {
+            input.set_value(remote.fetch_url.clone(), window, cx);
+        });
+        dialog.push_url_input.update(cx, |input, cx| {
+            input.set_value(remote.push_url.clone().unwrap_or_default(), window, cx);
+        });
+        cx.notify();
+    }
+
+    fn save_git_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let selected = dialog.selected.clone();
+        let name = dialog.name_input.read(cx).value().trim().to_string();
+        let fetch_url = dialog.fetch_url_input.read(cx).value().trim().to_string();
+        let push_url = dialog.push_url_input.read(cx).value().trim().to_string();
+        if name.is_empty() || fetch_url.is_empty() {
+            if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("远程名称和 Fetch URL 不能为空".into());
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog.loading = true;
+            dialog.error = None;
+        }
+        let worker_name = name.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if let Some(old_name) = selected {
+                        if old_name != worker_name {
+                            kite_core::git::remote::rename_remote(&path, &old_name, &worker_name)?;
+                        }
+                        kite_core::git::remote::set_remote_url(
+                            &path,
+                            &worker_name,
+                            &fetch_url,
+                            (!push_url.is_empty()).then_some(push_url.as_str()),
+                        )?;
+                    } else {
+                        kite_core::git::remote::add_remote(&path, &worker_name, &fetch_url)?;
+                        if !push_url.is_empty() {
+                            kite_core::git::remote::set_remote_url(
+                                &path,
+                                &worker_name,
+                                &fetch_url,
+                                Some(&push_url),
+                            )?;
+                        }
+                    }
+                    Ok::<(), kite_core::git::remote::GitFailure>(())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(GitDialogState::Remotes(dialog)) = this.git_dialog.as_mut() {
+                    dialog.loading = false;
+                    let succeeded = result.is_ok();
+                    match result {
+                        Ok(()) => {
+                            dialog.selected = Some(name);
+                            dialog.error = None;
+                        }
+                        Err(error) => dialog.error = Some(error.message.into()),
+                    }
+                    if succeeded {
+                        this.reload_git_remotes(cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog._task = task;
+        }
+    }
+
+    fn delete_selected_git_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let Some(name) = dialog.selected.clone() else {
+            if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("请先选择一个远程".into());
+            }
+            cx.notify();
+            return;
+        };
+        let path = dialog.path.clone();
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog.loading = true;
+        }
+        let requested_name = name.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    kite_core::git::remote::remove_remote(&path, &requested_name)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(GitDialogState::Remotes(dialog)) = this.git_dialog.as_mut() {
+                    dialog.loading = false;
+                    let succeeded = result.is_ok();
+                    match result {
+                        Ok(()) => {
+                            dialog.selected = None;
+                            dialog.error = None;
+                        }
+                        Err(error) => dialog.error = Some(error.message.into()),
+                    }
+                    if succeeded {
+                        this.reload_git_remotes(cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog._task = task;
+        }
+    }
+
+    fn start_git_network(
+        &mut self,
+        request: GitNetworkRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_git_operation.is_some() {
+            self.notice = Some("已有 Git 网络操作正在进行".into());
+            cx.notify();
+            return;
+        }
+        let label = request.command.label();
+        let monitor = kite_core::git::remote::GitOperationMonitor::new();
+        self.git_dialog = None;
+        self.error = None;
+        self.git_recovery_prompt = None;
+        self.notice = Some(format!("{label}…").into());
+        self.active_git_operation = Some(ActiveGitOperation {
+            label: label.into(),
+            monitor: monitor.clone(),
+            progress: monitor.snapshot(),
+            _task: Task::ready(()),
+        });
+        let finished = Arc::new(AtomicBool::new(false));
+        let observed_finished = finished.clone();
+        let progress_monitor = monitor.clone();
+        let progress_entity = cx.entity();
+        let worker_request = request.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let progress_task = cx.spawn(async move |cx| {
+                loop {
+                    let progress = progress_monitor.snapshot();
+                    progress_entity.update(cx, |this, cx| {
+                        if let Some(operation) = this.active_git_operation.as_mut() {
+                            operation.progress = progress;
+                            cx.notify();
+                        }
+                    });
+                    if observed_finished.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                }
+            });
+            let result = cx
+                .background_spawn(async move { worker_request.execute(&monitor) })
+                .await;
+            finished.store(true, Ordering::Relaxed);
+            let _ = progress_task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_git_network(result, request, window, cx);
+            });
+        });
+        if let Some(operation) = self.active_git_operation.as_mut() {
+            operation._task = task;
+        }
+        cx.notify();
+    }
+
+    fn finish_git_network(
+        &mut self,
+        result: Result<GitOperationOutcome, kite_core::git::remote::GitFailure>,
+        request: GitNetworkRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_git_operation = None;
+        match result {
+            Ok(outcome) => {
+                self.error = None;
+                self.notice = Some(outcome.message.into());
+                self.invalidate_vcs();
+                if let Some(path) = outcome.open_path {
+                    self.navigate_to(path, NavigationIntent::Refresh, window, cx);
+                } else {
+                    self.refresh_vcs_statuses(self.current_dir.clone(), cx);
+                }
+            }
+            Err(error) => match error.kind {
+                kite_core::git::remote::GitFailureKind::AuthenticationRequired => {
+                    self.notice = None;
+                    self.begin_git_credentials(request, window, cx);
+                    return;
+                }
+                kite_core::git::remote::GitFailureKind::PushRejected => {
+                    self.notice = None;
+                    if let GitOperationCommand::Push { path, options } = request.command {
+                        self.git_recovery_prompt = Some(GitRecoveryPrompt {
+                            path,
+                            push: options,
+                            credentials: request.credentials,
+                        });
+                        self.error = None;
+                    } else {
+                        self.error = Some(error.message.into());
+                    }
+                }
+                kite_core::git::remote::GitFailureKind::Cancelled => {
+                    self.notice = Some(error.message.clone().into());
+                    if let Some(partial_path) = error.partial_clone_path {
+                        let target = match &request.command {
+                            GitOperationCommand::Clone { target, .. } => Some(target.clone()),
+                            _ => None,
+                        };
+                        if let Some(target) = target {
+                            self.clone_cleanup_prompt = Some(CloneCleanupPrompt {
+                                partial_path,
+                                target,
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    self.notice = None;
+                    self.error = Some(error.message.into());
+                }
+            },
+        }
+        cx.notify();
+    }
+
+    fn cancel_git_network_operation(&mut self, cx: &mut Context<Self>) {
+        if let Some(operation) = self.active_git_operation.as_ref() {
+            operation.monitor.cancel();
+            self.notice = Some("正在取消 Git 操作…".into());
+            cx.notify();
+        }
+    }
+
+    fn resolve_clone_cleanup(&mut self, delete: bool, cx: &mut Context<Self>) {
+        let Some(prompt) = self.clone_cleanup_prompt.take() else {
+            return;
+        };
+        self.error = None;
+        self.notice = Some(if delete {
+            "正在删除未完成的克隆目录…".into()
+        } else {
+            "正在保留未完成的克隆目录…".into()
+        });
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if delete {
+                        kite_core::git::remote::delete_partial_clone(&prompt.partial_path)
+                    } else {
+                        kite_core::git::remote::adopt_partial_clone(
+                            &prompt.partial_path,
+                            &prompt.target,
+                        )
+                    }
+                    .map(|()| prompt.target)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_target) if delete => this.notice = Some("未完成的克隆目录已删除".into()),
+                    Ok(target) => {
+                        this.notice = Some(format!("已保留克隆目录：{}", target.display()).into());
+                    }
+                    Err(error) => {
+                        this.notice = None;
+                        this.error = Some(error.message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn begin_git_credentials(
+        &mut self,
+        request: GitNetworkRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("用户名")
+                .clean_on_escape()
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_modal(window, cx);
+                }
+            },
+        );
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.modal = Some(ModalState {
+            kind: ModalKind::GitUsername(request),
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn begin_git_password(
+        &mut self,
+        request: GitNetworkRequest,
+        username: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("密码或个人访问令牌")
+                .masked(true)
+                .clean_on_escape()
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_modal(window, cx);
+                }
+            },
+        );
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.modal = Some(ModalState {
+            kind: ModalKind::GitPassword { request, username },
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn handle_git_pull_recovery(
+        &mut self,
+        strategy: kite_core::git::remote::GitPullStrategy,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(recovery) = self.git_recovery_prompt.take() else {
+            return;
+        };
+        self.start_git_network(
+            GitNetworkRequest {
+                command: GitOperationCommand::PullThenPush {
+                    path: recovery.path,
+                    pull: kite_core::git::remote::GitPullOptions {
+                        strategy,
+                        auto_stash: true,
+                        remote: Some(recovery.push.remote.clone().unwrap_or_default())
+                            .filter(|remote| !remote.is_empty()),
+                        branch: Some(recovery.push.branch.clone().unwrap_or_default())
+                            .filter(|branch| !branch.is_empty()),
+                    },
+                    push: recovery.push,
+                },
+                credentials: recovery.credentials,
+            },
+            window,
+            cx,
+        );
+    }
+    fn render_git_operation_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let operation = self.active_git_operation.as_ref()?;
+        let progress = &operation.progress;
+        let fraction = progress.fraction.unwrap_or(0.0) as f32;
+        Some(
+            h_flex()
+                .h(px(46.))
+                .px_3()
+                .gap_3()
+                .items_center()
+                .bg(cx.theme().primary.opacity(0.10))
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(Icon::new(IconName::GitBranch).size_4())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().text_xs().font_medium().child(operation.label.clone()))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(progress.message.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .h(px(3.))
+                                .w_full()
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(cx.theme().border)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(fraction.clamp(0.02, 1.0)))
+                                        .bg(cx.theme().primary),
+                                ),
+                        ),
+                )
+                .child(
+                    Button::new("cancel-git-network-operation")
+                        .small()
+                        .outline()
+                        .label("取消")
+                        .disabled(progress.cancelled)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.cancel_git_network_operation(cx)
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_clone_cleanup_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let prompt = self.clone_cleanup_prompt.as_ref()?;
+        Some(
+            h_flex()
+                .min_h(px(46.))
+                .px_3()
+                .py_2()
+                .gap_3()
+                .items_center()
+                .bg(cx.theme().warning.opacity(0.12))
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(Icon::new(IconName::TriangleAlert).size_4())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child("克隆已取消。是否删除未完成的目录？")
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(prompt.partial_path.display().to_string()),
+                        ),
+                )
+                .child(
+                    Button::new("clone-cleanup-delete")
+                        .small()
+                        .danger()
+                        .label("删除")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.resolve_clone_cleanup(true, cx)
+                        })),
+                )
+                .child(
+                    Button::new("clone-cleanup-keep")
+                        .small()
+                        .outline()
+                        .label("保留")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.resolve_clone_cleanup(false, cx)
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_git_recovery_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.git_recovery_prompt.as_ref()?;
+        Some(
+            h_flex()
+                .min_h(px(46.))
+                .px_3()
+                .py_2()
+                .gap_3()
+                .items_center()
+                .bg(cx.theme().danger.opacity(0.10))
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(Icon::new(IconName::TriangleAlert).size_4())
+                .child(
+                    div()
+                        .flex_1()
+                        .child("远程包含新的提交，推送被拒绝。先整合远程历史再重试。"),
+                )
+                .child(
+                    Button::new("git-recovery-merge")
+                        .small()
+                        .outline()
+                        .label("合并后重试")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.handle_git_pull_recovery(
+                                kite_core::git::remote::GitPullStrategy::Merge,
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+                .child(
+                    Button::new("git-recovery-rebase")
+                        .small()
+                        .outline()
+                        .label("变基后重试")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.handle_git_pull_recovery(
+                                kite_core::git::remote::GitPullStrategy::Rebase,
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+                .child(
+                    Button::new("git-recovery-dismiss")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::X)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.git_recovery_prompt = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_git_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dialog) = self.git_dialog.take() else {
+            return div().into_any_element();
+        };
+        let (element, restored) = match dialog {
+            GitDialogState::Push(dialog) => {
+                let element = self.render_git_push_dialog(&dialog, cx);
+                (element, GitDialogState::Push(dialog))
+            }
+            GitDialogState::Clone(dialog) => {
+                let element = self.render_git_clone_dialog(&dialog, cx);
+                (element, GitDialogState::Clone(dialog))
+            }
+            GitDialogState::Remotes(dialog) => {
+                let element = self.render_git_remotes_dialog(&dialog, cx);
+                (element, GitDialogState::Remotes(dialog))
+            }
+        };
+        self.git_dialog = Some(restored);
+        element
+    }
+
+    fn git_dialog_shell(
+        &self,
+        title: &'static str,
+        description: &'static str,
+        body: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000a8))
+            .child(
+                v_flex()
+                    .w(px(920.))
+                    .max_w(relative(0.94))
+                    .max_h(relative(0.92))
+                    .overflow_hidden()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .shadow_lg()
+                    .child(
+                        h_flex()
+                            .items_start()
+                            .justify_between()
+                            .gap_4()
+                            .px_5()
+                            .pt_5()
+                            .pb_4()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_lg().font_semibold().child(title))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(description),
+                                    ),
+                            )
+                            .child(
+                                Button::new("close-git-dialog")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::X)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.git_dialog = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(div().flex_1().min_h_0().px_5().pb_5().child(body)),
+            )
+            .into_any_element()
+    }
+
+    fn render_git_push_dialog(
+        &mut self,
+        dialog: &GitPushDialogState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let remote = Input::new(&dialog.remote_input)
+            .aria_label("目标远程")
+            .cleanable(true)
+            .w_full();
+        let branch = Input::new(&dialog.branch_input)
+            .aria_label("目标分支")
+            .cleanable(true)
+            .w_full();
+        let preview = dialog.preview.as_ref();
+        let commits = preview.map(|preview| &preview.commits[..]).unwrap_or(&[]);
+        let protected = preview.is_some_and(|preview| preview.protected_branch);
+        let mut commit_rows = v_flex().gap_1();
+        for (index, commit) in commits.iter().enumerate().rev() {
+            let selected = dialog.selected_commit == Some(index);
+            commit_rows = commit_rows.child(
+                Button::new(("git-push-commit", index))
+                    .ghost()
+                    .selected(selected)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_git_push_commit(index, cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(commit.short_oid.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(commit.subject.clone()),
+                            ),
+                    ),
+            );
+        }
+        let mut file_rows = v_flex().gap_1();
+        for change in &dialog.files {
+            file_rows = file_rows.child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .font_family("monospace")
+                            .text_color(cx.theme().primary)
+                            .child(change.status.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(change.path.clone()),
+                    ),
+            );
+        }
+        let body = v_flex()
+            .gap_4()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(v_flex().flex_1().gap_1().child("远程").child(remote))
+                    .child(v_flex().flex_1().gap_1().child("目标分支").child(branch)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("git-push-tags")
+                            .small()
+                            .outline()
+                            .selected(dialog.include_tags)
+                            .label("同时推送标签")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut()
+                                {
+                                    dialog.include_tags = !dialog.include_tags;
+                                }
+                                this.refresh_git_push_preview(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-force")
+                            .small()
+                            .outline()
+                            .selected(dialog.force_with_lease)
+                            .disabled(protected)
+                            .label(if protected {
+                                "受保护分支禁止强制推送"
+                            } else {
+                                "force-with-lease"
+                            })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut()
+                                {
+                                    dialog.force_with_lease = !dialog.force_with_lease;
+                                }
+                                this.refresh_git_push_preview(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-refresh")
+                            .small()
+                            .ghost()
+                            .label("刷新预览")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_git_push_preview(cx)
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_4()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .gap_2()
+                            .child(
+                                h_flex().justify_between().child("待推送提交").child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{} 个", commits.len())),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(320.))
+                                    .overflow_y_scrollbar()
+                                    .child(commit_rows),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .gap_2()
+                            .child("选中提交更改的文件")
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(320.))
+                                    .overflow_y_scrollbar()
+                                    .child(file_rows),
+                            ),
+                    ),
+            )
+            .when(dialog.loading, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("正在读取推送预览…"),
+                )
+            })
+            .when_some(dialog.error.clone(), |this, error| {
+                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("git-push-cancel")
+                            .outline()
+                            .label("取消")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.git_dialog = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-to-selected")
+                            .outline()
+                            .label("只推送到所选提交")
+                            .disabled(
+                                dialog.selected_commit.is_none()
+                                    || protected && dialog.force_with_lease,
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.submit_git_push(true, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-submit")
+                            .primary()
+                            .label("推送")
+                            .disabled(dialog.loading || protected && dialog.force_with_lease)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.submit_git_push(false, window, cx)
+                            })),
+                    ),
+            );
+        self.git_dialog_shell(
+            "推送提交",
+            "检查待推送提交和文件，选择目标远程与分支。强制推送始终使用 --force-with-lease。",
+            body.into_any_element(),
+            cx,
+        )
+    }
+
+    fn render_git_clone_dialog(
+        &mut self,
+        dialog: &GitCloneDialogState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let url = Input::new(&dialog.url_input)
+            .aria_label("仓库 URL")
+            .cleanable(true)
+            .w_full();
+        let target = Input::new(&dialog.target_input)
+            .aria_label("目标目录")
+            .cleanable(true)
+            .w_full();
+        let depth = Input::new(&dialog.depth_input)
+            .aria_label("浅克隆深度")
+            .w_full();
+        let body = v_flex()
+            .gap_4()
+            .child(v_flex().gap_1().child("仓库 URL").child(url))
+            .child(
+                v_flex().gap_1().child("目标目录").child(target).child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(dialog.directory.display().to_string()),
+                ),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        Button::new("git-clone-shallow")
+                            .small()
+                            .outline()
+                            .selected(dialog.shallow)
+                            .label("浅克隆")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(GitDialogState::Clone(dialog)) =
+                                    this.git_dialog.as_mut()
+                                {
+                                    dialog.shallow = !dialog.shallow;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(dialog.shallow, |this| {
+                        this.child(div().w(px(120.)).child(depth))
+                    }),
+            )
+            .when_some(dialog.error.clone(), |this, error| {
+                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("git-clone-cancel")
+                            .outline()
+                            .label("取消")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.git_dialog = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("git-clone-submit")
+                            .primary()
+                            .label("克隆")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.submit_git_clone(window, cx)
+                            })),
+                    ),
+            );
+        self.git_dialog_shell(
+            "克隆 Git 仓库",
+            "克隆在后台进行，可随时取消。完成后 Kite 会打开目标目录。",
+            body.into_any_element(),
+            cx,
+        )
+    }
+
+    fn render_git_remotes_dialog(
+        &mut self,
+        dialog: &GitRemotesDialogState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = Input::new(&dialog.name_input)
+            .aria_label("远程名称")
+            .cleanable(true)
+            .w_full();
+        let fetch_url = Input::new(&dialog.fetch_url_input)
+            .aria_label("Fetch URL")
+            .cleanable(true)
+            .w_full();
+        let push_url = Input::new(&dialog.push_url_input)
+            .aria_label("Push URL")
+            .cleanable(true)
+            .w_full();
+        let mut remote_rows = v_flex().gap_1();
+        for remote in &dialog.remotes {
+            let selected = dialog.selected.as_deref() == Some(remote.name.as_str());
+            remote_rows = remote_rows.child(
+                Button::new(SharedString::from(format!("git-remote-{}", remote.name)))
+                    .ghost()
+                    .selected(selected)
+                    .on_click(cx.listener({
+                        let remote_name = remote.name.clone();
+                        move |this, _: &ClickEvent, window, cx| {
+                            this.select_git_remote(remote_name.clone(), window, cx)
+                        }
+                    }))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .items_start()
+                            .child(div().font_medium().child(remote.name.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(remote.fetch_url.clone()),
+                            ),
+                    ),
+            );
+        }
+        let body = h_flex()
+            .gap_4()
+            .child(
+                v_flex()
+                    .w(px(340.))
+                    .flex_shrink_0()
+                    .gap_2()
+                    .child("远程")
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(300.))
+                            .overflow_y_scrollbar()
+                            .child(remote_rows),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .gap_3()
+                    .child(v_flex().gap_1().child("名称").child(name))
+                    .child(v_flex().gap_1().child("Fetch URL").child(fetch_url))
+                    .child(v_flex().gap_1().child("Push URL（可选）").child(push_url))
+                    .when_some(dialog.error.clone(), |this, error| {
+                        this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("git-remote-delete")
+                                    .outline()
+                                    .danger()
+                                    .label("删除所选远程")
+                                    .disabled(dialog.selected.is_none() || dialog.loading)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.delete_selected_git_remote(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("git-remote-save")
+                                    .primary()
+                                    .label(if dialog.selected.is_some() {
+                                        "保存远程"
+                                    } else {
+                                        "添加远程"
+                                    })
+                                    .disabled(dialog.loading)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.save_git_remote(cx)
+                                    })),
+                            ),
+                    ),
+            );
+        self.git_dialog_shell(
+            "管理 Git 远程",
+            "添加、改名、删除或修改 Fetch/Push URL。",
+            body.into_any_element(),
+            cx,
+        )
     }
 }
 
@@ -7663,6 +9471,34 @@ fn navigation_parent(path: &Path) -> Option<PathBuf> {
 
 fn path_text(path: &Path) -> String {
     path.display().to_string()
+}
+
+fn nonempty_input(input: &InputState) -> Option<String> {
+    let value = input.value();
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn working_directory_for_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(path).to_path_buf()
+    }
+}
+
+fn clone_target_name(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches(['/', '\\']);
+    let name = trimmed
+        .rsplit(['/', '\\', ':'])
+        .find(|part| !part.is_empty() && *part != ".git")
+        .unwrap_or("repository");
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    if name.is_empty() {
+        "repository".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 fn absolute_path(path: PathBuf) -> PathBuf {
@@ -8640,6 +10476,9 @@ impl Render for KiteApp {
                 )
                 .into_any_element()
         });
+        let git_operation_banner = self.render_git_operation_banner(cx);
+        let clone_cleanup_banner = self.render_clone_cleanup_banner(cx);
+        let git_recovery_banner = self.render_git_recovery_banner(cx);
 
         let show_sidebar = self.show_sidebar;
         let sidebar = self.render_sidebar(cx);
@@ -8814,6 +10653,9 @@ impl Render for KiteApp {
                                     .into_any_element()
                             })
                             .when_some(search_banner, |this, banner| this.child(banner))
+                            .when_some(git_operation_banner, |this, banner| this.child(banner))
+                            .when_some(clone_cleanup_banner, |this, banner| this.child(banner))
+                            .when_some(git_recovery_banner, |this, banner| this.child(banner))
                             .child(div().flex_1().min_h_0().w_full().child(main_view)),
                     ),
             )
@@ -8863,6 +10705,7 @@ impl Render for KiteApp {
                             .child(div().max_w(px(500.)).truncate().child(footer_right)),
                     ),
             )
+            .child(self.render_git_dialog(cx))
             .child(self.render_modal(cx))
     }
 }
@@ -9631,7 +11474,9 @@ mod column_details_tests {
 
 #[cfg(test)]
 mod scroll_routing_tests {
-    use super::{directory_scroll_offset, horizontal_wheel_delta, wheel_scrolls_columns};
+    use super::{
+        clone_target_name, directory_scroll_offset, horizontal_wheel_delta, wheel_scrolls_columns,
+    };
 
     #[test]
     fn horizontal_gesture_takes_priority_over_vertical_noise() {
@@ -9671,5 +11516,16 @@ mod scroll_routing_tests {
     #[test]
     fn non_scrollable_directory_stays_at_start() {
         assert_eq!(directory_scroll_offset(-90.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn derives_clone_directory_from_common_git_urls() {
+        assert_eq!(
+            clone_target_name("https://example.com/team/kite.git"),
+            "kite"
+        );
+        assert_eq!(clone_target_name("git@example.com:team/kite.git"), "kite");
+        assert_eq!(clone_target_name("ssh://example.com/team/kite"), "kite");
+        assert_eq!(clone_target_name("https://example.com/"), "example.com");
     }
 }

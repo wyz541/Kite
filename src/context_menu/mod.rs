@@ -430,7 +430,7 @@ impl ContextMenuProvider for VcsMenuProvider {
         model.submenu(
             "Git",
             IconName::GitBranch,
-            !target.loading && target.git_available,
+            !target.loading,
             git_menu_entries(!target.loading && target.git_available),
         );
         model.submenu(
@@ -486,6 +486,18 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
             VcsMenuCommand::GitOpenClient,
             enabled,
         ),
+        menu_item(
+            "克隆仓库…",
+            IconName::GitBranch,
+            VcsMenuCommand::GitClone,
+            true,
+        ),
+        menu_item(
+            "初始化仓库",
+            IconName::GitBranch,
+            VcsMenuCommand::GitInit,
+            true,
+        ),
         ContextMenuNode::Separator,
         menu_item("添加", IconName::GitBranch, VcsMenuCommand::GitAdd, enabled),
         menu_item(
@@ -502,21 +514,33 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
         ),
         ContextMenuNode::Separator,
         menu_item(
-            "拉取",
+            "拉取…",
             IconName::GitBranch,
             VcsMenuCommand::GitPull,
             enabled,
         ),
         menu_item(
-            "推送",
+            "推送…",
             IconName::GitBranch,
             VcsMenuCommand::GitPush,
             enabled,
         ),
         menu_item(
-            "获取",
+            "获取当前远程",
             IconName::GitBranch,
             VcsMenuCommand::GitFetch,
+            enabled,
+        ),
+        menu_item(
+            "获取全部远程",
+            IconName::GitBranch,
+            VcsMenuCommand::GitFetchAll,
+            enabled,
+        ),
+        menu_item(
+            "管理远程…",
+            IconName::GitBranch,
+            VcsMenuCommand::GitManageRemotes,
             enabled,
         ),
         ContextMenuNode::Separator,
@@ -925,6 +949,10 @@ mod tests {
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPull)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPush)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitFetch)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitFetchAll)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitManageRemotes)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClone)));
+        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitInit)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitDiff)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitLog)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRebase)));
