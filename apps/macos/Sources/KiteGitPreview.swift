@@ -12,6 +12,13 @@ struct KiteGitPreviewSection: View {
     @State private var diff: [GitDiffLineDto]?
     @State private var diffError: String?
     @State private var actionMessage: String?
+    @State private var blameVisible = false
+    @State private var blameLoading = false
+    @State private var blamePages: [GitBlamePageDto] = []
+    @State private var blameError: String?
+    @State private var ignoreWhitespace = true
+    @State private var selectedBlame: GitBlameLineDto?
+    @State private var blameGeneration = 0
 
     var body: some View {
         // A VStack always exists in the hierarchy, so `.task` runs even while
@@ -57,6 +64,18 @@ struct KiteGitPreviewSection: View {
         }
     }
 
+    private var blameLines: [GitBlameLineDto] {
+        blamePages.flatMap(\.lines)
+    }
+
+    private var blameEndLine: UInt32 {
+        blamePages.last?.endLine ?? 0
+    }
+
+    private var blameTotalLines: UInt32 {
+        blamePages.last?.totalLines ?? 0
+    }
+
     @ViewBuilder
     private func content(_ summary: GitPathSummaryDto) -> some View {
         Text(branchLine(summary))
@@ -88,6 +107,9 @@ struct KiteGitPreviewSection: View {
                     Text("已忽略").foregroundStyle(.secondary)
                 } else if summary.stagedStatus == nil && summary.unstagedStatus == nil {
                     Text("无变更").foregroundStyle(.secondary)
+                }
+                if let submodule = entry.submoduleStatus {
+                    Text(submodule).foregroundStyle(.secondary)
                 }
                 if summary.linesAdded > 0 || summary.linesRemoved > 0 {
                     Text("+\(summary.linesAdded)").foregroundStyle(.green)
@@ -124,6 +146,10 @@ struct KiteGitPreviewSection: View {
         if diffVisible {
             diffView
         }
+
+        if blameVisible {
+            blameView
+        }
     }
 
     private func actions(_ summary: GitPathSummaryDto) -> some View {
@@ -138,6 +164,7 @@ struct KiteGitPreviewSection: View {
             if summary.stagedStatus != nil {
                 actionButton("取消暂存") { run(.unstage) }
             }
+            actionButton(blameVisible ? "隐藏 Blame" : "Blame") { toggleBlame() }
             actionButton("历史") { showLog() }
         }
     }
@@ -213,6 +240,120 @@ struct KiteGitPreviewSection: View {
             .background(background)
     }
 
+    @ViewBuilder
+    private var blameView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("逐行 Blame")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Spacer()
+                Toggle("忽略空白", isOn: $ignoreWhitespace)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 9.5))
+                    .onChange(of: ignoreWhitespace) { _ in
+                        reloadBlame()
+                    }
+            }
+
+            if let blameError {
+                Text(blameError)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+            } else if blameLoading, blamePages.isEmpty {
+                Text("正在读取 Blame…")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+            } else if !blamePages.isEmpty {
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(blameLines, id: \.lineNumber) { line in
+                            Button {
+                                selectedBlame = line
+                                model.openGitLog(
+                                    path: entry.path,
+                                    initialHash: line.commitHash
+                                )
+                            } label: {
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("\(line.lineNumber)")
+                                        .foregroundStyle(.quaternary)
+                                        .frame(width: 30, alignment: .trailing)
+                                    Text(line.shortHash)
+                                        .foregroundStyle(blameColor(line))
+                                        .frame(width: 48, alignment: .leading)
+                                    Text(line.author)
+                                        .foregroundStyle(blameColor(line))
+                                        .frame(width: 72, alignment: .leading)
+                                        .lineLimit(1)
+                                    Text(line.code)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .padding(.horizontal, 4)
+                                .frame(height: 18)
+                                .background(
+                                    selectedBlame?.lineNumber == line.lineNumber
+                                        ? Color.accentColor.opacity(0.12)
+                                        : Color.clear
+                                )
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help(blameTooltip(line))
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+                .frame(maxHeight: 340)
+                .background(
+                    Color.primary.opacity(0.035),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+
+                HStack {
+                    Text("显示 \(blameLines.count) / \(blameTotalLines) 行")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    if blameEndLine < blameTotalLines {
+                        Button("加载更多") { loadMoreBlame() }
+                            .buttonStyle(.borderless)
+                            .font(.system(size: 10))
+                    }
+                }
+            }
+
+            if let selectedBlame {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(selectedBlame.shortHash)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        Spacer()
+                        Button {
+                            self.selectedBlame = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    Text(selectedBlame.summary)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(2)
+                    Text("\(selectedBlame.author) · \(commitDate(selectedBlame.authorTime))")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(8)
+                .background(
+                    Color.accentColor.opacity(0.075),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+            }
+        }
+    }
+
     private func load() async {
         // Entries without a status in a column without Git are outside a work
         // tree; skip the extra git processes for them.
@@ -225,8 +366,83 @@ struct KiteGitPreviewSection: View {
         diffError = nil
         diffVisible = false
         actionMessage = nil
+        blameVisible = false
+        blamePages = []
+        blameError = nil
+        selectedBlame = nil
+        blameGeneration += 1
         summary = await model.gitPathSummary(path: entry.path)
         loading = false
+    }
+
+    private func toggleBlame() {
+        blameVisible.toggle()
+        if blameVisible && blamePages.isEmpty {
+            reloadBlame()
+        }
+    }
+
+    private func reloadBlame() {
+        guard blameVisible else { return }
+        blamePages = []
+        blameError = nil
+        selectedBlame = nil
+        blameGeneration += 1
+        loadBlame(startLine: 1)
+    }
+
+    private func loadMoreBlame() {
+        guard let page = blamePages.last, blameEndLine < blameTotalLines else { return }
+        loadBlame(startLine: page.endLine + 1)
+    }
+
+    private func loadBlame(startLine: UInt32) {
+        blameLoading = true
+        let path = entry.path
+        let ignoreWhitespace = ignoreWhitespace
+        let generation = blameGeneration
+        Task {
+            do {
+                let page = try await model.gitBlame(
+                    path: path,
+                    startLine: startLine,
+                    lineCount: 400,
+                    ignoreWhitespace: ignoreWhitespace
+                )
+                guard generation == blameGeneration else { return }
+                if startLine == 1 {
+                    blamePages = [page]
+                } else {
+                    blamePages.append(page)
+                }
+            } catch {
+                guard generation == blameGeneration else { return }
+                blameError = error.localizedDescription
+            }
+            blameLoading = false
+        }
+    }
+
+    private func blameColor(_ line: GitBlameLineDto) -> Color {
+        if line.isUncommitted {
+            return .red
+        }
+        let age = max(0, Date().timeIntervalSince1970 - TimeInterval(line.authorTime))
+        let days = age / 86_400
+        return Color.accentColor.opacity(max(0.42, 1 - min(days, 730) / 900))
+    }
+
+    private func blameTooltip(_ line: GitBlameLineDto) -> String {
+        var parts = [
+            line.shortHash,
+            line.author,
+            commitDate(line.authorTime),
+            line.summary,
+        ]
+        if let mail = line.authorMail {
+            parts.append(mail)
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func toggleDiff() {

@@ -27,6 +27,7 @@ use crate::git_branches::GitHeadSummary;
 use crate::git_branches_window;
 use crate::git_client_window::open_git_client_window;
 use crate::git_log_window;
+use crate::git_tools_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -64,8 +65,8 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
-    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, GitService, git_file_diff,
-    git_path_summary,
+    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, GitService, GitWorktree,
+    apply_submodule_statuses, git_file_diff, git_path_summary, git_submodules, git_worktrees,
 };
 pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
@@ -802,6 +803,11 @@ struct ColumnGitPreview {
     diff: Option<Result<Arc<Vec<GitDiffLine>>, SharedString>>,
 }
 
+#[derive(Clone)]
+struct GitToolbarState {
+    worktrees: Vec<GitWorktree>,
+}
+
 enum PreviewScrollbar {
     Lines(UniformListScrollHandle),
     Markdown(ScrollHandle),
@@ -897,6 +903,8 @@ pub struct KiteApp {
     _preview_task: Task<()>,
     column_git_preview: Option<ColumnGitPreview>,
     _git_preview_task: Task<()>,
+    git_toolbar: Option<GitToolbarState>,
+    _git_toolbar_task: Task<()>,
     path_bar_scroll: ScrollHandle,
     path_bar_scroll_pending: bool,
     column_generation: u64,
@@ -1166,6 +1174,8 @@ impl KiteApp {
             _preview_task: Task::ready(()),
             column_git_preview: None,
             _git_preview_task: Task::ready(()),
+            git_toolbar: None,
+            _git_toolbar_task: Task::ready(()),
             path_bar_scroll: ScrollHandle::new(),
             path_bar_scroll_pending: false,
             column_generation: 0,
@@ -2276,13 +2286,18 @@ impl KiteApp {
         let status_root = root.clone();
         let head_root = root.clone();
         self._vcs_task = cx.spawn(async move |this, cx| {
-            let (snapshot, git_head) = cx
+            let (snapshot, git_head, submodules) = cx
                 .background_spawn(async move {
                     let snapshot = load_vcs_snapshot(&status_root);
                     let git_head = crate::git_branches::git_head_summary(&head_root)
                         .ok()
                         .flatten();
-                    (snapshot, git_head)
+                    let submodules = if snapshot.git_available() {
+                        git_submodules(&status_root).ok().flatten()
+                    } else {
+                        None
+                    };
+                    (snapshot, git_head, submodules)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -2292,6 +2307,9 @@ impl KiteApp {
                 this.git_head = git_head;
                 this.table.update(cx, |state, cx| {
                     state.delegate_mut().apply_vcs_statuses(&root, &snapshot);
+                    if let Some(submodules) = submodules.as_ref() {
+                        state.delegate_mut().apply_submodule_statuses(submodules);
+                    }
                     state.refresh(cx);
                     cx.notify();
                 });
@@ -2304,10 +2322,43 @@ impl KiteApp {
                     if let Some(search_entries) = pane.search_entries.as_mut() {
                         apply_statuses(search_entries, &root, &snapshot);
                     }
+                    if let Some(submodules) = submodules.as_ref() {
+                        apply_submodule_statuses(&mut pane.directory_entries, submodules);
+                        if let Some(search_entries) = pane.search_entries.as_mut() {
+                            apply_submodule_statuses(search_entries, submodules);
+                        }
+                    }
                     pane.git_available = snapshot.git_available();
                     pane.svn_available = snapshot.svn_available();
                     pane.refresh_view();
                 }
+                this.refresh_git_toolbar(root.clone(), snapshot.git_available(), cx);
+                cx.notify();
+            });
+        });
+    }
+
+    fn refresh_git_toolbar(&mut self, root: PathBuf, git_available: bool, cx: &mut Context<Self>) {
+        if !git_available {
+            self._git_toolbar_task = Task::ready(());
+            self.git_toolbar = None;
+            return;
+        }
+        let generation = self.vcs_generation;
+        self._git_toolbar_task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { git_worktrees(&root) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.vcs_generation != generation {
+                    return;
+                }
+                this.git_toolbar = match result {
+                    Ok(Some(list)) => Some(GitToolbarState {
+                        worktrees: list.worktrees,
+                    }),
+                    _ => None,
+                };
                 cx.notify();
             });
         });
@@ -2772,6 +2823,19 @@ impl KiteApp {
             });
         })
         .detach();
+    }
+
+    pub(crate) fn open_directory_from_git_tools(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_to(path, NavigationIntent::Push, window, cx);
+    }
+
+    pub(crate) fn refresh_git_metadata_after_tool_change(&mut self, cx: &mut Context<Self>) {
+        self.refresh_vcs_statuses(self.current_dir.clone(), cx);
     }
 
     fn selected_entries(&self, cx: &App) -> Vec<FileEntry> {
@@ -3264,6 +3328,18 @@ impl KiteApp {
                 }
                 cx.notify();
             }
+            VcsMenuCommand::GitTools => {
+                match git_tools_window::open_git_tools_window(cx.entity(), path.clone(), cx) {
+                    Ok(()) => {
+                        self.error = None;
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
             VcsMenuCommand::GitAdd => {
                 self.run_vcs_task(VcsTool::Git, VcsOperation::Add, path, window, cx)
             }
@@ -3284,7 +3360,7 @@ impl KiteApp {
                 self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
             }
             VcsMenuCommand::GitLog => {
-                match git_log_window::open_git_log_window(path, cx) {
+                match git_log_window::open_git_log_window(path, None, cx) {
                     Ok(()) => {
                         self.error = None;
                         self.notice = Some("已打开提交历史窗口".into());
@@ -4945,13 +5021,83 @@ impl KiteApp {
             .items_center()
             .child(navigation_group);
 
-        let actions = h_flex()
+        let git_control = self.git_toolbar.as_ref().map(|git| {
+            let branch = git
+                .worktrees
+                .iter()
+                .find(|worktree| worktree.is_current)
+                .and_then(|worktree| worktree.branch.clone())
+                .unwrap_or_else(|| "Git".to_string());
+            let worktrees = git.worktrees.clone();
+            let manage_target = self.current_dir.clone();
+            Button::new("git-worktree-menu")
+                .ghost()
+                .compact()
+                .icon(IconName::GitBranch)
+                .label(branch)
+                .tooltip("切换 Worktree 或打开 Git 工具")
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu
+                        .min_w(px(300.))
+                        .max_w(px(420.))
+                        .label("Worktree")
+                        .separator();
+                    for worktree in &worktrees {
+                        let label = format!(
+                            "{} · {}",
+                            worktree
+                                .branch
+                                .clone()
+                                .unwrap_or_else(|| "分离 HEAD".into()),
+                            if worktree.is_primary {
+                                "主工作区".to_string()
+                            } else {
+                                worktree
+                                    .path
+                                    .file_name()
+                                    .map(|value| value.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| worktree.path.display().to_string())
+                            }
+                        );
+                        menu = menu.item(
+                            PopupMenuItem::new(label)
+                                .icon(IconName::GitBranch)
+                                .checked(worktree.is_current)
+                                .disabled(worktree.is_current || worktree.prunable_reason.is_some())
+                                .action(Box::new(ContextMenuAction {
+                                    target: worktree.path.clone(),
+                                    working_directory: manage_target.clone(),
+                                    command: ContextMenuCommand::Open,
+                                })),
+                        );
+                    }
+                    menu.separator().item(
+                        PopupMenuItem::new("管理 Worktree 与 Submodule…")
+                            .icon(IconName::Boxes)
+                            .action(Box::new(ContextMenuAction {
+                                target: manage_target.clone(),
+                                working_directory: manage_target.clone(),
+                                command: ContextMenuCommand::Vcs(VcsMenuCommand::GitTools),
+                            })),
+                    )
+                })
+                .into_any_element()
+        });
+
+        let mut actions = h_flex()
             .h(px(TOOLBAR_CONTROL_HEIGHT))
             .gap_0p5()
             .px_1()
             .items_center()
             .rounded_md()
-            .bg(cx.theme().background.opacity(0.42))
+            .bg(cx.theme().background.opacity(0.42));
+        if let Some(git_control) = git_control {
+            actions = actions
+                .child(git_control)
+                .child(div().w(px(1.)).h(px(18.)).bg(cx.theme().border).mx_1());
+        }
+        let actions = actions
             .child(
                 Button::new("favorite-current-directory")
                     .ghost()
@@ -8056,6 +8202,9 @@ fn preview_info_text(entry: &FileEntry) -> String {
     if let Some(status) = entry.git_status {
         lines.push(format!("Git：{} ({})", status.label(), status.code()));
     }
+    if let Some(status) = entry.submodule_status {
+        lines.push(format!("Submodule：{} ({})", status.label(), status.code()));
+    }
     if let Some(status) = entry.svn_status {
         lines.push(format!("SVN：{} ({})", status.label(), status.code()));
     }
@@ -9121,6 +9270,7 @@ mod path_bar_tests {
             size: 0,
             modified: None,
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         }
     }
@@ -9469,6 +9619,7 @@ otes.{extension}"
             modified: None,
             extension: extension.to_string(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         };
 
@@ -9519,6 +9670,7 @@ otes.{extension}"
             modified: None,
             extension: "txt".to_string(),
             git_status: Some(VcsStatus::Modified),
+            submodule_status: None,
             svn_status: None,
         };
 
@@ -9563,6 +9715,7 @@ otes.{extension}"
             modified: None,
             extension: extension.to_string(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         };
 
@@ -9594,6 +9747,7 @@ mod column_details_tests {
             modified: Some(UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
             extension: "mp4".to_string(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         }
     }

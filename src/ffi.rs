@@ -15,7 +15,11 @@ use crate::git::log::{
     self as git_log, GitChangedFile, GitCommitDetails, GitGraphRow, GitLogCommit, GitLogFilter,
     GitLogPage, GitRef, GitRefKind as GitLogRefKind, GitSignature, GitTreeEntry,
 };
-use crate::git::{self, GitDiffLine, GitDiffLineKind, GitPathSummary};
+use crate::git::{
+    self, GitBlameLine, GitBlamePage, GitDiffLine, GitDiffLineKind, GitPathSummary, GitSubmodule,
+    GitSubmoduleList, GitSubmoduleState, GitWorktree as GitWorktreeStatus, GitWorktreeCreateMode,
+    GitWorktreeList, GitWorktreeRemovalCheck,
+};
 use crate::git_branches::{
     self, GitBranch, GitBranchSnapshot, GitCompareCommit, GitCompareFile, GitCompareResult,
     GitDirtyPolicy, GitHeadSummary, GitRefKind, GitTag, GitWorktree,
@@ -45,6 +49,7 @@ pub struct DirectoryEntryDto {
     pub modified_unix_ms: Option<i64>,
     pub kind_label: String,
     pub git_status: Option<String>,
+    pub submodule_status: Option<String>,
     pub svn_status: Option<String>,
 }
 
@@ -287,6 +292,82 @@ pub struct GitDiffLineDto {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
+pub struct GitBlameLineDto {
+    pub line_number: u32,
+    pub commit_hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub author_mail: Option<String>,
+    pub author_time: i64,
+    pub committer: String,
+    pub committer_mail: Option<String>,
+    pub committer_time: i64,
+    pub summary: String,
+    pub filename: Option<String>,
+    pub previous_hash: Option<String>,
+    pub previous_line: Option<u32>,
+    pub is_uncommitted: bool,
+    pub code: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitBlamePageDto {
+    pub repository_root: String,
+    pub relative_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub total_lines: u32,
+    pub ignore_whitespace: bool,
+    pub lines: Vec<GitBlameLineDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitWorktreeListDto {
+    pub repository_root: String,
+    pub worktrees: Vec<GitWorktreeDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitWorktreeRemovalCheckDto {
+    pub path: String,
+    pub branch: Option<String>,
+    pub is_primary: bool,
+    pub has_uncommitted_changes: bool,
+    pub change_count: u32,
+    pub summary: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitSubmoduleStateDto {
+    Uninitialized,
+    Initialized,
+    OutOfDate,
+    Conflicted,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitSubmoduleDto {
+    pub name: String,
+    pub relative_path: String,
+    pub path: String,
+    pub url: String,
+    pub declared_commit: String,
+    pub current_commit: Option<String>,
+    pub branch: Option<String>,
+    pub describe: Option<String>,
+    pub state: GitSubmoduleStateDto,
+    pub state_label: String,
+    pub state_code: String,
+    pub has_uncommitted_changes: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitSubmoduleListDto {
+    pub repository_root: String,
+    pub submodules: Vec<GitSubmoduleDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct GitHeadSummaryDto {
     pub repository_root: String,
     pub branch: Option<String>,
@@ -348,6 +429,9 @@ pub struct GitWorktreeDto {
     pub is_current: bool,
     pub is_bare: bool,
     pub is_detached: bool,
+    pub locked_reason: Option<String>,
+    pub prunable_reason: Option<String>,
+    pub is_primary: bool,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -858,6 +942,11 @@ impl KiteCore {
         let vcs = load_vcs_snapshot(&snapshot.path);
         let mut entries = snapshot.entries;
         apply_statuses(&mut entries, &snapshot.path, &vcs);
+        if vcs.git_available()
+            && let Ok(Some(submodules)) = git::git_submodules(&snapshot.path)
+        {
+            git::apply_submodule_statuses(&mut entries, &submodules);
+        }
         Ok(DirectoryListingDto {
             path: snapshot.path.to_string_lossy().into_owned(),
             entries: entries.iter().map(entry_dto).collect(),
@@ -902,6 +991,11 @@ impl KiteCore {
         let vcs = load_vcs_snapshot(&snapshot.root);
         let mut entries = snapshot.entries;
         apply_statuses(&mut entries, &snapshot.root, &vcs);
+        if vcs.git_available()
+            && let Ok(Some(submodules)) = git::git_submodules(&snapshot.root)
+        {
+            git::apply_submodule_statuses(&mut entries, &submodules);
+        }
         Ok(Some(DirectorySearchDto {
             path: snapshot.root.to_string_lossy().into_owned(),
             query: snapshot.query,
@@ -1227,6 +1321,81 @@ impl KiteCore {
         git::git_file_diff(&PathBuf::from(path))
             .map(|lines| lines.into_iter().map(git_diff_line_dto).collect())
             .map_err(KiteError::operation)
+    }
+
+    pub fn git_blame(
+        &self,
+        path: String,
+        start_line: u32,
+        line_count: u32,
+        ignore_whitespace: bool,
+    ) -> Result<GitBlamePageDto, KiteError> {
+        git::git_blame(
+            &PathBuf::from(path),
+            start_line,
+            line_count,
+            ignore_whitespace,
+        )
+        .map(git_blame_page_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_worktrees(&self, path: String) -> Result<Option<GitWorktreeListDto>, KiteError> {
+        git::git_worktrees(&PathBuf::from(path))
+            .map(|list| list.map(git_worktree_list_dto))
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_add_worktree(
+        &self,
+        repository_path: String,
+        destination: String,
+        branch: String,
+        create_branch: bool,
+        start_point: Option<String>,
+    ) -> Result<GitWorktreeDto, KiteError> {
+        let mode = if create_branch {
+            GitWorktreeCreateMode::NewBranch {
+                branch,
+                start_point,
+            }
+        } else {
+            GitWorktreeCreateMode::ExistingBranch { branch }
+        };
+        git::create_git_worktree(
+            &PathBuf::from(repository_path),
+            &PathBuf::from(destination),
+            mode,
+        )
+        .map(git_managed_worktree_dto)
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_worktree_removal_check(
+        &self,
+        path: String,
+    ) -> Result<GitWorktreeRemovalCheckDto, KiteError> {
+        git::worktree_removal_check(&PathBuf::from(path))
+            .map(git_worktree_removal_check_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_remove_worktree(&self, path: String, force: bool) -> Result<(), KiteError> {
+        git::remove_git_worktree(&PathBuf::from(path), force).map_err(KiteError::operation)
+    }
+
+    pub fn git_submodules(&self, path: String) -> Result<Option<GitSubmoduleListDto>, KiteError> {
+        git::git_submodules(&PathBuf::from(path))
+            .map(|list| list.map(git_submodule_list_dto))
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_init_submodules(&self, path: String) -> Result<String, KiteError> {
+        git::git_init_submodules(&PathBuf::from(path)).map_err(KiteError::operation)
+    }
+
+    pub fn git_update_submodules(&self, path: String) -> Result<String, KiteError> {
+        git::git_update_submodules(&PathBuf::from(path)).map_err(KiteError::operation)
     }
 
     /// Reads the current branch, ahead/behind counts, and dirty state.
@@ -1994,6 +2163,111 @@ fn git_diff_line_dto(line: GitDiffLine) -> GitDiffLineDto {
     }
 }
 
+fn git_blame_page_dto(page: GitBlamePage) -> GitBlamePageDto {
+    GitBlamePageDto {
+        repository_root: page.repository_root.to_string_lossy().into_owned(),
+        relative_path: page.relative_path,
+        start_line: page.start_line,
+        end_line: page.end_line,
+        total_lines: page.total_lines,
+        ignore_whitespace: page.ignore_whitespace,
+        lines: page.lines.into_iter().map(git_blame_line_dto).collect(),
+    }
+}
+
+fn git_blame_line_dto(line: GitBlameLine) -> GitBlameLineDto {
+    let (previous_hash, previous_line) = line
+        .previous
+        .map(|(hash, line)| (Some(hash), Some(line)))
+        .unwrap_or((None, None));
+    GitBlameLineDto {
+        line_number: line.line_number,
+        commit_hash: line.commit_hash,
+        short_hash: line.short_hash,
+        author: line.author,
+        author_mail: line.author_mail,
+        author_time: line.author_time,
+        committer: line.committer,
+        committer_mail: line.committer_mail,
+        committer_time: line.committer_time,
+        summary: line.summary,
+        filename: line.filename,
+        previous_hash,
+        previous_line,
+        is_uncommitted: line.is_uncommitted,
+        code: line.code,
+    }
+}
+
+fn git_worktree_list_dto(list: GitWorktreeList) -> GitWorktreeListDto {
+    GitWorktreeListDto {
+        repository_root: list.repository_root.to_string_lossy().into_owned(),
+        worktrees: list
+            .worktrees
+            .into_iter()
+            .map(git_managed_worktree_dto)
+            .collect(),
+    }
+}
+
+fn git_managed_worktree_dto(worktree: GitWorktreeStatus) -> GitWorktreeDto {
+    GitWorktreeDto {
+        path: worktree.path.to_string_lossy().into_owned(),
+        head_hash: worktree.head,
+        branch: worktree.branch,
+        is_current: worktree.is_current,
+        is_bare: worktree.bare,
+        is_detached: worktree.detached,
+        locked_reason: worktree.locked_reason,
+        prunable_reason: worktree.prunable_reason,
+        is_primary: worktree.is_primary,
+    }
+}
+
+fn git_worktree_removal_check_dto(check: GitWorktreeRemovalCheck) -> GitWorktreeRemovalCheckDto {
+    GitWorktreeRemovalCheckDto {
+        path: check.path.to_string_lossy().into_owned(),
+        branch: check.branch,
+        is_primary: check.is_primary,
+        has_uncommitted_changes: check.has_uncommitted_changes,
+        change_count: check.change_count,
+        summary: check.summary,
+    }
+}
+
+fn git_submodule_list_dto(list: GitSubmoduleList) -> GitSubmoduleListDto {
+    GitSubmoduleListDto {
+        repository_root: list.repository_root.to_string_lossy().into_owned(),
+        submodules: list.submodules.into_iter().map(git_submodule_dto).collect(),
+    }
+}
+
+fn git_submodule_dto(submodule: GitSubmodule) -> GitSubmoduleDto {
+    GitSubmoduleDto {
+        name: submodule.name,
+        relative_path: submodule.relative_path,
+        path: submodule.path.to_string_lossy().into_owned(),
+        url: submodule.url,
+        declared_commit: submodule.declared_commit,
+        current_commit: submodule.current_commit,
+        branch: submodule.branch,
+        describe: submodule.describe,
+        state: git_submodule_state_dto(submodule.state),
+        state_label: submodule.state.label().to_string(),
+        state_code: submodule.state.code().to_string(),
+        has_uncommitted_changes: submodule.has_uncommitted_changes,
+    }
+}
+
+fn git_submodule_state_dto(state: GitSubmoduleState) -> GitSubmoduleStateDto {
+    match state {
+        GitSubmoduleState::Uninitialized => GitSubmoduleStateDto::Uninitialized,
+        GitSubmoduleState::Initialized => GitSubmoduleStateDto::Initialized,
+        GitSubmoduleState::OutOfDate => GitSubmoduleStateDto::OutOfDate,
+        GitSubmoduleState::Conflicted => GitSubmoduleStateDto::Conflicted,
+    }
+}
+
 fn git_ref_kind(kind: GitRefKindDto) -> GitRefKind {
     match kind {
         GitRefKindDto::LocalBranch => GitRefKind::LocalBranch,
@@ -2124,6 +2398,9 @@ fn git_worktree_dto(worktree: GitWorktree) -> GitWorktreeDto {
         is_current: worktree.is_current,
         is_bare: worktree.is_bare,
         is_detached: worktree.is_detached,
+        locked_reason: None,
+        prunable_reason: None,
+        is_primary: false,
     }
 }
 
@@ -2452,6 +2729,9 @@ fn entry_dto(entry: &FileEntry) -> DirectoryEntryDto {
             .map(|duration| duration.as_millis() as i64),
         kind_label: entry.type_label(),
         git_status: entry.git_status.map(vcs_status_text),
+        submodule_status: entry
+            .submodule_status
+            .map(|state| format!("{} ({})", state.label(), state.code())),
         svn_status: entry.svn_status.map(vcs_status_text),
     }
 }

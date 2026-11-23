@@ -492,6 +492,7 @@ mod tests {
             modified: None,
             extension: String::new(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         }
     }

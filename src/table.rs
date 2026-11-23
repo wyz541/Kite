@@ -74,6 +74,10 @@ impl FileTableDelegate {
         sort_entries(&mut self.entries, self.sort);
     }
 
+    pub fn apply_submodule_statuses(&mut self, submodules: &crate::git::GitSubmoduleList) {
+        crate::git::apply_submodule_statuses(&mut self.entries, submodules);
+    }
+
     pub fn directory_context_menu_target(&self) -> ContextMenuTarget {
         let title = if crate::shell_fs::is_shell_namespace_path(&self.working_directory) {
             crate::shell_fs::display_name(&self.working_directory)
@@ -256,6 +260,9 @@ impl TableDelegate for FileTableDelegate {
                 let mut badges = h_flex().h_full().gap_1().items_center();
                 if let Some(status) = entry.git_status {
                     badges = badges.child(vcs_badge(IconName::GitBranch, status));
+                }
+                if let Some(status) = entry.submodule_status {
+                    badges = badges.child(submodule_badge(status));
                 }
                 if let Some(status) = entry.svn_status {
                     badges = badges.child(vcs_badge(IconName::Boxes, status));
@@ -524,6 +531,31 @@ pub(crate) fn vcs_badge(icon: IconName, status: VcsStatus) -> AnyElement {
         .into_any_element()
 }
 
+fn submodule_badge(status: crate::git::GitSubmoduleState) -> AnyElement {
+    let color: Hsla = match status {
+        crate::git::GitSubmoduleState::Initialized => rgb(0x55b978).into(),
+        crate::git::GitSubmoduleState::Uninitialized => rgb(0x8a96a8).into(),
+        crate::git::GitSubmoduleState::OutOfDate => rgb(0xe5a84b).into(),
+        crate::git::GitSubmoduleState::Conflicted => rgb(0xef6b73).into(),
+    };
+    h_flex()
+        .h(px(19.))
+        .items_center()
+        .gap_0p5()
+        .px_1()
+        .rounded_sm()
+        .bg(color.opacity(0.14))
+        .child(Icon::new(IconName::Boxes).size_3().text_color(color))
+        .child(
+            div()
+                .text_xs()
+                .font_medium()
+                .text_color(color)
+                .child(status.code()),
+        )
+        .into_any_element()
+}
+
 pub(crate) fn vcs_status_color(status: VcsStatus) -> Hsla {
     match status {
         VcsStatus::Modified | VcsStatus::PropertyModified => rgb(0xe5a84b).into(),
@@ -538,6 +570,9 @@ fn vcs_cell_text(entry: &FileEntry) -> String {
     let mut values = Vec::new();
     if let Some(status) = entry.git_status {
         values.push(format!("Git {}", status.label()));
+    }
+    if let Some(status) = entry.submodule_status {
+        values.push(format!("Submodule {}", status.label()));
     }
     if let Some(status) = entry.svn_status {
         values.push(format!("SVN {}", status.label()));

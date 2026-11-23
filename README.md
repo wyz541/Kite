@@ -190,6 +190,7 @@ macOS 可与 Finder 共享文件剪贴板。
 | Git 分支与标签 | 已支持 | 已支持 |
 | Git 客户端变更与行级暂存 | 已支持 | 已支持 |
 | 提交历史与提交图 | 已支持 | 已支持 |
+| Blame、Worktree 与 Submodule | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |
@@ -323,6 +324,7 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [macOS 分栏显示规则](docs/architecture/macos-column-rules.md)
 - [macOS 分栏搜索](docs/architecture/macos-column-search.md)
 - [全局文件内容搜索](docs/architecture/content-search.md)
+- [Git Blame、Worktree 与 Submodule](docs/architecture/git-blame-worktree-submodule.md)
 - [分栏自动刷新](docs/architecture/auto-refresh.md)
 - [图标系统](docs/design/icon-system.md)
 - [搜索实现调研](docs/RUST_SEARCH_ENGINE_RESEARCH.md)

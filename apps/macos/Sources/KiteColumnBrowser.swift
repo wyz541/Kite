@@ -1139,6 +1139,9 @@ private struct KiteBrowserRow: View {
         if let git = entry.gitStatus {
             parts.append("Git \(git)")
         }
+        if let submodule = entry.submoduleStatus {
+            parts.append("Submodule \(submodule)")
+        }
         if let svn = entry.svnStatus {
             parts.append("SVN \(svn)")
         }
@@ -1147,11 +1150,11 @@ private struct KiteBrowserRow: View {
 
     private var vcsBadge: KiteVcsBadge? {
         let git = KiteVcsBadge(value: entry.gitStatus, isSvn: false)
+        let submodule = KiteVcsBadge(value: entry.submoduleStatus, isSvn: false)
         let svn = KiteVcsBadge(value: entry.svnStatus, isSvn: true)
-        if let git, let svn {
-            return svn.rank > git.rank ? svn : git
-        }
-        return git ?? svn
+        return [git, submodule, svn]
+            .compactMap { $0 }
+            .max { $0.rank < $1.rank }
     }
 }
 
@@ -1176,6 +1179,15 @@ private struct KiteVcsBadge {
         let color: Color
         let rank: Int
         switch code {
+        case "✓":
+            color = .green
+            rank = 1
+        case "+":
+            color = .orange
+            rank = 4
+        case "-":
+            color = .gray
+            rank = 2
         case "C", "!", "D":
             color = .red
             rank = code == "C" ? 10 : (code == "!" ? 9 : 8)
@@ -1745,7 +1757,7 @@ private struct KiteEntryMenu: View {
 
         if KitePlatform.isEditableTextFile(entry.path) {
             Button {
-                KitePlatform.openTextEditor(entry.path)
+                KitePlatform.openTextEditor(entry.path, model: model)
             } label: {
                 Label("在 Kite 编辑器中打开", systemImage: "square.and.pencil")
             }

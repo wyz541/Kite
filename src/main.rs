@@ -19,6 +19,8 @@ mod git_branches_window;
 mod git_client_window;
 mod git_log_window;
 #[cfg(windows)]
+mod git_tools_window;
+#[cfg(windows)]
 mod global_search_window;
 #[cfg(windows)]
 mod preview_window;
@@ -41,7 +43,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 #[cfg(windows)]
 pub use kite_core::{
-    archive, content_search, devices, favorites, fs, git_branches, platform, plugins, session,
+    archive, content_search, devices, favorites, fs, git, git_branches, platform, plugins, session,
     text_editor, ui_preferences, update_notes, updater, vcs,
 };
 #[cfg(windows)]
