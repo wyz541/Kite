@@ -6,13 +6,45 @@ import SwiftUI
 struct KiteGitBranchButton: View {
     @ObservedObject var model: KiteModel
     @State private var summary: GitHeadSummaryDto?
+    @State private var worktrees: [GitWorktreeDto] = []
     @State private var showingBranches = false
 
     var body: some View {
         Group {
             if let summary {
-                Button {
-                    showingBranches = true
+                Menu {
+                    Button("分支、标签与 Worktree…") {
+                        showingBranches = true
+                    }
+
+                    Divider()
+
+                    if worktrees.isEmpty {
+                        Text("正在读取 Worktree…")
+                    } else {
+                        ForEach(worktrees, id: \.path) { worktree in
+                            Button {
+                                guard !worktree.isCurrent else { return }
+                                model.loadRoot(worktree.path)
+                            } label: {
+                                if worktree.isCurrent {
+                                    Label(worktreeMenuTitle(worktree), systemImage: "checkmark")
+                                } else {
+                                    Text(worktreeMenuTitle(worktree))
+                                }
+                            }
+                            .disabled(worktree.isCurrent || worktree.prunableReason != nil)
+                        }
+                    }
+
+                    Divider()
+
+                    Button("Worktree 与 Submodule…") {
+                        KiteGitToolsWindowController.open(
+                            repositoryPath: model.currentPath,
+                            model: model
+                        )
+                    }
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.triangle.branch")
@@ -30,11 +62,12 @@ struct KiteGitBranchButton: View {
                     .frame(height: KiteTheme.toolbarControlHeight)
                     .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                .buttonStyle(.plain)
-                .help("分支与标签")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("切换 Worktree 或管理分支、标签与 Submodule")
                 .kiteGlass(.panel, cornerRadius: KiteTheme.controlRadius)
                 .sheet(isPresented: $showingBranches, onDismiss: {
-                    Task { summary = await model.gitHeadSummary(path: model.currentPath) }
+                    Task { await refreshGitState() }
                 }) {
                     KiteGitBranchesView(model: model, repositoryRoot: summary.repositoryRoot)
                         .frame(minWidth: 860, minHeight: 600)
@@ -42,8 +75,23 @@ struct KiteGitBranchButton: View {
             }
         }
         .task(id: model.currentPath) {
-            summary = await model.gitHeadSummary(path: model.currentPath)
+            await refreshGitState()
         }
+    }
+
+    private func refreshGitState() async {
+        async let head = model.gitHeadSummary(path: model.currentPath)
+        async let list = model.gitWorktrees(path: model.currentPath)
+        summary = await head
+        worktrees = await list?.worktrees ?? []
+    }
+
+    private func worktreeMenuTitle(_ worktree: GitWorktreeDto) -> String {
+        let branch = worktree.branch ?? "分离 HEAD \(worktree.headHash?.prefix(7) ?? "")"
+        let marker = worktree.isPrimary
+            ? "主工作区"
+            : URL(fileURLWithPath: worktree.path).lastPathComponent
+        return "\(branch) · \(marker)"
     }
 
     private func branchLabel(_ summary: GitHeadSummaryDto) -> String {
@@ -284,7 +332,7 @@ private extension KiteGitBranchesView {
         snapshot?.remoteBranches.compactMap(\.remote).first
     }
 
-    func defaultUpstream(for branch: KiteBranchDto) -> String {
+    func defaultUpstream(for branch: GitBranchDto) -> String {
         if let upstream = branch.upstream { return upstream }
         return snapshot?.remoteBranches.first { $0.name.hasSuffix("/\(branch.name)") }?.name ?? ""
     }

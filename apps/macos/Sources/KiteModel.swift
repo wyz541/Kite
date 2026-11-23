@@ -9,6 +9,7 @@ struct BrowserEntry: Identifiable, Hashable {
     let size: UInt64
     let modifiedUnixMs: Int64?
     let gitStatus: String?
+    let submoduleStatus: String?
     let svnStatus: String?
 
     var id: String { path }
@@ -21,6 +22,7 @@ struct BrowserEntry: Identifiable, Hashable {
         size = dto.size
         modifiedUnixMs = dto.modifiedUnixMs
         gitStatus = dto.gitStatus
+        submoduleStatus = dto.submoduleStatus
         svnStatus = dto.svnStatus
     }
 }
@@ -1875,6 +1877,92 @@ final class KiteModel: ObservableObject {
         return message
     }
 
+    func gitBlame(
+        path: String,
+        startLine: UInt32 = 1,
+        lineCount: UInt32 = 400,
+        ignoreWhitespace: Bool = true
+    ) async throws -> GitBlamePageDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitBlame(
+                path: path,
+                startLine: startLine,
+                lineCount: lineCount,
+                ignoreWhitespace: ignoreWhitespace
+            )
+        }.value
+    }
+
+    func gitWorktrees(path: String) async -> GitWorktreeListDto? {
+        let core = self.core
+        return try? await Task.detached(priority: .utility) {
+            try core.gitWorktrees(path: path)
+        }.value
+    }
+
+    func gitAddWorktree(
+        repositoryPath: String,
+        destination: String,
+        branch: String,
+        createBranch: Bool,
+        startPoint: String?
+    ) async throws -> GitWorktreeDto {
+        let core = self.core
+        let worktree = try await Task.detached(priority: .userInitiated) {
+            try core.gitAddWorktree(
+                repositoryPath: repositoryPath,
+                destination: destination,
+                branch: branch,
+                createBranch: createBranch,
+                startPoint: startPoint
+            )
+        }.value
+        refresh()
+        return worktree
+    }
+
+    func gitWorktreeRemovalCheck(path: String) async throws -> GitWorktreeRemovalCheckDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitWorktreeRemovalCheck(path: path)
+        }.value
+    }
+
+    func gitRemoveWorktree(path: String, force: Bool) async throws {
+        let core = self.core
+        try await Task.detached(priority: .userInitiated) {
+            try core.gitRemoveWorktree(path: path, force: force)
+        }.value
+        refresh()
+    }
+
+    func gitSubmodules(path: String) async -> GitSubmoduleListDto? {
+        let core = self.core
+        return try? await Task.detached(priority: .utility) {
+            try core.gitSubmodules(path: path)
+        }.value
+    }
+
+    func gitInitSubmodules(path: String) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitInitSubmodules(path: path)
+        }.value
+        refresh()
+        return message
+    }
+
+    func gitUpdateSubmodules(path: String) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitUpdateSubmodules(path: path)
+        }.value
+        refresh()
+        return message
+    }
+
+
     func gitCreateBranch(path: String, name: String, startPoint: String) async throws -> String {
         let core = self.core
         return try await Task.detached(priority: .userInitiated) {
@@ -2030,8 +2118,12 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
-    func openGitLog(path: String) {
-        KiteGitLogWindowController.shared.show(model: self, path: path)
+    func openGitLog(path: String, initialHash: String? = nil) {
+        KiteGitLogWindowController.shared.show(
+            model: self,
+            path: path,
+            initialHash: initialHash
+        )
     }
 
     /// Runs a Git or SVN operation, refreshes the columns, and returns the
@@ -2850,4 +2942,3 @@ final class KiteModel: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 }
-

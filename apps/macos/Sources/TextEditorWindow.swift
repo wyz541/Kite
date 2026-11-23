@@ -6,6 +6,7 @@ import WebKit
 @MainActor
 final class TextEditorDocumentModel: ObservableObject {
     private let core: KiteCore
+    private let gitModel: KiteModel?
     private(set) var document: TextDocumentDto
     weak var textView: NSTextView?
 
@@ -15,9 +16,18 @@ final class TextEditorDocumentModel: ObservableObject {
     @Published private(set) var column = 1
     @Published private(set) var lineCount = 1
     @Published private(set) var markdownSource = ""
+    @Published private(set) var blameEnabled = false
+    @Published private(set) var blameLoading = false
+    @Published private(set) var blameError: String?
+    @Published private(set) var ignoreWhitespace = true
+    @Published private(set) var selectedBlame: GitBlameLineDto?
+    private(set) var blameLines: [GitBlameLineDto] = []
+    private var blameLookup: [UInt32: GitBlameLineDto] = [:]
+    private var blameGeneration = 0
 
-    init(path: String, core: KiteCore = KiteCore()) throws {
+    init(path: String, core: KiteCore = KiteCore(), gitModel: KiteModel? = nil) throws {
         self.core = core
+        self.gitModel = gitModel
         self.document = try core.openTextDocument(path: path)
         if document.language == "markdown" {
             markdownSource = document.text
@@ -100,6 +110,9 @@ final class TextEditorDocumentModel: ObservableObject {
             )
             isDirty = false
             message = "已保存"
+            if blameEnabled {
+                loadBlame()
+            }
             return true
         } catch {
             message = error.localizedDescription
@@ -123,11 +136,115 @@ final class TextEditorDocumentModel: ObservableObject {
         showTextFinderAction(.showReplaceInterface)
     }
 
+    func setBlameEnabled(_ enabled: Bool) {
+        guard blameEnabled != enabled else { return }
+        blameEnabled = enabled
+        selectedBlame = nil
+        updateBlameRuler()
+        if enabled && blameLines.isEmpty {
+            loadBlame()
+        }
+    }
+
+    func setIgnoreWhitespace(_ value: Bool) {
+        guard ignoreWhitespace != value else { return }
+        ignoreWhitespace = value
+        if blameEnabled {
+            loadBlame()
+        }
+    }
+
+    func blameLine(at lineNumber: Int) -> GitBlameLineDto? {
+        guard lineNumber > 0 else { return nil }
+        return blameLookup[UInt32(lineNumber)]
+    }
+
+    func selectBlame(at lineNumber: Int) {
+        guard let line = blameLine(at: lineNumber) else { return }
+        selectedBlame = line
+        gitModel?.openGitLog(path: document.path, initialHash: line.commitHash)
+    }
+
+    func clearSelectedBlame() {
+        selectedBlame = nil
+    }
+
+    func loadBlame() {
+        blameGeneration &+= 1
+        let generation = blameGeneration
+        let path = document.path
+        let ignoreWhitespace = ignoreWhitespace
+        let core = self.core
+        blameLoading = true
+        blameError = nil
+        selectedBlame = nil
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var page = try await Task.detached(priority: .userInitiated) {
+                    try core.gitBlame(
+                        path: path,
+                        startLine: 1,
+                        lineCount: 400,
+                        ignoreWhitespace: ignoreWhitespace
+                    )
+                }.value
+                guard self.blameGeneration == generation else { return }
+                self.replaceBlame(with: page.lines)
+
+                var nextLine = page.endLine + 1
+                while nextLine <= page.totalLines {
+                    guard self.blameGeneration == generation else { return }
+                    let pageStart = nextLine
+                    page = try await Task.detached(priority: .utility) {
+                        try core.gitBlame(
+                            path: path,
+                            startLine: pageStart,
+                            lineCount: 2_000,
+                            ignoreWhitespace: ignoreWhitespace
+                        )
+                    }.value
+                    guard self.blameGeneration == generation else { return }
+                    self.appendBlame(page.lines)
+                    nextLine = page.endLine + 1
+                }
+            } catch {
+                guard self.blameGeneration == generation else { return }
+                self.blameError = error.localizedDescription
+            }
+            guard self.blameGeneration == generation else { return }
+            self.blameLoading = false
+            self.updateBlameRuler()
+        }
+    }
+
     private func showTextFinderAction(_ action: NSTextFinder.Action) {
         guard let textView else { return }
         let sender = NSMenuItem()
         sender.tag = action.rawValue
         textView.performTextFinderAction(sender)
+    }
+
+    private func replaceBlame(with lines: [GitBlameLineDto]) {
+        blameLines = lines
+        blameLookup = Dictionary(uniqueKeysWithValues: lines.map { ($0.lineNumber, $0) })
+        updateBlameRuler()
+    }
+
+    private func appendBlame(_ lines: [GitBlameLineDto]) {
+        blameLines.append(contentsOf: lines)
+        for line in lines {
+            blameLookup[line.lineNumber] = line
+        }
+        updateBlameRuler()
+    }
+
+    private func updateBlameRuler() {
+        if let ruler = textView?.enclosingScrollView?.verticalRulerView as? BlameRulerView {
+            ruler.setBlameVisible(blameEnabled)
+            ruler.needsDisplay = true
+        }
     }
 
     private func updateStatistics() {
@@ -200,7 +317,7 @@ private struct KiteTextEditorSurface: NSViewRepresentable {
         textView.delegate = context.coordinator
 
         scrollView.documentView = textView
-        scrollView.verticalRulerView = LineNumberRulerView(textView: textView)
+        scrollView.verticalRulerView = BlameRulerView(textView: textView, model: model)
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
 
@@ -265,6 +382,9 @@ private struct TextEditorWindowView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
+                if model.blameEnabled, let blame = model.selectedBlame {
+                    blameDetailBar(blame)
+                }
                 statusBar
             }
             .padding(10)
@@ -322,6 +442,15 @@ private struct TextEditorWindowView: View {
             }
             .help("查找并替换 ⌥⌘F")
 
+            Toggle("Blame", isOn: blameEnabledBinding)
+                .toggleStyle(.button)
+                .help("在行号旁显示逐行提交信息")
+
+            if model.blameEnabled {
+                Toggle("忽略空白", isOn: ignoreWhitespaceBinding)
+                    .toggleStyle(.checkbox)
+            }
+
             if model.isMarkdown {
                 Toggle("实时预览", isOn: $showMarkdownPreview)
                     .toggleStyle(.button)
@@ -339,6 +468,56 @@ private struct TextEditorWindowView: View {
         .kiteGlassGroup(cornerRadius: 12)
     }
 
+    private var blameEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { model.blameEnabled },
+            set: { model.setBlameEnabled($0) }
+        )
+    }
+
+    private var ignoreWhitespaceBinding: Binding<Bool> {
+        Binding(
+            get: { model.ignoreWhitespace },
+            set: { model.setIgnoreWhitespace($0) }
+        )
+    }
+
+    private func blameDetailBar(_ blame: GitBlameLineDto) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: blame.isUncommitted ? "pencil.line" : "arrow.triangle.branch")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(blame.isUncommitted ? Color.red : Color.accentColor)
+
+            Text(blame.shortHash)
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+
+            Text(blame.summary)
+                .font(.system(size: 11))
+                .lineLimit(1)
+
+            Spacer()
+
+            Text("\(blame.author) · \(Date(timeIntervalSince1970: TimeInterval(blame.authorTime)).formatted(date: .abbreviated, time: .shortened))")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Button {
+                model.clearSelectedBlame()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .background(
+            Color.accentColor.opacity(0.075),
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
+        .padding(.top, 6)
+    }
+
     private var statusBar: some View {
         HStack(spacing: 12) {
             Text(model.isDirty ? "● 未保存" : "已保存")
@@ -349,6 +528,13 @@ private struct TextEditorWindowView: View {
                 Text(model.message)
                     .lineLimit(1)
                     .truncationMode(.middle)
+            }
+            if model.blameLoading {
+                Text("正在读取 Blame…")
+            } else if let error = model.blameError {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
             }
         }
         .font(.caption)
@@ -437,11 +623,19 @@ private struct LiveMarkdownPreview: NSViewRepresentable {
 }
 
 @MainActor
-private final class LineNumberRulerView: NSRulerView {
+private final class BlameRulerView: NSRulerView, NSViewToolTipOwner {
     private weak var textView: NSTextView?
+    private weak var model: TextEditorDocumentModel?
+    private var blameVisible = false
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 
-    init(textView: NSTextView) {
+    init(textView: NSTextView, model: TextEditorDocumentModel) {
         self.textView = textView
+        self.model = model
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
         clientView = textView
         ruleThickness = 48
@@ -451,12 +645,36 @@ private final class LineNumberRulerView: NSRulerView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    func setBlameVisible(_ visible: Bool) {
+        guard blameVisible != visible else { return }
+        blameVisible = visible
+        ruleThickness = visible ? 320 : 48
+        scrollView?.tile()
+        needsDisplay = true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshToolTip()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        refreshToolTip()
+    }
+
+    private func refreshToolTip() {
+        removeAllToolTips()
+        guard window != nil, !bounds.isEmpty else { return }
+        addToolTip(bounds, owner: self, userData: nil)
+    }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
         NSColor.textBackgroundColor.withAlphaComponent(0.14).setFill()
         NSBezierPath(rect: rect).fill()
 
         guard let textView,
+              let model,
               let layoutManager = textView.layoutManager,
               let textContainer = textView.textContainer,
               let scrollView else {
@@ -473,9 +691,9 @@ private final class LineNumberRulerView: NSRulerView {
             actualGlyphRange: nil
         )
         let value = textView.string as NSString
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
+        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let numberAttributes: [NSAttributedString.Key: Any] = [
+            .font: numberFont,
             .foregroundColor: NSColor.secondaryLabelColor
         ]
 
@@ -489,7 +707,11 @@ private final class LineNumberRulerView: NSRulerView {
         }
 
         if glyphRange.length == 0 {
-            drawLineNumber(1, atY: textView.textContainerOrigin.y, attributes: attributes)
+            let y = textView.textContainerOrigin.y
+            drawLineNumber(1, atY: y, attributes: numberAttributes)
+            if blameVisible {
+                drawBlame(model.blameLine(at: 1), lineNumber: 1, atY: y, height: 16)
+            }
             return
         }
 
@@ -502,7 +724,11 @@ private final class LineNumberRulerView: NSRulerView {
             )
             let rectInTextView = lineRect.offsetBy(dx: 0, dy: textView.textContainerOrigin.y)
             let rectInRuler = textView.convert(rectInTextView, to: self)
-            drawLineNumber(lineNumber, atY: rectInRuler.minY, attributes: attributes)
+            if blameVisible {
+                let blame = model.blameLine(at: lineNumber)
+                drawBlame(blame, lineNumber: lineNumber, atY: rectInRuler.minY, height: rectInRuler.height)
+            }
+            drawLineNumber(lineNumber, atY: rectInRuler.minY, attributes: numberAttributes)
             lineNumber += 1
             glyphIndex = NSMaxRange(lineGlyphRange)
         }
@@ -516,9 +742,94 @@ private final class LineNumberRulerView: NSRulerView {
         let value = "\(lineNumber)" as NSString
         let size = value.size(withAttributes: attributes)
         value.draw(
-            at: NSPoint(x: ruleThickness - size.width - 9, y: y + 1),
+            at: NSPoint(x: 42 - size.width, y: y + 1),
             withAttributes: attributes
         )
+    }
+
+    private func drawBlame(
+        _ line: GitBlameLineDto?,
+        lineNumber: Int,
+        atY y: CGFloat,
+        height: CGFloat
+    ) {
+        let blameRect = NSRect(x: 48, y: y, width: max(0, ruleThickness - 50), height: max(14, height))
+        let batch = line.map { UInt32(bitPattern: Int32(truncatingIfNeeded: $0.lineNumber / 24)) } ?? 0
+        let hue = CGFloat(batch % 12) / 12
+        let color = NSColor(calibratedHue: hue, saturation: 0.18, brightness: 0.72, alpha: 0.09)
+        color.setFill()
+        NSBezierPath(rect: blameRect).fill()
+
+        let text: String
+        if let line {
+            text = "\(line.shortHash)  \(line.author)  \(Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(line.authorTime))))"
+        } else if model?.blameLoading == true {
+            text = "… 正在读取 Blame"
+        } else {
+            text = "—"
+        }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 9.2, weight: .regular),
+            .foregroundColor: blameColor(line)
+        ]
+        (text as NSString).draw(
+            in: NSRect(x: 54, y: y + 1, width: max(0, ruleThickness - 58), height: 13),
+            withAttributes: attributes
+        )
+    }
+
+    private func blameColor(_ line: GitBlameLineDto?) -> NSColor {
+        guard let line else { return .tertiaryLabelColor }
+        if line.isUncommitted {
+            return .systemRed
+        }
+        let age = max(0, Date().timeIntervalSince1970 - TimeInterval(line.authorTime))
+        let years = age / (365 * 86_400)
+        let alpha = max(0.42, 1 - min(years, 8) / 10)
+        return NSColor.controlAccentColor.withAlphaComponent(alpha)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if blameVisible, let lineNumber = lineNumber(at: point) {
+            model?.selectBlame(at: lineNumber)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    func view(
+        _ view: NSView,
+        stringForToolTip tag: NSView.ToolTipTag,
+        point: NSPoint,
+        userData data: UnsafeMutableRawPointer?
+    ) -> String {
+        guard let lineNumber = lineNumber(at: point),
+              let line = model?.blameLine(at: lineNumber) else {
+            return "未加载 Blame 信息"
+        }
+        var parts = [
+            "\(line.shortHash)  \(line.author)",
+            Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(line.authorTime))),
+            line.summary
+        ]
+        if let mail = line.authorMail {
+            parts.append(mail)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func lineNumber(at rulerPoint: NSPoint) -> Int? {
+        guard let textView else {
+            return nil
+        }
+        let textPoint = convert(rulerPoint, to: textView)
+        let insertion = textView.characterIndexForInsertion(at: textPoint)
+        let character = max(0, min(insertion, (textView.string as NSString).length))
+        let prefix = (textView.string as NSString).substring(to: character)
+        return prefix.reduce(into: 1) { count, value in
+            if value == "\n" { count += 1 }
+        }
     }
 }
 
@@ -528,9 +839,9 @@ final class TextEditorWindowController: NSWindowController, NSWindowDelegate {
     private let documentModel: TextEditorDocumentModel
     private let path: String
 
-    init(path: String) throws {
+    init(path: String, model: KiteModel? = nil) throws {
         self.path = URL(fileURLWithPath: path).standardizedFileURL.path
-        self.documentModel = try TextEditorDocumentModel(path: path)
+        self.documentModel = try TextEditorDocumentModel(path: path, gitModel: model)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
@@ -555,7 +866,7 @@ final class TextEditorWindowController: NSWindowController, NSWindowDelegate {
         fatalError("init(coder:) has not been implemented")
     }
 
-    static func open(path: String) throws {
+    static func open(path: String, model: KiteModel? = nil) throws {
         let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
         if let controller = controllers[normalized] {
             controller.showWindow(nil)
@@ -564,7 +875,7 @@ final class TextEditorWindowController: NSWindowController, NSWindowDelegate {
             return
         }
 
-        let controller = try TextEditorWindowController(path: normalized)
+        let controller = try TextEditorWindowController(path: normalized, model: model)
         controllers[normalized] = controller
         controller.showWindow(nil)
         controller.window?.center()

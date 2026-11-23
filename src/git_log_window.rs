@@ -95,6 +95,7 @@ enum DetailTab {
 
 struct GitLogWindow {
     path: PathBuf,
+    initial_hash: Option<String>,
     context: Option<GitLogContext>,
     commits: Vec<GitLogCommit>,
     selected_hash: Option<String>,
@@ -124,7 +125,12 @@ struct GitLogWindow {
 }
 
 impl GitLogWindow {
-    fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        path: PathBuf,
+        initial_hash: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let query_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(SearchMode::Text.placeholder())
@@ -141,6 +147,7 @@ impl GitLogWindow {
         );
         let mut this = Self {
             path,
+            initial_hash,
             context: None,
             commits: Vec::new(),
             selected_hash: None,
@@ -232,7 +239,19 @@ impl GitLogWindow {
                     Ok((context, page)) => {
                         this.context = Some(context);
                         this.notice = Some(format!("已加载 {} 个提交", page.commits.len()).into());
+                        let wanted = this.initial_hash.clone();
                         this.apply_page(page);
+                        if let Some(hash) = wanted
+                            && this.initial_hash.as_deref() == Some(hash.as_str())
+                        {
+                            this.initial_hash = None;
+                            this.search_mode = SearchMode::Hash;
+                            this.query_input.update(cx, |input, cx| {
+                                input.set_value(hash.clone(), window, cx);
+                            });
+                            this.refresh(window, cx);
+                            return;
+                        }
                         if let Some(hash) = this.selected_hash.clone() {
                             this.select_commit(hash, window, cx);
                         }
@@ -296,7 +315,19 @@ impl GitLogWindow {
         self.cursor = page.next_cursor;
         self.commits.extend(page.commits);
         if first_new {
-            self.selected_hash = self.commits.first().map(|commit| commit.hash.clone());
+            self.selected_hash = self
+                .initial_hash
+                .as_ref()
+                .filter(|hash| self.commits.iter().any(|commit| &commit.hash == *hash))
+                .cloned()
+                .or_else(|| self.commits.first().map(|commit| commit.hash.clone()));
+            if self
+                .initial_hash
+                .as_ref()
+                .is_some_and(|hash| self.selected_hash.as_deref() == Some(hash.as_str()))
+            {
+                self.initial_hash = None;
+            }
         }
     }
 
@@ -1590,7 +1621,11 @@ fn change_status_color(status: char) -> u32 {
     }
 }
 
-pub(crate) fn open_git_log_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
+pub(crate) fn open_git_log_window(
+    path: PathBuf,
+    initial_hash: Option<String>,
+    cx: &mut App,
+) -> Result<(), String> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1606,7 +1641,7 @@ pub(crate) fn open_git_log_window(path: PathBuf, cx: &mut App) -> Result<(), Str
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| GitLogWindow::new(path, window, cx))
+        cx.new(|cx| GitLogWindow::new(path, initial_hash, window, cx))
     })
     .map(|_| ())
     .map_err(|error| format!("无法打开提交历史窗口：{error}"))

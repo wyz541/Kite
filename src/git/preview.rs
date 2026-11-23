@@ -416,7 +416,7 @@ fn parse_unified_diff(text: &str) -> Vec<GitDiffLine> {
     lines
 }
 
-fn run_git(current_dir: &Path, args: &[&str]) -> Result<GitCommandResult, GitError> {
+pub(crate) fn run_git(current_dir: &Path, args: &[&str]) -> Result<GitCommandResult, GitError> {
     GitService::shared().run_preview_command(current_dir, args)
 }
 

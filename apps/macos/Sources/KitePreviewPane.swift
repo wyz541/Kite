@@ -67,6 +67,9 @@ struct KitePreviewPane: View {
                 if let git = entry.gitStatus {
                     KiteVcsLabel(text: git, systemImage: "arrow.triangle.branch")
                 }
+                if let submodule = entry.submoduleStatus {
+                    KiteVcsLabel(text: submodule, systemImage: "shippingbox")
+                }
                 if let svn = entry.svnStatus {
                     KiteVcsLabel(text: svn, systemImage: "arrow.triangle.branch")
                 }
@@ -94,7 +97,7 @@ struct KitePreviewPane: View {
                     title: KitePlatform.isMarkdownFile(entry.path) ? "编辑与预览" : "编辑",
                     systemImage: "square.and.pencil"
                 ) {
-                    KitePlatform.openTextEditor(entry.path)
+                    KitePlatform.openTextEditor(entry.path, model: model)
                 }
             } else {
                 KitePreviewAction(title: "分享", systemImage: "square.and.arrow.up") {
@@ -134,6 +137,10 @@ struct KitePreviewPane: View {
                     KiteMetadataDivider()
                     KiteMetadataRow(label: "Git", value: git)
                 }
+                if let submodule = entry.submoduleStatus {
+                    KiteMetadataDivider()
+                    KiteMetadataRow(label: "Submodule", value: submodule)
+                }
                 if let svn = entry.svnStatus {
                     KiteMetadataDivider()
                     KiteMetadataRow(label: "SVN", value: svn)
@@ -164,6 +171,9 @@ struct KitePreviewPane: View {
         }
         if let git = entry.gitStatus {
             lines.append("Git：\(git)")
+        }
+        if let submodule = entry.submoduleStatus {
+            lines.append("Submodule：\(submodule)")
         }
         if let svn = entry.svnStatus {
             lines.append("SVN：\(svn)")

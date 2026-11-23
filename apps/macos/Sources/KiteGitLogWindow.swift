@@ -88,10 +88,12 @@ final class KiteGitLogViewModel: ObservableObject {
 
     private var cursor: String?
     private var hasMore = false
+    private var initialHash: String?
 
-    init(model: KiteModel, path: String) {
+    init(model: KiteModel, path: String, initialHash: String? = nil) {
         self.model = model
         self.path = path
+        self.initialHash = initialHash
     }
 
     var selectedCommit: GitLogCommitDto? {
@@ -159,9 +161,21 @@ final class KiteGitLogViewModel: ObservableObject {
                 cursor: nil,
                 pageSize: 200
             )
+            let pendingInitialHash = initialHash
             apply(page)
             loading = false
-            if let first = commits.first {
+            if let initialHash = pendingInitialHash {
+                if let initial = commits.first(where: { $0.hash == initialHash }) {
+                    self.initialHash = nil
+                    await select(initial)
+                } else {
+                    self.initialHash = nil
+                    searchMode = .hash
+                    searchText = initialHash
+                    await reload()
+                    return
+                }
+            } else if let first = commits.first {
                 await select(first)
             }
             if canLoadMore {
@@ -260,8 +274,8 @@ final class KiteGitLogViewModel: ObservableObject {
 final class KiteGitLogWindowController: NSWindowController, NSWindowDelegate {
     static let shared = KiteGitLogWindowController()
 
-    func show(model: KiteModel, path: String) {
-        let viewModel = KiteGitLogViewModel(model: model, path: path)
+    func show(model: KiteModel, path: String, initialHash: String? = nil) {
+        let viewModel = KiteGitLogViewModel(model: model, path: path, initialHash: initialHash)
         let rootView = KiteGitLogWindowView(viewModel: viewModel)
         let hostingController = NSHostingController(rootView: rootView)
 
@@ -818,6 +832,7 @@ private struct KiteGitRefBadge: View {
         case .localBranch: return "arrow.triangle.branch"
         case .remoteBranch: return "cloud"
         case .tag: return "tag"
+        case .commit: return "circle.fill"
         case .other: return "link"
         }
     }
@@ -830,6 +845,8 @@ private struct KiteGitRefBadge: View {
             return Color(hex: 0xc678dd)
         case .tag:
             return Color(hex: 0xe5c07b)
+        case .commit:
+            return .accentColor
         case .other:
             return .secondary
         }
@@ -1212,8 +1229,5 @@ private struct KiteGitDetailRow: View {
         }
     }
 }
-
-
-
 
 

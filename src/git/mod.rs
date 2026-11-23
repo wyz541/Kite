@@ -4,6 +4,7 @@
 //! handling, cancellation, progress, askpass, structured errors and console
 //! logging are implemented once.
 
+mod blame;
 mod command;
 mod error;
 mod events;
@@ -11,7 +12,9 @@ mod external;
 mod operation;
 mod repository;
 mod status;
+mod submodule;
 mod watch;
+mod worktree;
 
 pub mod log;
 pub mod preview;
@@ -23,6 +26,9 @@ use std::thread::{self, JoinHandle};
 
 use crate::fs::{FileEntry, VcsStatus};
 
+pub use blame::{
+    DEFAULT_BLAME_PAGE_LINES, GitBlameLine, GitBlamePage, MAX_BLAME_PAGE_LINES, git_blame,
+};
 pub use command::{
     CancellationToken, GitCommandOptions, GitCommandResult, GitConsole, GitConsoleEntry,
     GitExecutor, GitVersion, MIN_GIT_VERSION, detect_git_version,
@@ -42,7 +48,15 @@ pub use repository::{
     GitHead, GitRepository, GitRepositoryState, discover_repository, operation_state,
     repository_state,
 };
+pub use submodule::{
+    GitSubmodule, GitSubmoduleList, GitSubmoduleState, git_init_submodules, git_submodules,
+    git_update_submodules,
+};
 pub use watch::{GitRepositoryEvent, GitRepositoryWatcher};
+pub use worktree::{
+    GitWorktree, GitWorktreeCreateMode, GitWorktreeList, GitWorktreeRemovalCheck,
+    create_git_worktree, git_worktrees, remove_git_worktree, worktree_removal_check,
+};
 
 pub(crate) use status::{GitPathStatus, git_statuses};
 
@@ -447,6 +461,32 @@ pub(crate) fn apply_git_statuses(
 }
 
 pub(crate) use external::open_log_window;
+pub fn apply_submodule_statuses(entries: &mut [FileEntry], submodules: &GitSubmoduleList) {
+    for entry in entries {
+        let entry_path = dunce::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
+        entry.submodule_status = submodules
+            .submodules
+            .iter()
+            .find(|submodule| {
+                let submodule_path =
+                    dunce::canonicalize(&submodule.path).unwrap_or_else(|_| submodule.path.clone());
+                same_path(&entry_path, &submodule_path)
+            })
+            .map(|submodule| submodule.state);
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        left == right
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -466,6 +506,7 @@ mod tests {
                 modified: None,
                 extension: String::new(),
                 git_status: None,
+                submodule_status: None,
                 svn_status: None,
             },
             FileEntry {
@@ -476,6 +517,7 @@ mod tests {
                 modified: None,
                 extension: String::new(),
                 git_status: None,
+                submodule_status: None,
                 svn_status: None,
             },
         ];

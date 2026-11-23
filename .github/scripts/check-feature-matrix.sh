@@ -21,6 +21,7 @@ required_features=(
   "Git 分支与标签"
   "Git 客户端变更与行级暂存"
   "提交历史与提交图"
+  "Blame、Worktree 与 Submodule"
 )
 
 failed=false

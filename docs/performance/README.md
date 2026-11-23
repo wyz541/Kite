@@ -9,6 +9,7 @@
 当前 macOS 启动基线：[v0.6.61 启动与首内容](startup-macos-v0.6.61.md)。
 当前跨平台启动 CI 基线：[v0.6.61 Windows 与 macOS](startup-ci-v0.6.61.md)。
 当前 Git 提交历史基准：[100,000 提交分页与提交图](git-log-v0.6.88.md)。
+当前 Blame 首屏基线：[v0.6.89 10,000 行文件](blame-v0.6.89.md)。
 
 ## 1. 目标
 
@@ -92,6 +93,7 @@ cargo run --locked --release --features performance --bin kite-perf -- \
 | 文件操作 | 创建、重命名、复制、移动、大文件复制 | 回收站、剪贴板、进度和丢帧 |
 | 压缩 | ZIP 和 TAR.GZ 压缩、解压 | 原生进度和丢帧 |
 | VCS 与菜单 | Git 状态、状态应用、100,000 提交分页和提交图布局 | 原生滚动画面的合成器丢帧、SVN 环境、Windows Shell 菜单 |
+| Git Blame | 10,000 行文件的前 400 行 Blame | 完整文件分页、原生滚动同步和丢帧 |
 | 侧边栏与设备 | 卷枚举 | WPD、MTP、USB、网络卷 |
 | 更新 | SHA-256 校验 | GitHub API、下载、安装和重启 |
 

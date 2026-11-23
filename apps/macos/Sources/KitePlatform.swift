@@ -15,9 +15,9 @@ enum KitePlatform {
     }
 
     @MainActor
-    static func openTextEditor(_ path: String) {
+    static func openTextEditor(_ path: String, model: KiteModel? = nil) {
         do {
-            try TextEditorWindowController.open(path: path)
+            try TextEditorWindowController.open(path: path, model: model)
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .warning

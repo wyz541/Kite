@@ -8,6 +8,7 @@ use crate::app::{
     is_text_preview_entry, read_log_preview,
 };
 use crate::fs::FileEntry;
+use crate::git_log_window;
 use crate::text_editor::{self, TextDocument};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
@@ -15,11 +16,13 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Redo, Undo};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kite_core::git::{DEFAULT_BLAME_PAGE_LINES, GitBlameLine, git_blame};
 use kite_core::preview::{PreviewImageData, is_raster_image_preview_path, load_image_preview};
 
 const PREVIEW_WINDOW_IMAGE_MAX_WIDTH: u32 = 1_920;
@@ -53,10 +56,19 @@ pub(crate) struct PreviewWindow {
     word_wrap: bool,
     line_numbers: bool,
     show_whitespace: bool,
+    blame_visible: bool,
+    blame_loading: bool,
+    blame_error: Option<SharedString>,
+    blame_lines: Vec<GitBlameLine>,
+    blame_total_lines: u32,
+    blame_end_line: u32,
+    blame_ignore_whitespace: bool,
+    selected_blame: Option<GitBlameLine>,
     _editor_subscription: Option<Subscription>,
     _load_task: Task<()>,
     _save_task: Task<()>,
     _markdown_preview_task: Task<()>,
+    _blame_task: Task<()>,
 }
 
 impl PreviewWindow {
@@ -107,10 +119,19 @@ impl PreviewWindow {
             word_wrap: false,
             line_numbers: true,
             show_whitespace: false,
+            blame_visible: false,
+            blame_loading: false,
+            blame_error: None,
+            blame_lines: Vec::new(),
+            blame_total_lines: 0,
+            blame_end_line: 0,
+            blame_ignore_whitespace: true,
+            selected_blame: None,
             _editor_subscription: None,
             _load_task: Task::ready(()),
             _save_task: Task::ready(()),
             _markdown_preview_task: Task::ready(()),
+            _blame_task: Task::ready(()),
         };
         if live_markdown && let Some(editor) = &this.editor {
             this.word_wrap = true;
@@ -419,7 +440,117 @@ impl PreviewWindow {
         cx.notify();
     }
 
+    fn toggle_blame(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.blame_visible = !self.blame_visible;
+        self.selected_blame = None;
+        if self.blame_visible && self.blame_lines.is_empty() {
+            self.reload_blame(cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_blame_whitespace(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.blame_ignore_whitespace = !self.blame_ignore_whitespace;
+        if self.blame_visible {
+            self.reload_blame(cx);
+        }
+    }
+
+    fn reload_blame(&mut self, cx: &mut Context<Self>) {
+        self.blame_lines.clear();
+        self.blame_total_lines = 0;
+        self.blame_end_line = 0;
+        self.blame_error = None;
+        self.load_blame_page(1, cx);
+    }
+
+    fn load_more_blame(&mut self, cx: &mut Context<Self>) {
+        if self.blame_end_line >= self.blame_total_lines {
+            return;
+        }
+        self.load_blame_page(self.blame_end_line.saturating_add(1), cx);
+    }
+
+    fn load_blame_page(&mut self, start_line: u32, cx: &mut Context<Self>) {
+        if self.blame_loading {
+            return;
+        }
+        let path = self.path.clone();
+        let ignore_whitespace = self.blame_ignore_whitespace;
+        self.blame_loading = true;
+        self.blame_error = None;
+        cx.notify();
+        self._blame_task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    git_blame(
+                        &path,
+                        start_line,
+                        DEFAULT_BLAME_PAGE_LINES,
+                        ignore_whitespace,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.blame_loading = false;
+                match result {
+                    Ok(page) => {
+                        if start_line == 1 {
+                            this.blame_lines = page.lines;
+                        } else {
+                            this.blame_lines.extend(page.lines);
+                        }
+                        this.blame_total_lines = page.total_lines;
+                        this.blame_end_line = page.end_line;
+                    }
+                    Err(error) => this.blame_error = Some(error.into()),
+                }
+                cx.notify();
+            });
+        });
+    }
+
     fn render_toolbar(&self, cx: &Context<Self>) -> AnyElement {
+        if self.kind == PreviewKind::ReadOnlyText {
+            return h_flex()
+                .h(px(38.))
+                .w_full()
+                .flex_shrink_0()
+                .px_3()
+                .gap_2()
+                .items_center()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(
+                    Button::new("reader-blame")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::GitBranch)
+                        .label(if self.blame_visible {
+                            "隐藏 Blame"
+                        } else {
+                            "Blame"
+                        })
+                        .selected(self.blame_visible)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle_blame(window, cx)
+                        })),
+                )
+                .when(self.blame_visible, |bar| {
+                    bar.child(
+                        Button::new("reader-blame-whitespace")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Pilcrow)
+                            .label("忽略空白")
+                            .selected(self.blame_ignore_whitespace)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_blame_whitespace(window, cx)
+                            })),
+                    )
+                })
+                .into_any_element();
+        }
         if self.kind != PreviewKind::Editor {
             return div().into_any_element();
         }
@@ -539,6 +670,36 @@ impl PreviewWindow {
                         this.toggle_whitespace(window, cx)
                     })),
             )
+            .child(div().w(px(1.)).h(px(20.)).bg(cx.theme().border).mx_1())
+            .child(
+                Button::new("editor-blame")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::GitBranch)
+                    .label(if self.blame_visible {
+                        "隐藏 Blame"
+                    } else {
+                        "Blame"
+                    })
+                    .selected(self.blame_visible)
+                    .disabled(self.loading || self.document.is_none())
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.toggle_blame(window, cx)
+                    })),
+            )
+            .when(self.blame_visible, |bar| {
+                bar.child(
+                    Button::new("editor-blame-whitespace")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Pilcrow)
+                        .label("忽略空白")
+                        .selected(self.blame_ignore_whitespace)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle_blame_whitespace(window, cx)
+                        })),
+                )
+            })
             .when(self.text_view.is_some(), |bar| {
                 bar.child(
                     Button::new("editor-markdown-preview")
@@ -669,6 +830,179 @@ impl PreviewWindow {
             .into_any_element()
     }
 
+    fn render_blame(&self, cx: &Context<Self>) -> AnyElement {
+        if self.blame_loading && self.blame_lines.is_empty() {
+            return centered_message("正在读取 Blame…", cx);
+        }
+        if let Some(error) = self.blame_error.as_ref() {
+            return centered_message(error.as_ref(), cx);
+        }
+        if self.blame_lines.is_empty() {
+            return centered_message("此文件没有可显示的 Blame 信息。", cx);
+        }
+
+        let selected = self.selected_blame.as_ref().map(|line| line.line_number);
+        let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().accent;
+        let list = uniform_list(
+            "preview-window-blame-list",
+            self.blame_lines.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                range
+                    .map(|row_ix| {
+                        let line = this.blame_lines[row_ix].clone();
+                        let line_for_click = line.clone();
+                        let tooltip = blame_tooltip(&line);
+                        let color = blame_line_color(&line);
+                        h_flex()
+                            .id(("preview-blame-row", row_ix))
+                            .h(px(24.))
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .cursor_pointer()
+                            .when(selected == Some(line.line_number), |this| {
+                                this.bg(accent.opacity(0.14))
+                            })
+                            .child(
+                                div()
+                                    .w(px(44.))
+                                    .text_right()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(line.line_number.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(64.))
+                                    .text_xs()
+                                    .text_color(color)
+                                    .child(line.short_hash.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(110.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(color)
+                                    .child(line.author.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(88.))
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(blame_date(line.author_time)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(cx.theme().foreground)
+                                    .child(line.code.clone()),
+                            )
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                let hash = line_for_click.commit_hash.clone();
+                                this.selected_blame = Some(line_for_click.clone());
+                                if let Err(error) = git_log_window::open_git_log_window(
+                                    this.path.clone(),
+                                    Some(hash),
+                                    cx,
+                                ) {
+                                    this.blame_error = Some(error.into());
+                                }
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .w_full();
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(
+                h_flex()
+                    .h(px(34.))
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_3()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(muted)
+                    .child(format!(
+                        "显示 {} / {} 行",
+                        self.blame_lines.len(),
+                        self.blame_total_lines
+                    ))
+                    .when(self.blame_end_line < self.blame_total_lines, |bar| {
+                        bar.child(
+                            Button::new("preview-blame-more")
+                                .ghost()
+                                .compact()
+                                .label(if self.blame_loading {
+                                    "加载中…"
+                                } else {
+                                    "加载更多"
+                                })
+                                .disabled(self.blame_loading)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.load_more_blame(cx)
+                                })),
+                        )
+                    }),
+            )
+            .child(list)
+            .when_some(self.selected_blame.as_ref(), |this, line| {
+                this.child(
+                    v_flex()
+                        .flex_shrink_0()
+                        .w_full()
+                        .gap_1()
+                        .px_4()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .bg(accent.opacity(0.08))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .child(line.short_hash.clone()),
+                                )
+                                .child(div().text_xs().text_color(muted).child(format!(
+                                    "{} · {}",
+                                    line.author,
+                                    blame_date(line.author_time)
+                                ))),
+                        )
+                        .child(div().text_sm().font_medium().child(line.summary.clone()))
+                        .when_some(line.author_mail.as_ref(), |detail, mail| {
+                            detail.child(div().text_xs().text_color(muted).child(mail.clone()))
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_markdown_workspace(&self, cx: &App) -> AnyElement {
         let editor = self.render_editor_body(cx);
         if !self.markdown_preview_visible || self.document.is_none() {
@@ -754,65 +1088,71 @@ impl PreviewWindow {
 impl Render for PreviewWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let body = match self.kind {
-            PreviewKind::Editor => self.render_markdown_workspace(cx),
-            PreviewKind::ReadOnlyText => self.render_read_only_text_body(cx),
-            PreviewKind::Image => {
-                if let Some(image) = self.image.clone() {
-                    h_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .items_center()
-                        .justify_center()
-                        .overflow_hidden()
-                        .p_6()
-                        .child(
-                            img(image)
-                                .id("preview-window-image")
-                                .max_w_full()
-                                .max_h_full()
-                                .object_fit(ObjectFit::Contain),
-                        )
-                        .into_any_element()
-                } else if self.loading {
-                    centered_message("正在生成图片预览…", cx)
-                } else if let Some(message) = self.message.clone() {
-                    centered_message(&message, cx)
-                } else {
-                    h_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .items_center()
-                        .justify_center()
-                        .overflow_hidden()
-                        .p_6()
-                        .child(
-                            img(self.path.clone())
-                                .id("preview-window-source-image")
-                                .max_w_full()
-                                .max_h_full()
-                                .object_fit(ObjectFit::Contain),
-                        )
-                        .into_any_element()
+        let body = if self.blame_visible
+            && matches!(self.kind, PreviewKind::Editor | PreviewKind::ReadOnlyText)
+        {
+            self.render_blame(cx)
+        } else {
+            match self.kind {
+                PreviewKind::Editor => self.render_markdown_workspace(cx),
+                PreviewKind::ReadOnlyText => self.render_read_only_text_body(cx),
+                PreviewKind::Image => {
+                    if let Some(image) = self.image.clone() {
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .items_center()
+                            .justify_center()
+                            .overflow_hidden()
+                            .p_6()
+                            .child(
+                                img(image)
+                                    .id("preview-window-image")
+                                    .max_w_full()
+                                    .max_h_full()
+                                    .object_fit(ObjectFit::Contain),
+                            )
+                            .into_any_element()
+                    } else if self.loading {
+                        centered_message("正在生成图片预览…", cx)
+                    } else if let Some(message) = self.message.clone() {
+                        centered_message(&message, cx)
+                    } else {
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .items_center()
+                            .justify_center()
+                            .overflow_hidden()
+                            .p_6()
+                            .child(
+                                img(self.path.clone())
+                                    .id("preview-window-source-image")
+                                    .max_w_full()
+                                    .max_h_full()
+                                    .object_fit(ObjectFit::Contain),
+                            )
+                            .into_any_element()
+                    }
                 }
+                PreviewKind::Other => v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(Icon::new(IconName::File).size(px(72.)).text_color(muted))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("此文件没有内置预览"),
+                    )
+                    .into_any_element(),
             }
-            PreviewKind::Other => v_flex()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::File).size(px(72.)).text_color(muted))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child("此文件没有内置预览"),
-                )
-                .into_any_element(),
         };
 
         v_flex()
@@ -874,6 +1214,38 @@ pub(crate) fn preview_render_image(data: PreviewImageData) -> Arc<RenderImage> {
     let buffer = image::RgbaImage::from_raw(data.width, data.height, data.bgra)
         .expect("preview image dimensions must match its BGRA buffer");
     Arc::new(RenderImage::new([image::Frame::new(buffer)]))
+}
+
+fn blame_line_color(line: &GitBlameLine) -> Hsla {
+    if line.is_uncommitted {
+        return rgb(0xef6b73).into();
+    }
+    let now = chrono::Utc::now().timestamp();
+    let age_days = ((now - line.author_time).max(0) as f64) / 86_400.0;
+    let alpha = (1.0 - (age_days / 1_460.0).min(0.58)) as f32;
+    let color: Hsla = rgb(0x5e9cff).into();
+    color.opacity(alpha)
+}
+
+fn blame_date(unix_seconds: i64) -> String {
+    chrono::DateTime::<chrono::Local>::from(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_seconds.max(0) as u64),
+    )
+    .format("%Y-%m-%d")
+    .to_string()
+}
+
+fn blame_tooltip(line: &GitBlameLine) -> String {
+    let mut parts = vec![
+        line.short_hash.clone(),
+        line.author.clone(),
+        blame_date(line.author_time),
+        line.summary.clone(),
+    ];
+    if let Some(mail) = line.author_mail.as_ref() {
+        parts.push(mail.clone());
+    }
+    parts.join(" · ")
 }
 
 fn centered_message(message: &str, cx: &App) -> AnyElement {
@@ -982,6 +1354,7 @@ mod tests {
             modified: None,
             extension: "mk".to_string(),
             git_status: None,
+            submodule_status: None,
             svn_status: None,
         };
         let (observed, result) = std::sync::mpsc::channel();

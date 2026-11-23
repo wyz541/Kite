@@ -585,6 +585,7 @@ fn shell_entry(parent: &Path, item: &IShellItem) -> Option<FileEntry> {
         modified: None,
         extension,
         git_status: None,
+        submodule_status: None,
         svn_status: None,
     })
 }
