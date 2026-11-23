@@ -1864,6 +1864,153 @@ final class KiteModel: ObservableObject {
         }
     }
 
+    func gitOperationStatus(path: String) async throws -> GitRepositoryStatusDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitOperationStatus(path: path)
+        }.value
+    }
+
+    func gitStashList(path: String) async throws -> [GitStashEntryDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashList(path: path)
+        }.value
+    }
+
+    func gitStashDiff(path: String, index: UInt32) async throws -> [GitDiffLineDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashDiff(path: path, index: index)
+        }.value
+    }
+
+    func gitStashSave(
+        path: String,
+        message: String?,
+        includeUntracked: Bool,
+        keepIndex: Bool,
+        paths: [String]
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashSave(
+                path: path,
+                message: message,
+                includeUntracked: includeUntracked,
+                keepIndex: keepIndex,
+                paths: paths
+            )
+        }.value
+    }
+
+    func gitStashApply(path: String, index: UInt32) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashApply(path: path, index: index)
+        }.value
+    }
+
+    func gitStashPop(path: String, index: UInt32) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashPop(path: path, index: index)
+        }.value
+    }
+
+    func gitStashDrop(path: String, index: UInt32, confirmed: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashDrop(path: path, index: index, confirmed: confirmed)
+        }.value
+    }
+
+    func gitStashClear(path: String, confirmed: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashClear(path: path, confirmed: confirmed)
+        }.value
+    }
+
+    func gitStashBranch(
+        path: String,
+        index: UInt32,
+        branch: String
+    ) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashBranch(path: path, index: index, branch: branch)
+        }.value
+    }
+
+    func gitReset(
+        path: String,
+        mode: GitResetModeDto,
+        target: String,
+        confirmed: Bool
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitReset(path: path, mode: mode, target: target, confirmed: confirmed)
+        }.value
+    }
+
+    func gitRevert(path: String, commits: [String]) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRevert(path: path, commits: commits)
+        }.value
+    }
+
+    func gitRevertContinue(path: String) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRevertContinue(path: path)
+        }.value
+    }
+
+    func gitRevertAbort(path: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRevertAbort(path: path)
+        }.value
+    }
+
+    func gitCherryPick(path: String, commits: [String]) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPick(path: path, commits: commits)
+        }.value
+    }
+
+    func gitCherryPickContinue(path: String) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPickContinue(path: path)
+        }.value
+    }
+
+    func gitCherryPickSkip(path: String) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPickSkip(path: path)
+        }.value
+    }
+
+    func gitCherryPickAbort(path: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPickAbort(path: path)
+        }.value
+    }
+
+    func gitLogText(path: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.runVcsQuery(tool: .git, query: .log, path: path)
+        }.value
+    }
+
     /// Writes the log to a temporary file and opens it, matching the Windows
     /// fallback when no external log viewer is installed.
     func openVcsLog(tool: VcsToolDto, path: String) async {

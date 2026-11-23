@@ -157,6 +157,18 @@ private struct KiteGitClientWindowView: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                Button("Stash / 操作") {
+                    let selectedPaths = selectedPath.map {
+                        [(repositoryPath as NSString).appendingPathComponent($0)]
+                    } ?? []
+                    KiteGitToolsWindowController.show(
+                        model: model,
+                        path: repositoryPath,
+                        selectedPaths: selectedPaths
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button {
                     Task { await loadChanges() }
                 } label: {

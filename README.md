@@ -185,6 +185,7 @@ macOS 可与 Finder 共享文件剪贴板。
 | 文件预览 | 内置预览 | 系统快速预览 |
 | 预览 Git 状态 | 已支持 | 已支持 |
 | Git 客户端变更与行级暂存 | 已支持 | 已支持 |
+| Git Stash、Reset、Revert 与 Cherry-pick | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |

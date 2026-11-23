@@ -431,6 +431,8 @@ pub(crate) fn apply_git_statuses(
     }
 }
 
+pub(crate) use external::open_log_window;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,5 +489,3 @@ mod tests {
         assert!(task.is_cancelled());
     }
 }
-
-pub(crate) use external::open_log_window;
