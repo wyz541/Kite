@@ -1711,6 +1711,138 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
+    func gitHeadSummary(path: String) async -> GitHeadSummaryDto? {
+        let core = self.core
+        return try? await Task.detached(priority: .utility) {
+            try core.gitHeadSummary(path: path)
+        }.value
+    }
+
+    func gitBranchSnapshot(path: String) async throws -> GitBranchSnapshotDto {
+        let core = self.core
+        return try await Task.detached(priority: .utility) {
+            try core.gitBranchSnapshot(path: path)
+        }.value
+    }
+
+    func gitCheckout(
+        path: String,
+        target: String,
+        kind: GitRefKindDto,
+        dirtyPolicy: GitDirtyPolicyDto
+    ) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitCheckout(
+                path: path,
+                target: target,
+                kind: kind,
+                dirtyPolicy: dirtyPolicy
+            )
+        }.value
+        refresh()
+        return message
+    }
+
+    func gitCreateBranch(path: String, name: String, startPoint: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCreateBranch(path: path, name: name, startPoint: startPoint)
+        }.value
+    }
+
+    func gitRenameBranch(path: String, oldName: String, newName: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRenameBranch(path: path, oldName: oldName, newName: newName)
+        }.value
+    }
+
+    func gitDeleteLocalBranch(path: String, name: String, force: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteLocalBranch(path: path, name: name, force: force)
+        }.value
+    }
+
+    func gitDeleteLocalBranches(path: String, names: [String], force: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteLocalBranches(path: path, names: names, force: force)
+        }.value
+    }
+
+    func gitDeleteRemoteBranch(path: String, remote: String, branch: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteRemoteBranch(path: path, remote: remote, branch: branch)
+        }.value
+    }
+
+    func gitSetBranchUpstream(
+        path: String,
+        branch: String,
+        upstream: String?
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitSetBranchUpstream(path: path, branch: branch, upstream: upstream)
+        }.value
+    }
+
+    func gitCompareBranches(path: String, base: String, head: String) async throws -> GitCompareResultDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCompareBranches(path: path, base: base, head: head)
+        }.value
+    }
+
+    func gitCreateTag(
+        path: String,
+        name: String,
+        target: String,
+        annotated: Bool,
+        message: String?
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCreateTag(
+                path: path,
+                name: name,
+                target: target,
+                annotated: annotated,
+                message: message
+            )
+        }.value
+    }
+
+    func gitDeleteTag(path: String, name: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteTag(path: path, name: name)
+        }.value
+    }
+
+    func gitPushTag(path: String, remote: String, name: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitPushTag(path: path, remote: remote, name: name)
+        }.value
+    }
+
+    func gitDeleteRemoteTag(path: String, remote: String, name: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteRemoteTag(path: path, remote: remote, name: name)
+        }.value
+    }
+
+    func gitCreateWorktree(path: String, destination: String, branch: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCreateWorktree(path: path, destination: destination, branch: branch)
+        }.value
+    }
     /// Runs a Git or SVN operation, refreshes the columns, and returns the
     /// status message for the caller to show.
     @discardableResult

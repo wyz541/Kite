@@ -11,6 +11,10 @@ use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::fs::{EntryKind, FileEntry, SortSpec, VcsStatus, load_directory, transfer_entry};
 use crate::git::{self, GitDiffLine, GitDiffLineKind, GitPathSummary};
+use crate::git_branches::{
+    self, GitBranch, GitBranchSnapshot, GitCompareCommit, GitCompareFile, GitCompareResult,
+    GitDirtyPolicy, GitHeadSummary, GitRefKind, GitTag, GitWorktree,
+};
 use crate::platform::{HostPlatform, default_root_path, host_platform};
 use crate::session::{self as session_store, SessionStateDto};
 use crate::text_editor::{self, TextDocument, TextLineEnding};
@@ -276,6 +280,111 @@ pub struct GitDiffLineDto {
     pub text: String,
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitHeadSummaryDto {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub short_hash: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub dirty: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitRefKindDto {
+    LocalBranch,
+    RemoteBranch,
+    Tag,
+    Commit,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum GitDirtyPolicyDto {
+    #[default]
+    Cancel,
+    Stash,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitBranchDto {
+    pub name: String,
+    pub full_name: String,
+    pub remote: Option<String>,
+    pub commit_hash: String,
+    pub short_hash: String,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub is_head: bool,
+    pub is_merged: bool,
+    pub last_commit_unix_seconds: Option<i64>,
+    pub subject: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitTagDto {
+    pub name: String,
+    pub target_hash: String,
+    pub short_hash: String,
+    pub is_annotated: bool,
+    pub message: Option<String>,
+    pub created_unix_seconds: Option<i64>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitWorktreeDto {
+    pub path: String,
+    pub head_hash: Option<String>,
+    pub branch: Option<String>,
+    pub is_current: bool,
+    pub is_bare: bool,
+    pub is_detached: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitBranchSnapshotDto {
+    pub repository_root: String,
+    pub head_branch: Option<String>,
+    pub detached: bool,
+    pub head_short_hash: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub dirty: bool,
+    pub local_branches: Vec<GitBranchDto>,
+    pub remote_branches: Vec<GitBranchDto>,
+    pub tags: Vec<GitTagDto>,
+    pub worktrees: Vec<GitWorktreeDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCompareCommitDto {
+    pub hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub unix_seconds: i64,
+    pub subject: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCompareFileDto {
+    pub status: String,
+    pub path: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitCompareResultDto {
+    pub base: String,
+    pub head: String,
+    pub ahead: u32,
+    pub behind: u32,
+    pub commits: Vec<GitCompareCommitDto>,
+    pub files: Vec<GitCompareFileDto>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum VcsToolDto {
     Git,
@@ -750,6 +859,157 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    /// Reads the current branch, ahead/behind counts, and dirty state.
+    pub fn git_head_summary(&self, path: String) -> Result<Option<GitHeadSummaryDto>, KiteError> {
+        git_branches::git_head_summary(&PathBuf::from(path))
+            .map(|summary| summary.map(git_head_summary_dto))
+            .map_err(KiteError::operation)
+    }
+
+    /// Lists local branches, remote-tracking branches, tags, and worktrees.
+    pub fn git_branch_snapshot(&self, path: String) -> Result<GitBranchSnapshotDto, KiteError> {
+        git_branches::git_branch_snapshot(&PathBuf::from(path))
+            .map(git_branch_snapshot_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_checkout(
+        &self,
+        path: String,
+        target: String,
+        kind: GitRefKindDto,
+        dirty_policy: GitDirtyPolicyDto,
+    ) -> Result<String, KiteError> {
+        git_branches::git_checkout(
+            &PathBuf::from(path),
+            &target,
+            git_ref_kind(kind),
+            git_dirty_policy(dirty_policy),
+        )
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_create_branch(
+        &self,
+        path: String,
+        name: String,
+        start_point: String,
+    ) -> Result<String, KiteError> {
+        git_branches::create_branch(&PathBuf::from(path), &name, &start_point)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_rename_branch(
+        &self,
+        path: String,
+        old_name: String,
+        new_name: String,
+    ) -> Result<String, KiteError> {
+        git_branches::rename_branch(&PathBuf::from(path), &old_name, &new_name)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_delete_local_branch(
+        &self,
+        path: String,
+        name: String,
+        force: bool,
+    ) -> Result<String, KiteError> {
+        git_branches::delete_local_branch(&PathBuf::from(path), &name, force)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_delete_local_branches(
+        &self,
+        path: String,
+        names: Vec<String>,
+        force: bool,
+    ) -> Result<String, KiteError> {
+        git_branches::delete_local_branches(&PathBuf::from(path), &names, force)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_delete_remote_branch(
+        &self,
+        path: String,
+        remote: String,
+        branch: String,
+    ) -> Result<String, KiteError> {
+        git_branches::delete_remote_branch(&PathBuf::from(path), &remote, &branch)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_set_branch_upstream(
+        &self,
+        path: String,
+        branch: String,
+        upstream: Option<String>,
+    ) -> Result<String, KiteError> {
+        git_branches::set_branch_upstream(&PathBuf::from(path), &branch, upstream.as_deref())
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_compare_branches(
+        &self,
+        path: String,
+        base: String,
+        head: String,
+    ) -> Result<GitCompareResultDto, KiteError> {
+        git_branches::compare_branches(&PathBuf::from(path), &base, &head)
+            .map(git_compare_result_dto)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_create_tag(
+        &self,
+        path: String,
+        name: String,
+        target: String,
+        annotated: bool,
+        message: Option<String>,
+    ) -> Result<String, KiteError> {
+        git_branches::create_tag(
+            &PathBuf::from(path),
+            &name,
+            &target,
+            annotated,
+            message.as_deref(),
+        )
+        .map_err(KiteError::operation)
+    }
+
+    pub fn git_delete_tag(&self, path: String, name: String) -> Result<String, KiteError> {
+        git_branches::delete_tag(&PathBuf::from(path), &name).map_err(KiteError::operation)
+    }
+
+    pub fn git_push_tag(
+        &self,
+        path: String,
+        remote: String,
+        name: String,
+    ) -> Result<String, KiteError> {
+        git_branches::push_tag(&PathBuf::from(path), &remote, &name).map_err(KiteError::operation)
+    }
+
+    pub fn git_delete_remote_tag(
+        &self,
+        path: String,
+        remote: String,
+        name: String,
+    ) -> Result<String, KiteError> {
+        git_branches::delete_remote_tag(&PathBuf::from(path), &remote, &name)
+            .map_err(KiteError::operation)
+    }
+
+    pub fn git_create_worktree(
+        &self,
+        path: String,
+        destination: String,
+        branch: String,
+    ) -> Result<String, KiteError> {
+        git_branches::create_worktree(&PathBuf::from(path), &PathBuf::from(destination), &branch)
+            .map_err(KiteError::operation)
+    }
     pub fn run_vcs_operation(
         &self,
         tool: VcsToolDto,
@@ -858,6 +1118,136 @@ fn git_diff_line_dto(line: GitDiffLine) -> GitDiffLineDto {
     }
 }
 
+fn git_ref_kind(kind: GitRefKindDto) -> GitRefKind {
+    match kind {
+        GitRefKindDto::LocalBranch => GitRefKind::LocalBranch,
+        GitRefKindDto::RemoteBranch => GitRefKind::RemoteBranch,
+        GitRefKindDto::Tag => GitRefKind::Tag,
+        GitRefKindDto::Commit => GitRefKind::Commit,
+    }
+}
+
+fn git_dirty_policy(policy: GitDirtyPolicyDto) -> GitDirtyPolicy {
+    match policy {
+        GitDirtyPolicyDto::Cancel => GitDirtyPolicy::Cancel,
+        GitDirtyPolicyDto::Stash => GitDirtyPolicy::Stash,
+    }
+}
+
+fn git_head_summary_dto(summary: GitHeadSummary) -> GitHeadSummaryDto {
+    GitHeadSummaryDto {
+        repository_root: summary.repository_root.to_string_lossy().into_owned(),
+        branch: summary.branch,
+        detached: summary.detached,
+        short_hash: summary.short_hash,
+        upstream: summary.upstream,
+        ahead: summary.ahead,
+        behind: summary.behind,
+        dirty: summary.dirty,
+    }
+}
+
+fn git_branch_snapshot_dto(snapshot: GitBranchSnapshot) -> GitBranchSnapshotDto {
+    GitBranchSnapshotDto {
+        repository_root: snapshot.repository_root.to_string_lossy().into_owned(),
+        head_branch: snapshot.head_branch,
+        detached: snapshot.detached,
+        head_short_hash: snapshot.head_short_hash,
+        upstream: snapshot.upstream,
+        ahead: snapshot.ahead,
+        behind: snapshot.behind,
+        dirty: snapshot.dirty,
+        local_branches: snapshot
+            .local_branches
+            .into_iter()
+            .map(git_branch_dto)
+            .collect(),
+        remote_branches: snapshot
+            .remote_branches
+            .into_iter()
+            .map(git_branch_dto)
+            .collect(),
+        tags: snapshot.tags.into_iter().map(git_tag_dto).collect(),
+        worktrees: snapshot
+            .worktrees
+            .into_iter()
+            .map(git_worktree_dto)
+            .collect(),
+    }
+}
+
+fn git_branch_dto(branch: GitBranch) -> GitBranchDto {
+    GitBranchDto {
+        name: branch.name,
+        full_name: branch.full_name,
+        remote: branch.remote,
+        commit_hash: branch.commit_hash,
+        short_hash: branch.short_hash,
+        upstream: branch.upstream,
+        ahead: branch.ahead,
+        behind: branch.behind,
+        is_head: branch.is_head,
+        is_merged: branch.is_merged,
+        last_commit_unix_seconds: branch.last_commit_unix_seconds,
+        subject: branch.subject,
+    }
+}
+
+fn git_tag_dto(tag: GitTag) -> GitTagDto {
+    GitTagDto {
+        name: tag.name,
+        target_hash: tag.target_hash,
+        short_hash: tag.short_hash,
+        is_annotated: tag.is_annotated,
+        message: tag.message,
+        created_unix_seconds: tag.created_unix_seconds,
+    }
+}
+
+fn git_worktree_dto(worktree: GitWorktree) -> GitWorktreeDto {
+    GitWorktreeDto {
+        path: worktree.path.to_string_lossy().into_owned(),
+        head_hash: worktree.head_hash,
+        branch: worktree.branch,
+        is_current: worktree.is_current,
+        is_bare: worktree.is_bare,
+        is_detached: worktree.is_detached,
+    }
+}
+
+fn git_compare_result_dto(result: GitCompareResult) -> GitCompareResultDto {
+    GitCompareResultDto {
+        base: result.base,
+        head: result.head,
+        ahead: result.ahead,
+        behind: result.behind,
+        commits: result
+            .commits
+            .into_iter()
+            .map(git_compare_commit_dto)
+            .collect(),
+        files: result.files.into_iter().map(git_compare_file_dto).collect(),
+    }
+}
+
+fn git_compare_commit_dto(commit: GitCompareCommit) -> GitCompareCommitDto {
+    GitCompareCommitDto {
+        hash: commit.hash,
+        short_hash: commit.short_hash,
+        author: commit.author,
+        unix_seconds: commit.unix_seconds,
+        subject: commit.subject,
+    }
+}
+
+fn git_compare_file_dto(file: GitCompareFile) -> GitCompareFileDto {
+    GitCompareFileDto {
+        status: file.status,
+        path: file.path,
+        additions: file.additions,
+        deletions: file.deletions,
+    }
+}
 fn text_document_dto(document: TextDocument) -> TextDocumentDto {
     TextDocumentDto {
         path: document.path.to_string_lossy().into_owned(),

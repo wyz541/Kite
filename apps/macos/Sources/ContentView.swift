@@ -266,6 +266,7 @@ struct ContentView: View {
         let selectedEntries = model.selectedColumnEntries
         let selectedPaths = selectedEntries.map(\.path)
         return HStack(spacing: 2) {
+            KiteGitBranchButton(model: model)
             KiteToolbarIconButton(
                 systemName: "magnifyingglass",
                 title: "全局搜索 (⌘⇧F)",

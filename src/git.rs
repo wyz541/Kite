@@ -432,7 +432,7 @@ fn parse_unified_diff(text: &str) -> Vec<GitDiffLine> {
     lines
 }
 
-fn run_git(current_dir: &Path, args: &[&str]) -> Option<Output> {
+pub(crate) fn run_git(current_dir: &Path, args: &[&str]) -> Option<Output> {
     let mut command = Command::new("git");
     command
         .current_dir(current_dir)
@@ -446,7 +446,7 @@ fn run_git(current_dir: &Path, args: &[&str]) -> Option<Output> {
     command.output().ok()
 }
 
-fn output_error(output: &Output) -> String {
+pub(crate) fn output_error(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stderr.is_empty() {
         format!(
