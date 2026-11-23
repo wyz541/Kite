@@ -363,7 +363,7 @@ struct KiteGitCommitSheet: View {
             }
             message = result.amended ? result.subject : ""
             amend = false
-            state = try await model.gitCommitState(path: path)
+            self.state = try await model.gitCommitState(path: path)
         } catch {
             self.error = error.localizedDescription
         }
