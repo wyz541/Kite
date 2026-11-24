@@ -1,11 +1,11 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -154,32 +154,22 @@ impl UnauthorizedHttpServer {
     pub(crate) fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let address = listener.local_addr()?;
-        listener.set_nonblocking(true)?;
         let handle = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(8);
-            while Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                        let mut request = [0_u8; 4096];
-                        let _ = stream.read(&mut request);
-                        let response = concat!(
-                            "HTTP/1.1 401 Unauthorized\r\n",
-                            "WWW-Authenticate: Basic realm=\"kite-test\"\r\n",
-                            "Content-Length: 0\r\n",
-                            "Connection: close\r\n",
-                            "\r\n"
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        return;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(20));
-                    }
-                    Err(_) => return,
-                }
-            }
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let response = concat!(
+                "HTTP/1.1 401 Unauthorized\r\n",
+                "WWW-Authenticate: Basic realm=\"kite-test\"\r\n",
+                "Content-Length: 0\r\n",
+                "Connection: close\r\n",
+                "\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes());
         });
         Ok(Self {
             address,
@@ -195,6 +185,7 @@ impl UnauthorizedHttpServer {
 impl Drop for UnauthorizedHttpServer {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
+            let _ = TcpStream::connect(self.address);
             let _ = handle.join();
         }
     }
