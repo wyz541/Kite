@@ -525,13 +525,13 @@ impl SettingsWindow {
         main_app: Entity<KiteApp>,
         initial_update_state: SettingsUpdateState,
         initial_page: SettingsPage,
+        agent_store: Arc<AgentProfileStore>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // The main app is mutably leased while its click handler opens this window.
         // Use the caller's snapshot instead of reading the entity here.
         let preferences = ui_preferences::load_ui_preferences();
-        let agent_store = AgentProfileStore::new();
         let agent_snapshot = agent_store.snapshot();
         let subscription = cx.observe_in(&main_app, window, |this, main_app, _, cx| {
             this.update_state = main_app.read(cx).settings_update_state();
@@ -680,7 +680,9 @@ impl SettingsWindow {
     }
 
     fn notify_agents_changed(&self, cx: &mut Context<Self>) {
-        self.main_app.update(cx, |_, cx| cx.notify());
+        let snapshot = self.agent_store.snapshot();
+        self.main_app
+            .update(cx, |app, cx| app.apply_agent_profiles(snapshot, cx));
     }
 
     fn open_new_agent(
@@ -3031,23 +3033,38 @@ impl Render for SettingsWindow {
 pub(crate) fn open_settings_window(
     main_app: Entity<KiteApp>,
     initial_update_state: SettingsUpdateState,
+    agent_store: Arc<AgentProfileStore>,
     cx: &mut App,
 ) -> Result<(), String> {
-    open_settings_window_at(main_app, initial_update_state, SettingsPage::General, cx)
+    open_settings_window_at(
+        main_app,
+        initial_update_state,
+        SettingsPage::General,
+        agent_store,
+        cx,
+    )
 }
 
 pub(crate) fn open_agent_settings_window(
     main_app: Entity<KiteApp>,
     initial_update_state: SettingsUpdateState,
+    agent_store: Arc<AgentProfileStore>,
     cx: &mut App,
 ) -> Result<(), String> {
-    open_settings_window_at(main_app, initial_update_state, SettingsPage::Agent, cx)
+    open_settings_window_at(
+        main_app,
+        initial_update_state,
+        SettingsPage::Agent,
+        agent_store,
+        cx,
+    )
 }
 
 fn open_settings_window_at(
     main_app: Entity<KiteApp>,
     initial_update_state: SettingsUpdateState,
     initial_page: SettingsPage,
+    agent_store: Arc<AgentProfileStore>,
     cx: &mut App,
 ) -> Result<(), String> {
     let options = WindowOptions {
@@ -3065,6 +3082,7 @@ fn open_settings_window_at(
                 main_app.clone(),
                 initial_update_state,
                 initial_page,
+                agent_store.clone(),
                 window,
                 cx,
             )

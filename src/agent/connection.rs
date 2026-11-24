@@ -279,7 +279,7 @@ fn test_acp_stdio(
         ConnectionFailure::new(AgentConnectionStatus::InvalidProfile, "缺少可执行文件")
     })?;
     let executable = resolve_executable(executable_text)?;
-    let working_directory = profile_working_directory(&profile)?;
+    let working_directory = profile_working_directory(profile)?;
     let mut command = Command::new(&executable);
     command
         .args(&profile.arguments)
@@ -498,7 +498,7 @@ fn test_generic_cli(
         ConnectionFailure::new(AgentConnectionStatus::InvalidProfile, "缺少可执行文件")
     })?;
     let executable = resolve_executable(executable_text)?;
-    let working_directory = profile_working_directory(&profile)?;
+    let working_directory = profile_working_directory(profile)?;
     let mut command = Command::new(&executable);
     command
         .args(&profile.arguments)

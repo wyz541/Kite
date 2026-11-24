@@ -92,4 +92,4 @@ Both native settings pages provide:
 - a replacement selector before deleting the default profile
 - native keyboard focus and accessibility labels
 
-The right-click menu and Agent surface read the same shared store, so profile and default changes are immediately visible to those entry points.
+The right-click menu and Agent surface read the same shared store, so profile and default changes are immediately visible to those entry points. Until a default profile exists, context actions stay disabled while “Configure Agent…” remains available; saving or changing the default enables them without reopening the app.

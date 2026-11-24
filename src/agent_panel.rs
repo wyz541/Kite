@@ -12,8 +12,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kite_core::agent::{
-    AgentContext, AgentContextMode, AgentLaunchRequest, AgentPath, AgentSessionPhase,
-    default_working_directory,
+    AgentContext, AgentContextMode, AgentLaunchRequest, AgentPath, AgentProfile,
+    AgentProfileSnapshot, AgentSessionPhase, default_working_directory,
 };
 
 pub(crate) struct AgentPanel {
@@ -23,10 +23,15 @@ pub(crate) struct AgentPanel {
     prompt_input: Entity<InputState>,
     main_app: Option<WeakEntity<KiteApp>>,
     notice: Option<SharedString>,
+    default_profile: Option<AgentProfile>,
 }
 
 impl AgentPanel {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        agent_profiles: AgentProfileSnapshot,
+    ) -> Self {
         let prompt_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("添加问题或指令。内容会先停留在 Kite 中。")
@@ -39,11 +44,21 @@ impl AgentPanel {
             prompt_input,
             main_app: None,
             notice: None,
+            default_profile: agent_profiles.default_profile().cloned(),
         }
     }
 
     pub(crate) fn set_main_app(&mut self, main_app: WeakEntity<KiteApp>) {
         self.main_app = Some(main_app);
+    }
+
+    pub(crate) fn apply_agent_profiles(
+        &mut self,
+        agent_profiles: AgentProfileSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.default_profile = agent_profiles.default_profile().cloned();
+        cx.notify();
     }
 
     pub(crate) fn present(
@@ -205,15 +220,39 @@ impl AgentPanel {
     }
 
     fn render_status(&self, cx: &App) -> AnyElement {
+        let configured = self.default_profile.is_some();
         let (status_color, connection_label) = match self.phase {
+            AgentSessionPhase::Empty | AgentSessionPhase::Unconfigured if configured => {
+                (cx.theme().muted_foreground, "已配置")
+            }
             AgentSessionPhase::Empty | AgentSessionPhase::Unconfigured => {
-                (cx.theme().muted_foreground, "未连接")
+                (cx.theme().muted_foreground, "未配置")
             }
             AgentSessionPhase::Loading => (cx.theme().primary, "正在连接"),
             AgentSessionPhase::Running => (cx.theme().success, "已连接"),
             AgentSessionPhase::Error => (cx.theme().danger, "连接失败"),
             AgentSessionPhase::Ended => (cx.theme().muted_foreground, "已结束"),
         };
+        let (profile_title, profile_detail) = self
+            .default_profile
+            .as_ref()
+            .map(|profile| {
+                (
+                    profile.name.clone(),
+                    format!(
+                        "模型 {} · {} · {}",
+                        profile.model.as_deref().unwrap_or("—"),
+                        profile.permission.label(),
+                        profile.transport.label()
+                    ),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "未配置 Agent".to_string(),
+                    "模型 — · 只读 · Kite 宿主".to_string(),
+                )
+            });
         let working_directory = self
             .context
             .as_ref()
@@ -252,12 +291,12 @@ impl AgentPanel {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().font_semibold().child("未配置 Agent"))
+                            .child(div().text_sm().font_semibold().child(profile_title))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("模型 — · 只读 · Kite 宿主"),
+                                    .child(profile_detail),
                             ),
                     )
                     .child(
@@ -440,6 +479,16 @@ impl AgentPanel {
     }
 
     fn render_prompt(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let prompt_note = self
+            .default_profile
+            .as_ref()
+            .map(|profile| {
+                format!(
+                    "已配置 {}；发送和流式输出仍由后续阶段接入，当前不会启动外部 Agent。",
+                    profile.name
+                )
+            })
+            .unwrap_or_else(|| "当前阶段只准备上下文和提示，不会启动外部 Agent。".to_string());
         v_flex()
             .id("agent-prompt")
             .w_full()
@@ -490,7 +539,7 @@ impl AgentPanel {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("当前阶段只准备上下文和提示，不会启动外部 Agent。"),
+                    .child(prompt_note),
             )
             .into_any_element()
     }
@@ -525,6 +574,23 @@ impl AgentPanel {
                     .child(
                         "在任意项目上右键并选择“使用 Agent”。Kite 会先展示上下文，不会自动发送。",
                     ),
+            )
+            .when_some(
+                self.default_profile
+                    .as_ref()
+                    .map(|profile| profile.name.clone()),
+                |this, name| {
+                    this.child(
+                        div()
+                            .rounded_full()
+                            .bg(cx.theme().success.opacity(0.10))
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(cx.theme().success)
+                            .child(format!("默认 Agent：{name}")),
+                    )
+                },
             )
             .child(
                 h_flex()
@@ -563,13 +629,19 @@ impl Render for AgentPanel {
             let context = self.render_context_section(window, cx);
             let prompt = self.render_prompt(cx);
             let phase = self.phase;
+            let unconfigured =
+                phase == AgentSessionPhase::Unconfigured && self.default_profile.is_none();
+            let configured_agent = (phase == AgentSessionPhase::Unconfigured)
+                .then(|| self.default_profile.as_ref())
+                .flatten()
+                .map(|profile| profile.name.clone());
             v_flex()
                 .id("agent-panel-content")
                 .w_full()
                 .gap_3()
                 .child(status)
                 .child(context)
-                .when(phase == AgentSessionPhase::Unconfigured, |this| {
+                .when(unconfigured, |this| {
                     this.child(
                         h_flex()
                             .w_full()
@@ -594,6 +666,35 @@ impl Render for AgentPanel {
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
                                             .child("上下文和提示已经准备好。打开设置接入 Agent 后，发送流程会在下一阶段启用。"),
+                                    ),
+                            ),
+                    )
+                })
+                .when_some(configured_agent, |this, name| {
+                    this.child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().success.opacity(0.22))
+                            .bg(cx.theme().success.opacity(0.06))
+                            .p_3()
+                            .child(
+                                Icon::new(IconName::Sparkles)
+                                    .size_4()
+                                    .text_color(cx.theme().success),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(div().text_sm().font_medium().child(format!("已配置 {name}")))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("默认 Agent 已保存。连接测试和凭据管理可在 Agent 设置中完成。"),
                                     ),
                             ),
                     )

@@ -55,20 +55,17 @@ impl AgentTransport {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkingDirectoryPolicy {
+    #[default]
     SelectedItem,
     FileParent,
     RepositoryRoot,
-    Fixed { path: String },
+    Fixed {
+        path: String,
+    },
     Ask,
-}
-
-impl Default for WorkingDirectoryPolicy {
-    fn default() -> Self {
-        Self::SelectedItem
-    }
 }
 
 impl WorkingDirectoryPolicy {
@@ -204,6 +201,15 @@ pub struct AgentProfileSnapshot {
     pub profiles: Vec<AgentProfile>,
     pub default_profile_id: Option<String>,
     pub warning: Option<AgentConfigWarning>,
+}
+
+impl AgentProfileSnapshot {
+    pub fn default_profile(&self) -> Option<&AgentProfile> {
+        self.default_profile_id
+            .as_deref()
+            .and_then(|id| self.profiles.iter().find(|profile| profile.id == id))
+            .or_else(|| self.profiles.first())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -416,13 +422,13 @@ pub(crate) fn validate_and_normalize_profile(
         )?;
         if !environment_names.insert(variable.name.to_ascii_uppercase()) {
             return Err(invalid(
-                &format!("environment[{index}].name"),
+                format!("environment[{index}].name"),
                 "duplicates another environment variable",
             ));
         }
         if sensitive_environment_name(&variable.name) {
             return Err(invalid(
-                &format!("environment[{index}].name"),
+                format!("environment[{index}].name"),
                 "sensitive values must be supplied through credential_ref",
             ));
         }
@@ -562,7 +568,7 @@ fn validate_environment_name(index: usize, name: &str) -> Result<(), AgentConfig
     let mut characters = name.chars();
     let Some(first) = characters.next() else {
         return Err(invalid(
-            &format!("environment[{index}].name"),
+            format!("environment[{index}].name"),
             "must not be empty",
         ));
     };
@@ -570,7 +576,7 @@ fn validate_environment_name(index: usize, name: &str) -> Result<(), AgentConfig
         || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
     {
         return Err(invalid(
-            &format!("environment[{index}].name"),
+            format!("environment[{index}].name"),
             "must match [A-Za-z_][A-Za-z0-9_]*",
         ));
     }
@@ -723,6 +729,38 @@ mod tests {
             executable: Some("agent".to_string()),
             ..AgentProfile::default()
         }
+    }
+
+    #[test]
+    fn snapshot_resolves_the_default_profile_with_a_first_profile_fallback() {
+        let first = profile();
+        let mut second = profile();
+        second.id = "profile-2".to_string();
+        second.name = "Review Agent".to_string();
+
+        let snapshot = AgentProfileSnapshot {
+            schema_version: AGENT_PROFILE_SCHEMA_VERSION,
+            profiles: vec![first, second.clone()],
+            default_profile_id: Some(second.id.clone()),
+            warning: None,
+        };
+        assert_eq!(
+            snapshot
+                .default_profile()
+                .map(|profile| profile.id.as_str()),
+            Some("profile-2")
+        );
+
+        let snapshot = AgentProfileSnapshot {
+            default_profile_id: None,
+            ..snapshot
+        };
+        assert_eq!(
+            snapshot
+                .default_profile()
+                .map(|profile| profile.id.as_str()),
+            Some("profile-1")
+        );
     }
 
     #[test]

@@ -63,7 +63,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
-use kite_core::agent::{AgentLaunchRequest, AgentMenuCommand, AgentPath};
+use kite_core::agent::{
+    AgentLaunchRequest, AgentMenuCommand, AgentPath, AgentProfileSnapshot, AgentProfileStore,
+};
 use kite_core::diff::DiffEndpoint;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
@@ -1182,6 +1184,8 @@ pub struct KiteApp {
     git_recovery_prompt: Option<GitRecoveryPrompt>,
     agent_panel: Entity<AgentPanel>,
     agent_window: Option<AnyWindowHandle>,
+    agent_profile_store: Arc<AgentProfileStore>,
+    agent_profiles: AgentProfileSnapshot,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1314,7 +1318,9 @@ impl KiteApp {
             .row_selectable(true)
             .sortable(true)
         });
-        let agent_panel = cx.new(|cx| AgentPanel::new(window, cx));
+        let agent_profile_store = AgentProfileStore::new();
+        let agent_profiles = agent_profile_store.snapshot();
+        let agent_panel = cx.new(|cx| AgentPanel::new(window, cx, agent_profiles.clone()));
 
         let address_subscription = cx.subscribe_in(
             &address_input,
@@ -1461,6 +1467,8 @@ impl KiteApp {
             git_recovery_prompt: None,
             agent_panel,
             agent_window: None,
+            agent_profile_store,
+            agent_profiles,
             _subscriptions: vec![
                 address_subscription,
                 search_subscription,
@@ -1471,6 +1479,10 @@ impl KiteApp {
         let main_app = cx.weak_entity();
         app.agent_panel
             .update(cx, |panel, _cx| panel.set_main_app(main_app));
+        let agent_available = app.agent_profiles.default_profile().is_some();
+        app.table.update(cx, |table, _| {
+            table.delegate_mut().set_agent_available(agent_available)
+        });
         app.start_device_watcher(cx);
         app.start_directory_watcher(cx);
         app.start_git_auto_fetch(
@@ -1511,6 +1523,26 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn agent_available(&self) -> bool {
+        self.agent_profiles.default_profile().is_some()
+    }
+
+    pub(crate) fn apply_agent_profiles(
+        &mut self,
+        agent_profiles: AgentProfileSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let agent_available = agent_profiles.default_profile().is_some();
+        self.agent_profiles = agent_profiles.clone();
+        self.agent_panel.update(cx, |panel, cx| {
+            panel.apply_agent_profiles(agent_profiles, cx);
+        });
+        self.table.update(cx, |table, _| {
+            table.delegate_mut().set_agent_available(agent_available)
+        });
+        cx.notify();
+    }
+
     fn open_agent_context(
         &mut self,
         command: AgentMenuCommand,
@@ -1519,6 +1551,11 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         if command == AgentMenuCommand::Configure {
+            self.open_agent_settings(window, cx);
+            return;
+        }
+        if !self.agent_available() {
+            self.notice = Some("请先在 Agent 设置中添加并保存默认 Agent".into());
             self.open_agent_settings(window, cx);
             return;
         }
@@ -1607,7 +1644,12 @@ impl KiteApp {
 
     pub(crate) fn open_agent_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let initial_update_state = self.settings_update_state();
-        match settings_window::open_agent_settings_window(cx.entity(), initial_update_state, cx) {
+        match settings_window::open_agent_settings_window(
+            cx.entity(),
+            initial_update_state,
+            self.agent_profile_store.clone(),
+            cx,
+        ) {
             Ok(()) => {
                 self.error = None;
             }
@@ -5952,7 +5994,12 @@ impl KiteApp {
 
     fn open_settings_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let initial_update_state = self.settings_update_state();
-        match settings_window::open_settings_window(cx.entity(), initial_update_state, cx) {
+        match settings_window::open_settings_window(
+            cx.entity(),
+            initial_update_state,
+            self.agent_profile_store.clone(),
+            cx,
+        ) {
             Ok(()) => {
                 self.error = None;
             }
@@ -7555,7 +7602,8 @@ impl KiteApp {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         let can_paste = self.clipboard.borrow().is_some() || file_clipboard::has_files();
-        let column_menu_target = column_context_menu_target(pane, can_paste);
+        let column_menu_target = column_context_menu_target(pane, can_paste)
+            .with_agent_available(self.agent_available());
         let action_context = self.focus_handle.clone();
         let menu_path = path.clone();
         let search_path = path.clone();
@@ -8083,6 +8131,7 @@ impl KiteApp {
         let can_paste = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let git_available = pane.git_available;
         let svn_available = pane.svn_available;
+        let agent_available = self.agent_available();
         let selected_paths = pane
             .entries
             .iter()
@@ -8311,6 +8360,7 @@ impl KiteApp {
                         row_column_path.clone(),
                         capabilities,
                     )
+                    .with_agent_available(agent_available)
                     .with_paths(menu_paths.clone());
                     render_context_menu(menu, &target, row_action_context.clone(), window, cx)
                 })
