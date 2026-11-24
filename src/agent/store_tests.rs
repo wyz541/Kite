@@ -365,3 +365,72 @@ fn concurrent_creates_from_independent_store_instances_do_not_lose_profiles() {
         worker_count
     );
 }
+
+#[test]
+fn deleting_default_with_replacement_requires_and_uses_the_selected_profile() {
+    let temp = TestDirectory::new("delete-default-replacement");
+    let store = AgentProfileStore::with_path(temp.path_string());
+    let first = store
+        .create_profile(profile("First Agent"))
+        .expect("create first profile");
+    let second = store
+        .create_profile(profile("Second Agent"))
+        .expect("create second profile");
+
+    let error = store
+        .delete_profile_with_replacement(first.id.clone(), None)
+        .expect_err("default deletion needs a replacement");
+    assert!(error.to_string().contains("replacement default"));
+
+    let snapshot = store
+        .delete_profile_with_replacement(first.id.clone(), Some(second.id.clone()))
+        .expect("delete default with replacement");
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(
+        snapshot.default_profile_id.as_deref(),
+        Some(second.id.as_str())
+    );
+}
+
+#[test]
+fn duplicating_a_profile_creates_a_new_id_and_clears_the_credential_reference() {
+    let temp = TestDirectory::new("duplicate");
+    let store = AgentProfileStore::with_path(temp.path_string());
+    let source = store
+        .create_profile(profile("Source Agent"))
+        .expect("create source profile");
+
+    let snapshot = store
+        .duplicate_profile(source.id.clone())
+        .expect("duplicate profile");
+    assert_eq!(snapshot.profiles.len(), 2);
+    let duplicate = snapshot
+        .profiles
+        .iter()
+        .find(|profile| profile.id != source.id)
+        .expect("duplicate exists");
+    assert_ne!(duplicate.id, source.id);
+    assert!(duplicate.name.contains("副本"));
+    assert!(duplicate.credential_ref.is_none());
+}
+
+#[test]
+fn saving_without_a_new_secret_preserves_the_existing_reference() {
+    let temp = TestDirectory::new("save-preserve");
+    let store = AgentProfileStore::with_path(temp.path_string());
+    let source = store
+        .create_profile(profile("Preserve Agent"))
+        .expect("create source profile");
+    let mut updated = source.clone();
+    updated.name = "Preserved Agent".to_string();
+
+    let snapshot = store
+        .save_profile_with_credential(updated, None, false)
+        .expect("save without changing credential");
+    let saved = snapshot
+        .profiles
+        .iter()
+        .find(|profile| profile.id == source.id)
+        .expect("saved profile");
+    assert_eq!(saved.credential_ref, source.credential_ref);
+}

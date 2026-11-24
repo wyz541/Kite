@@ -8,11 +8,8 @@ extension Notification.Name {
 
 @MainActor
 final class KiteAgentSettingsStore: ObservableObject {
-    @Published private(set) var config = AgentConfig(
-        schemaVersion: 1,
-        defaultProfileId: nil,
-        profiles: []
-    )
+    @Published private(set) var profiles: [AgentProfile] = []
+    @Published private(set) var defaultProfileID: String?
     @Published private(set) var warning: String?
     @Published private(set) var statusMessage: String?
     @Published private(set) var tests: [String: AgentConnectionResult] = [:]
@@ -28,9 +25,7 @@ final class KiteAgentSettingsStore: ObservableObject {
 
     func reload() {
         guard let core else { return }
-        let snapshot = core.agentConfig()
-        config = snapshot.config
-        warning = snapshot.warning
+        apply(core.agentConfig())
     }
 
     func clearError() { error = nil }
@@ -40,12 +35,11 @@ final class KiteAgentSettingsStore: ObservableObject {
         guard let core else { throw AgentDraftError.message("Agent Core 尚未准备好") }
         let profile = try draft.makeProfile()
         let credential = draft.credential.agentTrimmed.agentNilIfEmpty
-        config = try core.saveAgentProfile(
+        apply(try core.saveAgentProfile(
             profile: profile,
             credential: credential,
             clearCredential: draft.clearCredential && credential == nil
-        )
-        warning = nil
+        ))
         statusMessage = "已保存 Agent 配置"
         NotificationCenter.default.post(name: .kiteAgentProfilesDidChange, object: nil)
     }
@@ -53,8 +47,7 @@ final class KiteAgentSettingsStore: ObservableObject {
     func setDefault(_ profile: AgentProfile) {
         guard let core else { return }
         do {
-            config = try core.setDefaultAgentProfile(profileId: profile.id)
-            warning = nil
+            apply(try core.setDefaultAgentProfile(profileId: profile.id))
             statusMessage = "默认 Agent 已更新"
             NotificationCenter.default.post(name: .kiteAgentProfilesDidChange, object: nil)
         } catch {
@@ -65,12 +58,11 @@ final class KiteAgentSettingsStore: ObservableObject {
     func delete(_ profile: AgentProfile, replacementDefaultID: String? = nil) {
         guard let core else { return }
         do {
-            config = try core.deleteAgentProfile(
+            apply(try core.deleteAgentProfile(
                 profileId: profile.id,
                 replacementDefaultId: replacementDefaultID
-            )
+            ))
             tests[profile.id] = nil
-            warning = nil
             statusMessage = "已删除 \(profile.name)"
             NotificationCenter.default.post(name: .kiteAgentProfilesDidChange, object: nil)
         } catch {
@@ -108,6 +100,17 @@ final class KiteAgentSettingsStore: ObservableObject {
             core.testAgentConnection(profile: profile, credential: credential)
         }.value
     }
+
+    var defaultProfile: AgentProfile? {
+        guard let defaultProfileID else { return nil }
+        return profiles.first { $0.id == defaultProfileID }
+    }
+
+    private func apply(_ snapshot: AgentProfileSnapshot) {
+        profiles = snapshot.profiles
+        defaultProfileID = snapshot.defaultProfileId
+        warning = snapshot.warning?.agentMessage
+    }
 }
 
 private enum AgentDraftError: LocalizedError {
@@ -120,17 +123,59 @@ private enum AgentDraftError: LocalizedError {
     }
 }
 
+enum AgentWorkingDirectoryChoice: String, CaseIterable, Identifiable {
+    case selectedItem
+    case fileParent
+    case repositoryRoot
+    case fixed
+    case ask
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .selectedItem: return "所选项目"
+        case .fileParent: return "文件所在目录"
+        case .repositoryRoot: return "Git 仓库根目录"
+        case .fixed: return "固定目录"
+        case .ask: return "每次询问"
+        }
+    }
+
+    init(policy: WorkingDirectoryPolicy) {
+        switch policy {
+        case .selectedItem: self = .selectedItem
+        case .fileParent: self = .fileParent
+        case .repositoryRoot: self = .repositoryRoot
+        case .fixed(_): self = .fixed
+        case .ask: self = .ask
+        }
+    }
+
+    func policy(fixedPath: String?) -> WorkingDirectoryPolicy {
+        switch self {
+        case .selectedItem: return .selectedItem
+        case .fileParent: return .fileParent
+        case .repositoryRoot: return .repositoryRoot
+        case .fixed: return .fixed(path: fixedPath ?? "")
+        case .ask: return .ask
+        }
+    }
+}
+
 struct AgentProfileDraft: Identifiable, Equatable {
     var id: String
     var name: String
     var transport: AgentTransport
     var executable: String
+    var endpoint: String
     var argumentsText: String
     var environmentText: String
     var model: String
-    var workingDirectoryPolicy: WorkingDirectoryPolicy
+    var workingDirectoryChoice: AgentWorkingDirectoryChoice
     var workingDirectory: String
-    var permissionPolicy: PermissionPolicy
+    var permission: PermissionPolicy
+    var capabilities: AgentCapabilities
     var timeoutText: String
     var outputLimitKiBText: String
     var credentialEnvVar: String
@@ -145,13 +190,19 @@ struct AgentProfileDraft: Identifiable, Equatable {
         id = profile.id
         name = profile.name
         transport = profile.transport
-        executable = profile.executable
+        executable = profile.executable ?? ""
+        endpoint = profile.endpoint ?? ""
         argumentsText = profile.arguments.joined(separator: "\n")
-        environmentText = profile.environment.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+        environmentText = profile.environment.map { "\($0.name)=\($0.value)" }.joined(separator: "\n")
         model = profile.model ?? ""
-        workingDirectoryPolicy = profile.workingDirectoryPolicy
-        workingDirectory = profile.workingDirectory ?? ""
-        permissionPolicy = profile.permissionPolicy
+        workingDirectoryChoice = AgentWorkingDirectoryChoice(policy: profile.workingDirectory)
+        if case .fixed(let path) = profile.workingDirectory {
+            workingDirectory = path
+        } else {
+            workingDirectory = ""
+        }
+        permission = profile.permission
+        capabilities = profile.capabilities
         timeoutText = String(profile.timeoutSeconds)
         outputLimitKiBText = String(profile.outputLimitBytes / 1024)
         credentialEnvVar = profile.credentialEnvVar ?? ""
@@ -165,20 +216,20 @@ struct AgentProfileDraft: Identifiable, Equatable {
         AgentProfileDraft(
             profile: AgentProfile(
                 id: core.newAgentProfileId(),
-                name: transport == .acpStdio ? "ACP Agent" : "CLI Agent",
+                name: transport == .acpStdio ? "ACP Agent" : (transport == .acpHttp ? "ACP HTTP Agent" : "CLI Agent"),
                 transport: transport,
-                executable: "",
+                executable: transport == .acpHttp ? nil : "",
                 endpoint: nil,
                 arguments: [],
                 environment: [],
                 model: nil,
-                workingDirectoryPolicy: .ask,
-                workingDirectory: nil,
-                permissionPolicy: transport == .genericCli ? .agentManaged : .readOnly,
+                workingDirectory: .ask,
+                permission: transport == .cli ? .agentManaged : .readOnly,
                 timeoutSeconds: 30,
                 outputLimitBytes: 512 * 1024,
+                credentialRef: nil,
                 credentialEnvVar: nil,
-                credentialRef: nil
+                capabilities: AgentCapabilities.defaultCapabilities
             ),
             isNew: true
         )
@@ -203,34 +254,33 @@ struct AgentProfileDraft: Identifiable, Equatable {
         }
         let (outputBytes, overflow) = outputKiB.multipliedReportingOverflow(by: 1024)
         guard !overflow else { throw AgentDraftError.message("输出上限过大") }
-        let environment = try parseEnvironment(environmentText)
-        let arguments = argumentsText.components(separatedBy: .newlines)
+        let isHTTP = transport == .acpHttp
+        let environment: [AgentEnvironmentVariable] = isHTTP ? [] : try parseEnvironment(environmentText)
+        let arguments: [String] = isHTTP ? [] : argumentsText.components(separatedBy: .newlines)
             .map { $0.agentTrimmed }
             .filter { !$0.isEmpty }
-        let fixedDirectory = workingDirectoryPolicy == .fixed
-            ? workingDirectory.agentTrimmed.agentNilIfEmpty
-            : nil
-        if workingDirectoryPolicy == .fixed && fixedDirectory == nil {
+        let fixedPath = workingDirectory.agentTrimmed.agentNilIfEmpty
+        if workingDirectoryChoice == .fixed && fixedPath == nil {
             throw AgentDraftError.message("固定工作目录策略需要选择目录")
         }
         return AgentProfile(
             id: id,
             name: name.agentTrimmed,
             transport: transport,
-            executable: executable.agentTrimmed,
-            endpoint: nil,
-            arguments: arguments,
-            environment: environment,
-            model: model.agentTrimmed.agentNilIfEmpty,
-            workingDirectoryPolicy: workingDirectoryPolicy,
-            workingDirectory: fixedDirectory,
-            permissionPolicy: permissionPolicy,
+            executable: isHTTP ? nil : executable.agentTrimmed.agentNilIfEmpty,
+            endpoint: isHTTP ? endpoint.agentTrimmed.agentNilIfEmpty : nil,
+            arguments: isHTTP ? [] : arguments,
+            environment: isHTTP ? [] : environment,
+            model: isHTTP ? nil : model.agentTrimmed.agentNilIfEmpty,
+            workingDirectory: workingDirectoryChoice.policy(fixedPath: fixedPath),
+            permission: permission,
             timeoutSeconds: timeout,
             outputLimitBytes: outputBytes,
-            credentialEnvVar: credentialEnvVar.agentTrimmed.agentNilIfEmpty,
             credentialRef: clearCredential && credential.agentTrimmed.isEmpty
                 ? nil
-                : existingCredentialRef
+                : existingCredentialRef,
+            credentialEnvVar: credentialEnvVar.agentTrimmed.agentNilIfEmpty,
+            capabilities: capabilities
         )
     }
 
@@ -244,12 +294,43 @@ struct AgentProfileDraft: Identifiable, Equatable {
             }
             let key = String(line[..<separator]).agentTrimmed
             let value = String(line[line.index(after: separator)...])
-            entries.append(AgentEnvironmentVariable(key: key, value: value))
+            entries.append(AgentEnvironmentVariable(name: key, value: value))
         }
         return entries
     }
 }
 
+private extension AgentCapabilities {
+    static let defaultCapabilities = AgentCapabilities(
+        readSelection: true,
+        readWorkspace: false,
+        writeFiles: false,
+        executeCommands: false,
+        network: false,
+        permissionRequests: true
+    )
+}
+
+private extension AgentConfigWarning {
+    var agentMessage: String {
+        switch self {
+        case .corruptConfig(let message):
+            return "Agent 配置损坏：\(message)"
+        case .unknownSchemaVersion(let found, let supported):
+            return "不支持的 Agent 配置版本：\(found)（当前为 \(supported)）"
+        case .configTooLarge(let bytes, let maxBytes):
+            return "Agent 配置过大：\(bytes) 字节（上限 \(maxBytes) 字节）"
+        case .invalidProfile(let field, let message):
+            return "Agent 配置字段 \(field) 无效：\(message)"
+        case .storageUnavailable(let message):
+            return "Agent 配置存储不可用：\(message)"
+        case .io(let message):
+            return "Agent 配置读写失败：\(message)"
+        case .migrationApplied(let fromVersion, let toVersion):
+            return "Agent 配置已从版本 \(fromVersion) 迁移到 \(toVersion)"
+        }
+    }
+}
 
 @MainActor
 struct KiteAgentSettingsView: View {
@@ -270,7 +351,7 @@ struct KiteAgentSettingsView: View {
                 noticeRow(status, systemImage: "checkmark.circle.fill", color: .green)
                     .onTapGesture { store.clearStatus() }
             }
-            if store.config.profiles.isEmpty {
+            if store.profiles.isEmpty {
                 emptyState
             } else {
                 defaultAgentSection
@@ -321,7 +402,7 @@ struct KiteAgentSettingsView: View {
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 Spacer()
-                Button("使用 CLI 预设") { openNew(.genericCli) }
+                Button("使用 CLI 预设") { openNew(.cli) }
                     .controlSize(.small)
                 Button("添加 Agent") { openNew(.acpStdio) }
                     .buttonStyle(.borderedProminent)
@@ -346,7 +427,7 @@ struct KiteAgentSettingsView: View {
             HStack(spacing: 8) {
                 Button("添加 Agent") { openNew(.acpStdio) }
                     .buttonStyle(.borderedProminent)
-                Button("使用预设") { openNew(.genericCli) }
+                Button("使用预设") { openNew(.cli) }
             }
             .controlSize(.small)
         }
@@ -364,7 +445,7 @@ struct KiteAgentSettingsView: View {
     private var defaultAgentSection: some View {
         VStack(alignment: .leading, spacing: 9) {
             agentSectionTitle("默认 Agent")
-            if let profile = defaultProfile {
+            if let profile = store.defaultProfile {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: "cpu")
@@ -378,12 +459,12 @@ struct KiteAgentSettingsView: View {
                                 agentBadge("默认", color: .accentColor)
                                 agentBadge(profile.transport.label, color: .purple)
                             }
-                            Text(profile.executable)
+                            Text(profile.connectionTarget)
                                 .font(.system(size: 10.5, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                            Text("工作目录：\(profile.workingDirectorySummary) · 权限：\(profile.permissionPolicy.label)")
+                            Text("工作目录：\(profile.workingDirectorySummary) · 权限：\(profile.permission.label)")
                                 .font(.system(size: 10.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -413,7 +494,7 @@ struct KiteAgentSettingsView: View {
         VStack(alignment: .leading, spacing: 9) {
             agentSectionTitle("Agent 配置")
             VStack(spacing: 0) {
-                ForEach(Array(store.config.profiles.enumerated()), id: \.element.id) { index, profile in
+                ForEach(Array(store.profiles.enumerated()), id: \.element.id) { index, profile in
                     if index > 0 { Divider().padding(.leading, 16) }
                     agentProfileRow(profile)
                 }
@@ -428,7 +509,7 @@ struct KiteAgentSettingsView: View {
     }
 
     private func agentProfileRow(_ profile: AgentProfile) -> some View {
-        let isDefault = store.config.defaultProfileId == profile.id
+        let isDefault = store.defaultProfileID == profile.id
         return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -437,12 +518,12 @@ struct KiteAgentSettingsView: View {
                         if isDefault { agentBadge("默认", color: .accentColor) }
                         agentBadge(profile.transport.label, color: .purple)
                     }
-                    Text(profile.executable)
+                    Text(profile.connectionTarget)
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text("\(profile.permissionPolicy.label) · \(profile.workingDirectorySummary) · \(profile.credentialRef == nil ? "无保存凭据" : "凭据已保存")")
+                    Text("\(profile.permission.label) · \(profile.workingDirectorySummary) · \(profile.credentialRef == nil ? "无保存凭据" : "凭据已保存")")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
@@ -469,15 +550,10 @@ struct KiteAgentSettingsView: View {
         .padding(.vertical, 12)
     }
 
-    private var defaultProfile: AgentProfile? {
-        guard let id = store.config.defaultProfileId else { return nil }
-        return store.config.profiles.first { $0.id == id }
-    }
-
-    @ViewBuilder
+        @ViewBuilder
     private func deleteButtons(for profile: AgentProfile) -> some View {
-        if store.config.defaultProfileId == profile.id && store.config.profiles.count > 1 {
-            ForEach(store.config.profiles.filter { $0.id != profile.id }, id: \.id) { candidate in
+        if store.defaultProfileID == profile.id && store.profiles.count > 1 {
+            ForEach(store.profiles.filter { $0.id != profile.id }, id: \.id) { candidate in
                 Button("删除并设为 \(candidate.name)", role: .destructive) {
                     store.delete(profile, replacementDefaultID: candidate.id)
                     deleteTarget = nil
@@ -492,10 +568,10 @@ struct KiteAgentSettingsView: View {
     }
 
     private func deleteMessage(for profile: AgentProfile) -> String {
-        if store.config.defaultProfileId == profile.id && store.config.profiles.count > 1 {
+        if store.defaultProfileID == profile.id && store.profiles.count > 1 {
             return "这是当前默认 Agent。请选择一个新的默认 Agent，然后删除。"
         }
-        if store.config.profiles.count == 1 { return "这会让 Agent 列表变为空。" }
+        if store.profiles.count == 1 { return "这会让 Agent 列表变为空。" }
         return "此操作会从 agent.json 删除配置，并清理对应钥匙串条目。"
     }
 
@@ -566,7 +642,7 @@ private struct KiteAgentEditorView: View {
                     workspaceSection
                     credentialSection
                     advancedSection
-                    if draft.transport == .genericCli {
+                    if draft.transport == .cli {
                         warningBox("通用 CLI 不是 ACP 协议会话。Kite 只能验证可执行文件能否启动；文件写入、命令和网络权限均由 Agent 自身管理。")
                     }
                     if let testResult { KiteAgentConnectionResultView(result: testResult) }
@@ -622,28 +698,36 @@ private struct KiteAgentEditorView: View {
             editorField("接入方式", detail: "ACP 会执行 initialize 握手；通用 CLI 只验证进程能否启动。") {
                 Picker("接入方式", selection: $draft.transport) {
                     Text("ACP / JSON-RPC").tag(AgentTransport.acpStdio)
-                    Text("通用 CLI").tag(AgentTransport.genericCli)
+                    Text("ACP HTTP").tag(AgentTransport.acpHttp)
+                    Text("通用 CLI").tag(AgentTransport.cli)
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
             }
-            AgentDivider()
-            editorField("可执行文件", detail: "使用绝对路径，或只填写 PATH 中的命令名称。参数不会经过 shell。") {
-                TextField("/usr/local/bin/agent", text: $draft.executable)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Agent 可执行文件")
-            }
-            AgentDivider()
-            editorField("启动参数", detail: "每行一个参数。禁止在参数中直接填写 token、密码或带凭据的 URL。") {
-                multilineEditor($draft.argumentsText, height: 64)
-                    .accessibilityLabel("Agent 启动参数")
-            }
-            AgentDivider()
-            editorField("环境变量", detail: "每行 KEY=VALUE。敏感环境变量会被拒绝，请使用凭据栏。") {
-                multilineEditor($draft.environmentText, height: 64)
-                    .accessibilityLabel("Agent 环境变量")
-            }
-            if draft.transport == .acpStdio {
+            if draft.transport == .acpHttp {
+                AgentDivider()
+                editorField("ACP HTTP 端点", detail: "使用绝对 HTTP 或 HTTPS URL。凭据通过系统钥匙串和 Authorization 头注入。") {
+                    TextField("https://localhost:7777/acp", text: $draft.endpoint)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("ACP HTTP 端点")
+                }
+            } else {
+                AgentDivider()
+                editorField("可执行文件", detail: "使用绝对路径，或只填写 PATH 中的命令名称。参数不会经过 shell。") {
+                    TextField("/usr/local/bin/agent", text: $draft.executable)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Agent 可执行文件")
+                }
+                AgentDivider()
+                editorField("启动参数", detail: "每行一个参数。禁止在参数中直接填写 token、密码或带凭据的 URL。") {
+                    multilineEditor($draft.argumentsText, height: 64)
+                        .accessibilityLabel("Agent 启动参数")
+                }
+                AgentDivider()
+                editorField("环境变量", detail: "每行 KEY=VALUE。敏感环境变量会被拒绝，请使用凭据栏。") {
+                    multilineEditor($draft.environmentText, height: 64)
+                        .accessibilityLabel("Agent 环境变量")
+                }
                 AgentDivider()
                 editorField("模型", detail: "可选。留空时由 Agent 自身配置决定。") {
                     TextField("留空时使用 Agent 自身配置", text: $draft.model)
@@ -655,37 +739,61 @@ private struct KiteAgentEditorView: View {
     }
 
     private var workspaceSection: some View {
-        editorSection("工作目录与权限") {
-            editorField("工作目录策略", detail: "设置页无法获知本次选中项；固定目录会在保存时校验。") {
-                Picker("工作目录策略", selection: $draft.workingDirectoryPolicy) {
-                    ForEach(WorkingDirectoryPolicy.settingsCases, id: \.self) { policy in
-                        Text(policy.label).tag(policy)
+        VStack(alignment: .leading, spacing: 22) {
+            editorSection("工作目录与权限") {
+                editorField("工作目录策略", detail: "设置页无法获知本次选中项；固定目录会在保存时校验。") {
+                    Picker("工作目录策略", selection: $draft.workingDirectoryChoice) {
+                        ForEach(AgentWorkingDirectoryChoice.allCases) { choice in
+                            Text(choice.label).tag(choice)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 260, alignment: .leading)
+                }
+                if draft.workingDirectoryChoice == .fixed {
+                    AgentDivider()
+                    editorField("固定工作目录", detail: "保存前会确认目录存在。") {
+                        HStack(spacing: 8) {
+                            TextField("/Users/me/project", text: $draft.workingDirectory)
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityLabel("固定工作目录")
+                            Button("选择…") { chooseWorkingDirectory() }
+                        }
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: 260, alignment: .leading)
-            }
-            if draft.workingDirectoryPolicy == .fixed {
                 AgentDivider()
-                editorField("固定工作目录", detail: "保存前会确认目录存在。") {
-                    HStack(spacing: 8) {
-                        TextField("/Users/me/project", text: $draft.workingDirectory)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("固定工作目录")
-                        Button("选择…") { chooseWorkingDirectory() }
+                editorField("权限摘要", detail: draft.permission.summary) {
+                    Picker("权限摘要", selection: $draft.permission) {
+                        Text(PermissionPolicy.readOnly.label).tag(PermissionPolicy.readOnly)
+                        Text(PermissionPolicy.confirmWrites.label).tag(PermissionPolicy.confirmWrites)
+                        Text(PermissionPolicy.agentManaged.label).tag(PermissionPolicy.agentManaged)
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
                 }
             }
-            AgentDivider()
-            editorField("权限摘要", detail: draft.permissionPolicy.summary) {
-                Picker("权限摘要", selection: $draft.permissionPolicy) {
-                    Text(PermissionPolicy.readOnly.label).tag(PermissionPolicy.readOnly)
-                    Text(PermissionPolicy.confirmWrites.label).tag(PermissionPolicy.confirmWrites)
-                    Text(PermissionPolicy.agentManaged.label).tag(PermissionPolicy.agentManaged)
+
+            editorSection("能力声明") {
+                editorField("上下文", detail: "这些声明用于权限摘要；普通 CLI 的实际权限仍由 Agent 自身管理。") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Toggle("读取选中项", isOn: $draft.capabilities.readSelection)
+                        Toggle("读取工作区", isOn: $draft.capabilities.readWorkspace)
+                        Toggle("请求权限确认", isOn: $draft.capabilities.permissionRequests)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
+                AgentDivider()
+                editorField("写入与执行", detail: "Kite 不会因为这里的声明而绕过确认。") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Toggle("写入文件", isOn: $draft.capabilities.writeFiles)
+                        Toggle("执行命令", isOn: $draft.capabilities.executeCommands)
+                        Toggle("网络访问", isOn: $draft.capabilities.network)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
             }
         }
     }
@@ -903,7 +1011,8 @@ private extension AgentTransport {
     var label: String {
         switch self {
         case .acpStdio: return "ACP / JSON-RPC"
-        case .genericCli: return "通用 CLI"
+        case .acpHttp: return "ACP HTTP"
+        case .cli: return "通用 CLI"
         }
     }
 }
@@ -927,10 +1036,6 @@ private extension PermissionPolicy {
 }
 
 private extension WorkingDirectoryPolicy {
-    static let settingsCases: [WorkingDirectoryPolicy] = [
-        .selectedItem, .fileParent, .repositoryRoot, .fixed, .ask
-    ]
-
     var label: String {
         switch self {
         case .selectedItem: return "所选项目"
@@ -940,14 +1045,23 @@ private extension WorkingDirectoryPolicy {
         case .ask: return "每次询问"
         }
     }
+
+    var fixedPath: String? {
+        if case .fixed(let path) = self { return path }
+        return nil
+    }
 }
 
 private extension AgentProfile {
-    var workingDirectorySummary: String {
-        if workingDirectoryPolicy == .fixed {
-            return workingDirectory ?? "固定目录未设置"
+    var connectionTarget: String {
+        if transport == .acpHttp {
+            return endpoint ?? "未设置端点"
         }
-        return workingDirectoryPolicy.label
+        return executable ?? "未设置命令"
+    }
+
+    var workingDirectorySummary: String {
+        workingDirectory.fixedPath ?? workingDirectory.label
     }
 }
 

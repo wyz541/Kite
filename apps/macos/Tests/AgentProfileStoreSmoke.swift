@@ -37,6 +37,7 @@ struct AgentProfileStoreSmoke {
             timeoutSeconds: 30,
             outputLimitBytes: 65_536,
             credentialRef: "keychain:kite/agent/smoke",
+            credentialEnvVar: nil,
             capabilities: capabilities
         )
         let created = try store.createProfile(profile: profile)
@@ -60,6 +61,7 @@ struct AgentProfileStoreSmoke {
             timeoutSeconds: 30,
             outputLimitBytes: 65_536,
             credentialRef: "keychain:kite/agent/smoke",
+            credentialEnvVar: nil,
             capabilities: capabilities
         )
         do {

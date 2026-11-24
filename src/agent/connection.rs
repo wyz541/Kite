@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::model::{AgentProfile, AgentTransport};
-use super::store;
+use super::{AgentProfile, AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, credentials};
 
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
 const ACP_PROTOCOL_VERSION: u64 = 1;
@@ -113,17 +112,17 @@ pub fn test_agent_connection(
     ephemeral_credential: Option<String>,
 ) -> AgentConnectionResult {
     let started = Instant::now();
-    let profile = match profile.normalized() {
+    let profile = match super::prepare_loaded_profile(profile, true) {
         Ok(profile) => profile,
         Err(message) => {
             return AgentConnectionResult::failure(
                 AgentConnectionStatus::InvalidProfile,
-                message,
+                message.to_string(),
                 started.elapsed(),
             );
         }
     };
-    let credential = match store::resolve_credential(&profile, ephemeral_credential) {
+    let credential = match resolve_credential(&profile, ephemeral_credential) {
         Ok(credential) => credential,
         Err(message) => {
             return AgentConnectionResult::failure(
@@ -135,7 +134,8 @@ pub fn test_agent_connection(
     };
     let result = match profile.transport {
         AgentTransport::AcpStdio => test_acp_stdio(&profile, credential.as_deref(), started),
-        AgentTransport::GenericCli => test_generic_cli(&profile, credential.as_deref(), started),
+        AgentTransport::AcpHttp => test_acp_http(&profile, credential.as_deref(), started),
+        AgentTransport::Cli => test_generic_cli(&profile, credential.as_deref(), started),
     };
     match result {
         Ok(result) => result,
@@ -145,19 +145,141 @@ pub fn test_agent_connection(
     }
 }
 
+fn resolve_credential(
+    profile: &AgentProfile,
+    ephemeral_credential: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(credential) = ephemeral_credential {
+        let credential = credential.trim().to_string();
+        if !credential.is_empty() {
+            return Ok(Some(credential));
+        }
+    }
+    if profile.credential_ref.is_some() {
+        match credentials::load_secret(&profile.id) {
+            Ok(Some(secret)) => Ok(Some(secret)),
+            Ok(None) => Err("Agent 配置引用了钥匙串凭据，但系统中找不到该条目".to_string()),
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+fn profile_working_directory(profile: &AgentProfile) -> Result<PathBuf, ConnectionFailure> {
+    let directory = match &profile.working_directory {
+        WorkingDirectoryPolicy::Fixed { path } => PathBuf::from(path),
+        _ => dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+    };
+    if !directory.is_dir() {
+        return Err(ConnectionFailure::new(
+            AgentConnectionStatus::PermissionDenied,
+            format!("工作目录不可用：{}", directory.display()),
+        ));
+    }
+    Ok(directory)
+}
+
+fn initialize_request() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": ACP_PROTOCOL_VERSION,
+            "clientCapabilities": {
+                "auth": { "terminal": false },
+                "fs": { "readTextFile": false, "writeTextFile": false },
+                "terminal": false
+            },
+            "clientInfo": {
+                "name": "kite",
+                "title": "Kite",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }
+    })
+}
+
+fn test_acp_http(
+    profile: &AgentProfile,
+    credential: Option<&str>,
+    started: Instant,
+) -> Result<AgentConnectionResult, ConnectionFailure> {
+    let endpoint = profile.endpoint.as_deref().ok_or_else(|| {
+        ConnectionFailure::new(AgentConnectionStatus::InvalidProfile, "缺少 ACP HTTP 端点")
+    })?;
+    let mut request = ureq::post(endpoint)
+        .timeout(Duration::from_secs(u64::from(profile.timeout_seconds)))
+        .set("content-type", "application/json")
+        .set("accept", "application/json");
+    if let Some(credential) = credential {
+        request = request.set("authorization", &format!("Bearer {credential}"));
+    }
+    let encoded = serde_json::to_string(&initialize_request()).map_err(|error| {
+        ConnectionFailure::new(
+            AgentConnectionStatus::Io,
+            format!("无法编码 ACP initialize：{error}"),
+        )
+    })?;
+    let response = match request.send_string(&encoded) {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            let detail = redact_text(&body, credential);
+            let status = if code == 401 {
+                AgentConnectionStatus::AuthenticationFailed
+            } else if code == 403 {
+                AgentConnectionStatus::PermissionDenied
+            } else {
+                classify_failure_text(&detail)
+            };
+            return Err(ConnectionFailure::new(
+                status,
+                if detail.trim().is_empty() {
+                    format!("ACP HTTP 返回状态码 {code}")
+                } else {
+                    format!("ACP HTTP 返回状态码 {code}：{detail}")
+                },
+            ));
+        }
+        Err(ureq::Error::Transport(error)) => {
+            return Err(ConnectionFailure::new(
+                if error.kind() == ureq::ErrorKind::ConnectionFailed {
+                    AgentConnectionStatus::NotInstalled
+                } else {
+                    AgentConnectionStatus::Io
+                },
+                format!("无法连接 ACP HTTP 端点：{error}"),
+            ));
+        }
+    };
+    let (bytes, exceeded) = read_limited(response.into_reader(), profile.output_limit_bytes);
+    if exceeded {
+        return Err(ConnectionFailure::new(
+            AgentConnectionStatus::OutputTooLarge,
+            "Agent HTTP 响应超过配置的输出上限",
+        ));
+    }
+    let value = serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+        ConnectionFailure::new(
+            AgentConnectionStatus::ProtocolError,
+            "ACP HTTP 端点返回了非 JSON-RPC 内容",
+        )
+    })?;
+    parse_initialize_response(value, profile, started)
+}
+
 fn test_acp_stdio(
     profile: &AgentProfile,
     credential: Option<&str>,
     started: Instant,
 ) -> Result<AgentConnectionResult, ConnectionFailure> {
-    let executable = resolve_executable(&profile.executable)?;
-    let working_directory = profile.default_working_directory();
-    if !working_directory.is_dir() {
-        return Err(ConnectionFailure::new(
-            AgentConnectionStatus::PermissionDenied,
-            format!("工作目录不可用：{}", working_directory.display()),
-        ));
-    }
+    let executable_text = profile.executable.as_deref().ok_or_else(|| {
+        ConnectionFailure::new(AgentConnectionStatus::InvalidProfile, "缺少可执行文件")
+    })?;
+    let executable = resolve_executable(executable_text)?;
+    let working_directory = profile_working_directory(&profile)?;
     let mut command = Command::new(&executable);
     command
         .args(&profile.arguments)
@@ -189,25 +311,7 @@ fn test_acp_stdio(
         let _ = stderr_tx.send(String::from_utf8_lossy(&bytes).into_owned());
     });
 
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": ACP_PROTOCOL_VERSION,
-            "clientCapabilities": {
-                "auth": { "terminal": false },
-                "fs": { "readTextFile": false, "writeTextFile": false },
-                "terminal": false
-            },
-            "clientInfo": {
-                "name": "kite",
-                "title": "Kite",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        }
-    });
-    let mut encoded = serde_json::to_vec(&request)
+    let mut encoded = serde_json::to_vec(&initialize_request())
         .map_err(|error| ConnectionFailure::new(AgentConnectionStatus::Io, error.to_string()))?;
     encoded.push(b'\n');
     stdin.write_all(&encoded).map_err(|error| {
@@ -371,7 +475,7 @@ fn parse_initialize_response(
     Ok(AgentConnectionResult {
         success: true,
         status,
-        message: if profile.permission_policy == super::model::PermissionPolicy::AgentManaged {
+        message: if profile.permission == PermissionPolicy::AgentManaged {
             format!("{message} 权限由 Agent 自身管理。")
         } else {
             message
@@ -390,8 +494,11 @@ fn test_generic_cli(
     credential: Option<&str>,
     started: Instant,
 ) -> Result<AgentConnectionResult, ConnectionFailure> {
-    let executable = resolve_executable(&profile.executable)?;
-    let working_directory = profile.default_working_directory();
+    let executable_text = profile.executable.as_deref().ok_or_else(|| {
+        ConnectionFailure::new(AgentConnectionStatus::InvalidProfile, "缺少可执行文件")
+    })?;
+    let executable = resolve_executable(executable_text)?;
+    let working_directory = profile_working_directory(&profile)?;
     let mut command = Command::new(&executable);
     command
         .args(&profile.arguments)
@@ -543,7 +650,7 @@ fn executable_extensions() -> Vec<String> {
 
 fn apply_environment(command: &mut Command, profile: &AgentProfile, credential: Option<&str>) {
     for entry in &profile.environment {
-        command.env(&entry.key, &entry.value);
+        command.env(&entry.name, &entry.value);
     }
     if let Some(credential) = credential {
         let key = profile
@@ -826,6 +933,42 @@ mod tests {
         assert_eq!(extract_semver("agent 1.2.3"), Some("1.2.3".to_string()));
     }
     #[test]
+    fn probes_a_local_acp_http_endpoint() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept fixture request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"agentInfo":{"name":"http-fixture","title":"HTTP Fixture","version":"1.0.0"},"authMethods":[]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write fixture response");
+        });
+        let profile = AgentProfile {
+            name: "HTTP fixture".to_string(),
+            transport: AgentTransport::AcpHttp,
+            endpoint: Some(format!("http://{address}/acp")),
+            executable: None,
+            timeout_seconds: 5,
+            ..AgentProfile::default()
+        };
+        let result = test_agent_connection(profile, None);
+        server.join().expect("join fixture server");
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.agent_name.as_deref(), Some("HTTP Fixture"));
+        assert_eq!(result.protocol_version, Some(1));
+    }
+
+    #[test]
     #[ignore = "requires the local ACP fixture interpreter"]
     fn probes_an_acp_fixture_without_saving_credentials() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -834,7 +977,7 @@ mod tests {
             .join("acp_probe.py");
         let profile = AgentProfile {
             name: "ACP probe fixture".to_string(),
-            executable: if cfg!(windows) { "python" } else { "python3" }.to_string(),
+            executable: Some(if cfg!(windows) { "python" } else { "python3" }.to_string()),
             arguments: vec![fixture.to_string_lossy().into_owned()],
             timeout_seconds: 10,
             ..AgentProfile::default()

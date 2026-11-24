@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use kite_core::agent_config::{
-    AgentConfig, AgentConnectionResult, AgentConnectionStatus, AgentEnvironmentVariable,
-    AgentProfile, AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, load_agent_config,
+use kite_core::agent::{
+    AgentCapabilities, AgentConnectionResult, AgentConnectionStatus, AgentEnvironmentVariable,
+    AgentProfile, AgentProfileSnapshot, AgentProfileStore, AgentTransport, PermissionPolicy,
+    WorkingDirectoryPolicy,
 };
 
 use crate::app::{KiteApp, SettingsUpdateState};
@@ -94,17 +96,53 @@ impl SettingsPage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AgentWorkingDirectoryChoice {
+    SelectedItem,
+    FileParent,
+    RepositoryRoot,
+    Fixed,
+    #[default]
+    Ask,
+}
+
+impl AgentWorkingDirectoryChoice {
+    fn from_policy(policy: &WorkingDirectoryPolicy) -> Self {
+        match policy {
+            WorkingDirectoryPolicy::SelectedItem => Self::SelectedItem,
+            WorkingDirectoryPolicy::FileParent => Self::FileParent,
+            WorkingDirectoryPolicy::RepositoryRoot => Self::RepositoryRoot,
+            WorkingDirectoryPolicy::Fixed { .. } => Self::Fixed,
+            WorkingDirectoryPolicy::Ask => Self::Ask,
+        }
+    }
+
+    fn to_policy(self, fixed_path: Option<String>) -> WorkingDirectoryPolicy {
+        match self {
+            Self::SelectedItem => WorkingDirectoryPolicy::SelectedItem,
+            Self::FileParent => WorkingDirectoryPolicy::FileParent,
+            Self::RepositoryRoot => WorkingDirectoryPolicy::RepositoryRoot,
+            Self::Fixed => WorkingDirectoryPolicy::Fixed {
+                path: fixed_path.unwrap_or_default(),
+            },
+            Self::Ask => WorkingDirectoryPolicy::Ask,
+        }
+    }
+}
+
 struct AgentEditorState {
     profile_id: String,
     is_new: bool,
     original_credential_ref: Option<String>,
     has_stored_credential: bool,
     transport: AgentTransport,
-    permission_policy: PermissionPolicy,
-    working_directory_policy: WorkingDirectoryPolicy,
+    permission: PermissionPolicy,
+    capabilities: AgentCapabilities,
+    working_directory_policy: AgentWorkingDirectoryChoice,
     clear_credential: bool,
     name_input: Entity<InputState>,
     executable_input: Entity<InputState>,
+    endpoint_input: Entity<InputState>,
     arguments_input: Entity<TextareaState>,
     environment_input: Entity<TextareaState>,
     model_input: Entity<InputState>,
@@ -128,7 +166,19 @@ impl AgentEditorState {
     ) -> Self {
         let name_input = text_input(window, cx, "例如：本地 Agent");
         let executable_input = text_input(window, cx, "绝对路径或 PATH 中的命令名称");
-        set_input_value(&executable_input, &profile.executable, window, cx);
+        set_input_value(
+            &executable_input,
+            profile.executable.as_deref().unwrap_or_default(),
+            window,
+            cx,
+        );
+        let endpoint_input = text_input(window, cx, "https://localhost:7777/acp");
+        set_input_value(
+            &endpoint_input,
+            profile.endpoint.as_deref().unwrap_or_default(),
+            window,
+            cx,
+        );
         set_input_value(&name_input, &profile.name, window, cx);
         let arguments_input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
@@ -152,7 +202,7 @@ impl AgentEditorState {
         let working_directory_input = text_input(window, cx, "固定工作目录");
         set_input_value(
             &working_directory_input,
-            profile.working_directory.as_deref().unwrap_or_default(),
+            profile.working_directory.fixed_path().unwrap_or_default(),
             window,
             cx,
         );
@@ -190,11 +240,15 @@ impl AgentEditorState {
             original_credential_ref: profile.credential_ref.clone(),
             has_stored_credential: profile.credential_ref.is_some(),
             transport: profile.transport,
-            permission_policy: profile.permission_policy,
-            working_directory_policy: profile.working_directory_policy,
+            permission: profile.permission,
+            capabilities: profile.capabilities,
+            working_directory_policy: AgentWorkingDirectoryChoice::from_policy(
+                &profile.working_directory,
+            ),
             clear_credential: false,
             name_input,
             executable_input,
+            endpoint_input,
             arguments_input,
             environment_input,
             model_input,
@@ -214,13 +268,15 @@ impl AgentEditorState {
 
     fn snapshot(&self, cx: &App) -> String {
         format!(
-            "{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             self.transport,
-            self.permission_policy,
+            self.permission,
+            self.capabilities,
             self.working_directory_policy,
             self.clear_credential,
             self.name_input.read(cx).value(),
             self.executable_input.read(cx).value(),
+            self.endpoint_input.read(cx).value(),
             self.arguments_input.read(cx).value(),
             self.environment_input.read(cx).value(),
             self.model_input.read(cx).value(),
@@ -261,7 +317,7 @@ impl AgentEditorState {
         let output_limit_bytes = output_limit_kib
             .checked_mul(1024)
             .ok_or_else(|| "输出上限过大".to_string())?;
-        let working_directory = if self.working_directory_policy == WorkingDirectoryPolicy::Fixed {
+        let fixed_path = if self.working_directory_policy == AgentWorkingDirectoryChoice::Fixed {
             Some(
                 self.working_directory_input
                     .read(cx)
@@ -272,26 +328,48 @@ impl AgentEditorState {
         } else {
             None
         };
+        let is_http = self.transport == AgentTransport::AcpHttp;
+        let endpoint = if is_http {
+            optional_value(&self.endpoint_input.read(cx).value())
+        } else {
+            None
+        };
         Ok(AgentProfile {
             id: self.profile_id.clone(),
             name: self.name_input.read(cx).value().trim().to_string(),
             transport: self.transport,
-            executable: self.executable_input.read(cx).value().trim().to_string(),
-            endpoint: None,
-            arguments: non_empty_lines(&self.arguments_input.read(cx).value()),
-            environment: parse_environment(&self.environment_input.read(cx).value())?,
-            model: optional_value(&self.model_input.read(cx).value()),
-            working_directory_policy: self.working_directory_policy,
-            working_directory,
-            permission_policy: self.permission_policy,
+            executable: if is_http {
+                None
+            } else {
+                optional_value(&self.executable_input.read(cx).value())
+            },
+            endpoint,
+            arguments: if is_http {
+                Vec::new()
+            } else {
+                non_empty_lines(&self.arguments_input.read(cx).value())
+            },
+            environment: if is_http {
+                Vec::new()
+            } else {
+                parse_environment(&self.environment_input.read(cx).value())?
+            },
+            model: if is_http {
+                None
+            } else {
+                optional_value(&self.model_input.read(cx).value())
+            },
+            working_directory: self.working_directory_policy.to_policy(fixed_path),
+            permission: self.permission,
             timeout_seconds,
             output_limit_bytes,
-            credential_env_var: optional_value(&self.credential_env_input.read(cx).value()),
             credential_ref: if self.clear_credential {
                 None
             } else {
                 self.original_credential_ref.clone()
             },
+            credential_env_var: optional_value(&self.credential_env_input.read(cx).value()),
+            capabilities: self.capabilities.clone(),
         })
     }
 }
@@ -350,7 +428,7 @@ fn parse_environment(value: &str) -> Result<Vec<AgentEnvironmentVariable>, Strin
             return Err(format!("环境变量第 {} 行缺少 =", index + 1));
         };
         entries.push(AgentEnvironmentVariable {
-            key: key.trim().to_string(),
+            name: key.trim().to_string(),
             value: value.to_string(),
         });
     }
@@ -360,17 +438,28 @@ fn parse_environment(value: &str) -> Result<Vec<AgentEnvironmentVariable>, Strin
 fn environment_text(environment: &[AgentEnvironmentVariable]) -> String {
     environment
         .iter()
-        .map(|entry| format!("{}={}", entry.key, entry.value))
+        .map(|entry| format!("{}={}", entry.name, entry.value))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn working_directory_detail(profile: &AgentProfile) -> String {
-    match profile.working_directory_policy {
-        WorkingDirectoryPolicy::Fixed => profile
-            .working_directory
+fn agent_connection_target(profile: &AgentProfile) -> String {
+    if profile.transport == AgentTransport::AcpHttp {
+        profile
+            .endpoint
             .clone()
-            .unwrap_or_else(|| "固定目录未设置".to_string()),
+            .unwrap_or_else(|| "未设置端点".to_string())
+    } else {
+        profile
+            .executable
+            .clone()
+            .unwrap_or_else(|| "未设置命令".to_string())
+    }
+}
+
+fn working_directory_detail(profile: &AgentProfile) -> String {
+    match &profile.working_directory {
+        WorkingDirectoryPolicy::Fixed { path } => path.clone(),
         policy => policy.label().to_string(),
     }
 }
@@ -394,7 +483,7 @@ fn agent_working_directory_button(
     id: &'static str,
     label: &'static str,
     selected: bool,
-    policy: WorkingDirectoryPolicy,
+    policy: AgentWorkingDirectoryChoice,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     Button::new(id)
@@ -418,7 +507,8 @@ pub(crate) struct SettingsWindow {
     preferences: UiPreferences,
     update_state: SettingsUpdateState,
     status: Option<SharedString>,
-    agent_config: AgentConfig,
+    agent_config: AgentProfileSnapshot,
+    agent_store: Arc<AgentProfileStore>,
     agent_warning: Option<SharedString>,
     agent_message: Option<SharedString>,
     agent_editor: Option<AgentEditorState>,
@@ -441,7 +531,8 @@ impl SettingsWindow {
         // The main app is mutably leased while its click handler opens this window.
         // Use the caller's snapshot instead of reading the entity here.
         let preferences = ui_preferences::load_ui_preferences();
-        let agent_snapshot = load_agent_config();
+        let agent_store = AgentProfileStore::new();
+        let agent_snapshot = agent_store.snapshot();
         let subscription = cx.observe_in(&main_app, window, |this, main_app, _, cx| {
             this.update_state = main_app.read(cx).settings_update_state();
             this.status = this.update_state.status.clone();
@@ -453,8 +544,12 @@ impl SettingsWindow {
             preferences,
             status: initial_update_state.status.clone(),
             update_state: initial_update_state,
-            agent_config: agent_snapshot.config,
-            agent_warning: agent_snapshot.warning.map(Into::into),
+            agent_config: agent_snapshot.clone(),
+            agent_store,
+            agent_warning: agent_snapshot
+                .warning
+                .as_ref()
+                .map(|warning| SharedString::from(warning.message())),
             agent_message: None,
             agent_editor: None,
             agent_pending_delete: None,
@@ -576,9 +671,12 @@ impl SettingsWindow {
     }
 
     fn reload_agents(&mut self) {
-        let snapshot = load_agent_config();
-        self.agent_config = snapshot.config;
-        self.agent_warning = snapshot.warning.map(Into::into);
+        let snapshot = self.agent_store.snapshot();
+        self.agent_warning = snapshot
+            .warning
+            .as_ref()
+            .map(|warning| SharedString::from(warning.message()));
+        self.agent_config = snapshot;
     }
 
     fn notify_agents_changed(&self, cx: &mut Context<Self>) {
@@ -593,7 +691,7 @@ impl SettingsWindow {
     ) {
         let profile = AgentProfile {
             transport,
-            permission_policy: if transport == AgentTransport::GenericCli {
+            permission: if transport == AgentTransport::Cli {
                 PermissionPolicy::AgentManaged
             } else {
                 PermissionPolicy::ReadOnly
@@ -667,7 +765,7 @@ impl SettingsWindow {
             Ok(profile) => profile,
             Err(error) => {
                 if let Some(editor) = self.agent_editor.as_mut() {
-                    editor.error = Some(error.into());
+                    editor.error = Some(error.to_string().into());
                 }
                 cx.notify();
                 return;
@@ -678,7 +776,10 @@ impl SettingsWindow {
             (!value.is_empty()).then_some(value)
         };
         let clear_credential = editor.clear_credential;
-        match kite_core::agent_config::save_agent_profile(profile, credential, clear_credential) {
+        match self
+            .agent_store
+            .save_profile_with_credential(profile, credential, clear_credential)
+        {
             Ok(config) => {
                 self.agent_config = config;
                 self.agent_warning = None;
@@ -690,7 +791,7 @@ impl SettingsWindow {
             }
             Err(error) => {
                 if let Some(editor) = self.agent_editor.as_mut() {
-                    editor.error = Some(error.into());
+                    editor.error = Some(error.to_string().into());
                 }
             }
         }
@@ -704,7 +805,7 @@ impl SettingsWindow {
             .iter()
             .map(|profile| profile.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        match kite_core::agent_config::duplicate_agent_profile(profile_id) {
+        match self.agent_store.duplicate_profile(profile_id.to_string()) {
             Ok(config) => {
                 let duplicate = config
                     .profiles
@@ -719,20 +820,20 @@ impl SettingsWindow {
                     self.open_edit_agent(duplicate, window, cx);
                 }
             }
-            Err(error) => self.agent_message = Some(error.into()),
+            Err(error) => self.agent_message = Some(error.to_string().into()),
         }
         cx.notify();
     }
 
     fn set_default_agent(&mut self, profile_id: &str, cx: &mut Context<Self>) {
-        match kite_core::agent_config::set_default_agent_profile(profile_id) {
+        match self.agent_store.set_default_profile(profile_id.to_string()) {
             Ok(config) => {
                 self.agent_config = config;
                 self.agent_warning = None;
                 self.agent_message = Some("默认 Agent 已更新".into());
                 self.notify_agents_changed(cx);
             }
-            Err(error) => self.agent_message = Some(error.into()),
+            Err(error) => self.agent_message = Some(error.to_string().into()),
         }
         cx.notify();
     }
@@ -766,7 +867,10 @@ impl SettingsWindow {
             return;
         };
         let profile = pending.profile.clone();
-        match kite_core::agent_config::delete_agent_profile(&profile.id, replacement_default_id) {
+        match self
+            .agent_store
+            .delete_profile_with_replacement(profile.id.clone(), replacement_default_id)
+        {
             Ok(config) => {
                 self.agent_config = config;
                 self.agent_warning = None;
@@ -775,7 +879,7 @@ impl SettingsWindow {
                 self.agent_tests.remove(&profile.id);
                 self.notify_agents_changed(cx);
             }
-            Err(error) => self.agent_message = Some(error.into()),
+            Err(error) => self.agent_message = Some(error.to_string().into()),
         }
         cx.notify();
     }
@@ -790,9 +894,9 @@ impl SettingsWindow {
         self._agent_test_task = cx.spawn(async move |this, cx| {
             let profile_id = profile.id.clone();
             let result = cx
-                .background_spawn(async move {
-                    kite_core::agent_config::test_agent_connection(profile, None)
-                })
+                .background_spawn(
+                    async move { kite_core::agent::test_agent_connection(profile, None) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.agent_testing_id.as_deref() == Some(profile_id.as_str()) {
@@ -812,7 +916,7 @@ impl SettingsWindow {
         let profile = match editor.current_profile(cx) {
             Ok(profile) => profile,
             Err(error) => {
-                editor.error = Some(error.into());
+                editor.error = Some(error.to_string().into());
                 cx.notify();
                 return;
             }
@@ -829,7 +933,7 @@ impl SettingsWindow {
         self._agent_test_task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    kite_core::agent_config::test_agent_connection(profile, credential)
+                    kite_core::agent::test_agent_connection(profile, credential)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -1141,7 +1245,7 @@ impl SettingsWindow {
             .outline()
             .label("使用 CLI 预设")
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.open_new_agent(AgentTransport::GenericCli, window, cx);
+                this.open_new_agent(AgentTransport::Cli, window, cx);
             }))
             .into_any_element();
 
@@ -1264,13 +1368,24 @@ impl SettingsWindow {
                                     .outline()
                                     .label("使用预设")
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.open_new_agent(AgentTransport::GenericCli, window, cx);
+                                        this.open_new_agent(AgentTransport::Cli, window, cx);
                                     })),
                             ),
                     ),
             );
         } else {
-            if let Some(default) = self.agent_config.default_profile().cloned() {
+            if let Some(default) = self
+                .agent_config
+                .default_profile_id
+                .as_deref()
+                .and_then(|id| {
+                    self.agent_config
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == id)
+                })
+                .cloned()
+            {
                 content = content.child(self.render_default_agent(default, cx));
             }
             let mut rows = v_flex();
@@ -1377,7 +1492,7 @@ impl SettingsWindow {
                                             .font_family("monospace")
                                             .truncate()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(profile.executable.clone()),
+                                            .child(agent_connection_target(&profile)),
                                     )
                                     .child(
                                         div()
@@ -1386,7 +1501,7 @@ impl SettingsWindow {
                                             .child(format!(
                                                 "工作目录：{} · 权限：{}",
                                                 working_directory_detail(&profile),
-                                                profile.permission_policy.label()
+                                                profile.permission.label()
                                             )),
                                     ),
                             )
@@ -1446,7 +1561,7 @@ impl SettingsWindow {
                                     .font_family("monospace")
                                     .truncate()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(profile.executable.clone()),
+                                    .child(agent_connection_target(&profile)),
                             )
                             .child(
                                 div()
@@ -1454,7 +1569,7 @@ impl SettingsWindow {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(format!(
                                         "{} · {} · {}{}",
-                                        profile.permission_policy.label(),
+                                        profile.permission.label(),
                                         working_directory_detail(&profile),
                                         if profile.has_stored_credential() {
                                             "凭据已保存"
@@ -1723,6 +1838,10 @@ impl SettingsWindow {
             .aria_label("Agent 可执行文件")
             .cleanable(true)
             .w_full();
+        let endpoint = Input::new(&editor.endpoint_input)
+            .aria_label("ACP HTTP 端点")
+            .cleanable(true)
+            .w_full();
         let arguments = Textarea::new(&editor.arguments_input).h(px(74.)).w_full();
         let environment = Textarea::new(&editor.environment_input).h(px(74.)).w_full();
         let model = Input::new(&editor.model_input)
@@ -1765,15 +1884,29 @@ impl SettingsWindow {
                     })),
             )
             .child(
+                Button::new("agent-transport-http")
+                    .ghost()
+                    .compact()
+                    .label("ACP HTTP")
+                    .selected(editor.transport == AgentTransport::AcpHttp)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if let Some(editor) = this.agent_editor.as_mut() {
+                            editor.transport = AgentTransport::AcpHttp;
+                            editor.test_result = None;
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("agent-transport-cli")
                     .ghost()
                     .compact()
                     .label("通用 CLI")
-                    .selected(editor.transport == AgentTransport::GenericCli)
+                    .selected(editor.transport == AgentTransport::Cli)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(editor) = this.agent_editor.as_mut() {
-                            editor.transport = AgentTransport::GenericCli;
-                            editor.permission_policy = PermissionPolicy::AgentManaged;
+                            editor.transport = AgentTransport::Cli;
+                            editor.permission = PermissionPolicy::AgentManaged;
                             editor.test_result = None;
                         }
                         cx.notify();
@@ -1788,10 +1921,10 @@ impl SettingsWindow {
                     .ghost()
                     .compact()
                     .label("只读")
-                    .selected(editor.permission_policy == PermissionPolicy::ReadOnly)
+                    .selected(editor.permission == PermissionPolicy::ReadOnly)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(editor) = this.agent_editor.as_mut() {
-                            editor.permission_policy = PermissionPolicy::ReadOnly;
+                            editor.permission = PermissionPolicy::ReadOnly;
                             editor.test_result = None;
                         }
                         cx.notify();
@@ -1802,10 +1935,10 @@ impl SettingsWindow {
                     .ghost()
                     .compact()
                     .label("写入前确认")
-                    .selected(editor.permission_policy == PermissionPolicy::ConfirmWrites)
+                    .selected(editor.permission == PermissionPolicy::ConfirmWrites)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(editor) = this.agent_editor.as_mut() {
-                            editor.permission_policy = PermissionPolicy::ConfirmWrites;
+                            editor.permission = PermissionPolicy::ConfirmWrites;
                             editor.test_result = None;
                         }
                         cx.notify();
@@ -1816,10 +1949,10 @@ impl SettingsWindow {
                     .ghost()
                     .compact()
                     .label("由 Agent 管理")
-                    .selected(editor.permission_policy == PermissionPolicy::AgentManaged)
+                    .selected(editor.permission == PermissionPolicy::AgentManaged)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(editor) = this.agent_editor.as_mut() {
-                            editor.permission_policy = PermissionPolicy::AgentManaged;
+                            editor.permission = PermissionPolicy::AgentManaged;
                             editor.test_result = None;
                         }
                         cx.notify();
@@ -1835,22 +1968,24 @@ impl SettingsWindow {
                     .child(agent_working_directory_button(
                         "agent-wd-selected",
                         "所选项目",
-                        editor.working_directory_policy == WorkingDirectoryPolicy::SelectedItem,
-                        WorkingDirectoryPolicy::SelectedItem,
+                        editor.working_directory_policy
+                            == AgentWorkingDirectoryChoice::SelectedItem,
+                        AgentWorkingDirectoryChoice::SelectedItem,
                         cx,
                     ))
                     .child(agent_working_directory_button(
                         "agent-wd-parent",
                         "文件所在目录",
-                        editor.working_directory_policy == WorkingDirectoryPolicy::FileParent,
-                        WorkingDirectoryPolicy::FileParent,
+                        editor.working_directory_policy == AgentWorkingDirectoryChoice::FileParent,
+                        AgentWorkingDirectoryChoice::FileParent,
                         cx,
                     ))
                     .child(agent_working_directory_button(
                         "agent-wd-repository",
                         "Git 根目录",
-                        editor.working_directory_policy == WorkingDirectoryPolicy::RepositoryRoot,
-                        WorkingDirectoryPolicy::RepositoryRoot,
+                        editor.working_directory_policy
+                            == AgentWorkingDirectoryChoice::RepositoryRoot,
+                        AgentWorkingDirectoryChoice::RepositoryRoot,
                         cx,
                     )),
             )
@@ -1860,15 +1995,15 @@ impl SettingsWindow {
                     .child(agent_working_directory_button(
                         "agent-wd-fixed",
                         "固定目录",
-                        editor.working_directory_policy == WorkingDirectoryPolicy::Fixed,
-                        WorkingDirectoryPolicy::Fixed,
+                        editor.working_directory_policy == AgentWorkingDirectoryChoice::Fixed,
+                        AgentWorkingDirectoryChoice::Fixed,
                         cx,
                     ))
                     .child(agent_working_directory_button(
                         "agent-wd-ask",
                         "每次询问",
-                        editor.working_directory_policy == WorkingDirectoryPolicy::Ask,
-                        WorkingDirectoryPolicy::Ask,
+                        editor.working_directory_policy == AgentWorkingDirectoryChoice::Ask,
+                        AgentWorkingDirectoryChoice::Ask,
                         cx,
                     )),
             )
@@ -1890,32 +2025,41 @@ impl SettingsWindow {
                 transport_choices,
                 cx,
             ),
-            self.separator(cx),
-            self.agent_field(
+        ];
+        if editor.transport == AgentTransport::AcpHttp {
+            basic_rows.push(self.separator(cx));
+            basic_rows.push(self.agent_field(
+                "agent-field-endpoint",
+                "ACP HTTP 端点",
+                Some("使用绝对 HTTP 或 HTTPS URL。凭据通过系统钥匙串和 Authorization 头注入。"),
+                endpoint.into_any_element(),
+                cx,
+            ));
+        } else {
+            basic_rows.push(self.separator(cx));
+            basic_rows.push(self.agent_field(
                 "agent-field-executable",
                 "可执行文件",
                 Some("使用绝对路径，或只填写 PATH 中的命令名称。参数不会经过 shell。"),
                 executable.into_any_element(),
                 cx,
-            ),
-            self.separator(cx),
-            self.agent_field(
+            ));
+            basic_rows.push(self.separator(cx));
+            basic_rows.push(self.agent_field(
                 "agent-field-arguments",
                 "启动参数",
                 Some("每行一个参数。禁止在参数中直接填写 token、密码或带凭据的 URL。"),
                 arguments.into_any_element(),
                 cx,
-            ),
-            self.separator(cx),
-            self.agent_field(
+            ));
+            basic_rows.push(self.separator(cx));
+            basic_rows.push(self.agent_field(
                 "agent-field-environment",
                 "环境变量",
                 Some("每行 KEY=VALUE。敏感环境变量会被拒绝，请使用下方凭据栏。"),
                 environment.into_any_element(),
                 cx,
-            ),
-        ];
-        if editor.transport == AgentTransport::AcpStdio {
+            ));
             basic_rows.push(self.separator(cx));
             basic_rows.push(self.agent_field(
                 "agent-field-model",
@@ -1933,7 +2077,7 @@ impl SettingsWindow {
             workspace_choices,
             cx,
         )];
-        if editor.working_directory_policy == WorkingDirectoryPolicy::Fixed {
+        if editor.working_directory_policy == AgentWorkingDirectoryChoice::Fixed {
             workspace_rows.push(self.separator(cx));
             workspace_rows.push(self.agent_field(
                 "agent-field-working-directory",
@@ -1947,7 +2091,7 @@ impl SettingsWindow {
         workspace_rows.push(self.agent_field(
             "agent-field-permission",
             "权限摘要",
-            Some(editor.permission_policy.summary()),
+            Some(editor.permission.summary()),
             permission_choices,
             cx,
         ));
@@ -2013,6 +2157,116 @@ impl SettingsWindow {
                 .into_any_element()
         };
 
+        let capability_rows = vec![
+            self.row(
+                "agent-capability-selection",
+                "读取选中项",
+                Some("允许 Agent 使用本次显式提供的文件或目录上下文。"),
+                Switch::new("agent-cap-selection")
+                    .checked(editor.capabilities.read_selection)
+                    .small()
+                    .accessibility_label("读取选中项")
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        if let Some(editor) = this.agent_editor.as_mut() {
+                            editor.capabilities.read_selection = *checked;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                cx,
+            ),
+            self.separator(cx),
+            self.row(
+                "agent-capability-workspace",
+                "读取工作区",
+                Some("声明 Agent 是否需要读取工作目录中的其他文件。"),
+                Switch::new("agent-cap-workspace")
+                    .checked(editor.capabilities.read_workspace)
+                    .small()
+                    .accessibility_label("读取工作区")
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        if let Some(editor) = this.agent_editor.as_mut() {
+                            editor.capabilities.read_workspace = *checked;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                cx,
+            ),
+            self.separator(cx),
+            self.row(
+                "agent-capability-permissions",
+                "权限请求",
+                Some("允许 Agent 在需要额外权限时先向用户请求确认。"),
+                Switch::new("agent-cap-permissions")
+                    .checked(editor.capabilities.permission_requests)
+                    .small()
+                    .accessibility_label("权限请求")
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        if let Some(editor) = this.agent_editor.as_mut() {
+                            editor.capabilities.permission_requests = *checked;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                cx,
+            ),
+            self.separator(cx),
+            self.row(
+                "agent-capability-write",
+                "写入文件",
+                Some("仅用于权限摘要；实际写入仍需通过确认和 diff 审核。"),
+                Switch::new("agent-cap-write")
+                    .checked(editor.capabilities.write_files)
+                    .small()
+                    .accessibility_label("写入文件")
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        if let Some(editor) = this.agent_editor.as_mut() {
+                            editor.capabilities.write_files = *checked;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                cx,
+            ),
+            self.separator(cx),
+            self.row(
+                "agent-capability-commands",
+                "执行命令",
+                Some("仅用于权限摘要；Kite 不会自动执行 Agent 的建议命令。"),
+                Switch::new("agent-cap-commands")
+                    .checked(editor.capabilities.execute_commands)
+                    .small()
+                    .accessibility_label("执行命令")
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        if let Some(editor) = this.agent_editor.as_mut() {
+                            editor.capabilities.execute_commands = *checked;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                cx,
+            ),
+            self.separator(cx),
+            self.row(
+                "agent-capability-network",
+                "网络访问",
+                Some("声明 Agent 可能访问网络；Kite 不做强制网络隔离。"),
+                Switch::new("agent-cap-network")
+                    .checked(editor.capabilities.network)
+                    .small()
+                    .accessibility_label("网络访问")
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        if let Some(editor) = this.agent_editor.as_mut() {
+                            editor.capabilities.network = *checked;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                cx,
+            ),
+        ];
+
         let credential_rows = vec![
             self.agent_field(
                 "agent-field-credential",
@@ -2059,9 +2313,10 @@ impl SettingsWindow {
             .gap_5()
             .child(self.section("基本", basic_rows, None, cx))
             .child(self.section("工作目录与权限", workspace_rows, None, cx))
+            .child(self.section("能力声明", capability_rows, None, cx))
             .child(self.section("凭据边界", credential_rows, None, cx))
             .child(self.section("高级", advanced_rows, None, cx));
-        if editor.transport == AgentTransport::GenericCli {
+        if editor.transport == AgentTransport::Cli {
             body = body.child(
                 div()
                     .rounded(px(10.))
