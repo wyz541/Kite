@@ -22,16 +22,18 @@ enum SettingsPage {
     Appearance,
     Layout,
     FileHandling,
+    Agent,
     Updates,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Appearance,
         Self::Layout,
         Self::FileHandling,
+        Self::Agent,
         Self::Updates,
         Self::About,
     ];
@@ -42,6 +44,7 @@ impl SettingsPage {
             Self::Appearance => "外观",
             Self::Layout => "布局",
             Self::FileHandling => "文件处理",
+            Self::Agent => "Agent",
             Self::Updates => "更新",
             Self::About => "关于",
         }
@@ -53,6 +56,7 @@ impl SettingsPage {
             Self::Appearance => "主题和界面外观",
             Self::Layout => "侧边栏、预览和详细信息",
             Self::FileHandling => "默认资源管理器",
+            Self::Agent => "连接、权限与默认 Agent",
             Self::Updates => "版本、更新与诊断",
             Self::About => "Kite 版本信息",
         }
@@ -64,6 +68,7 @@ impl SettingsPage {
             Self::Appearance => IconName::Palette,
             Self::Layout => IconName::LayoutPanelLeft,
             Self::FileHandling => IconName::Folder,
+            Self::Agent => IconName::Sparkles,
             Self::Updates => IconName::RefreshCw,
             Self::About => IconName::Info,
         }
@@ -75,6 +80,7 @@ impl SettingsPage {
             Self::Appearance => rgb(0xf47a32).into(),
             Self::Layout => rgb(0x5e9cff).into(),
             Self::FileHandling => rgb(0x45b8d8).into(),
+            Self::Agent => rgb(0xf28c4c).into(),
             Self::Updates => rgb(0x55b978).into(),
             Self::About => rgb(0xa675df).into(),
         }
@@ -91,9 +97,10 @@ pub(crate) struct SettingsWindow {
 }
 
 impl SettingsWindow {
-    pub(crate) fn new(
+    fn new(
         main_app: Entity<KiteApp>,
         initial_update_state: SettingsUpdateState,
+        initial_page: SettingsPage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -107,7 +114,7 @@ impl SettingsWindow {
         });
         Self {
             main_app,
-            page: SettingsPage::General,
+            page: initial_page,
             preferences,
             status: initial_update_state.status.clone(),
             update_state: initial_update_state,
@@ -138,6 +145,7 @@ impl SettingsWindow {
             SettingsPage::Appearance => self.render_appearance(cx),
             SettingsPage::Layout => self.render_layout(cx),
             SettingsPage::FileHandling => self.render_file_handling(window, cx),
+            SettingsPage::Agent => self.render_agent(cx),
             SettingsPage::Updates => self.render_updates(window, cx),
             SettingsPage::About => self.render_about(cx),
         }
@@ -380,8 +388,8 @@ impl SettingsWindow {
                 self.separator(cx),
                 self.row(
                     "layout-preview",
-                    "显示预览",
-                    Some("显示所选文件的内容和属性。"),
+                    "显示右侧栏",
+                    Some("显示预览或 Agent 上下文表面。"),
                     Switch::new("preview-visible")
                         .checked(self.preferences.preview_visible)
                         .small()
@@ -492,6 +500,36 @@ impl SettingsWindow {
             );
         }
         content.into_any_element()
+    }
+
+    fn render_agent(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.section(
+            "Agent 配置",
+            vec![
+                self.info_row(
+                    "agent-empty-status",
+                    "尚未配置 Agent",
+                    "右键文件或文件夹并选择“使用 Agent”，可在不发送任务的情况下检查上下文和提示。",
+                    cx,
+                ),
+                self.separator(cx),
+                self.info_row(
+                    "agent-credential-boundary",
+                    "接入配置与凭据",
+                    "Kite 只保存最小接入信息；敏感凭据通过系统钥匙串引用，不写入普通配置。",
+                    cx,
+                ),
+                self.separator(cx),
+                self.info_row(
+                    "agent-permission-boundary",
+                    "权限边界",
+                    "P0 默认只读。Kite 不会自动执行 Agent 建议的命令，也不会未经确认应用文件修改。",
+                    cx,
+                ),
+            ],
+            Some("连接测试、默认 Agent 和 Profile 管理由 Agent 配置任务接入此页面。"),
+            cx,
+        )
     }
 
     fn render_updates(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -948,6 +986,23 @@ pub(crate) fn open_settings_window(
     initial_update_state: SettingsUpdateState,
     cx: &mut App,
 ) -> Result<(), String> {
+    open_settings_window_at(main_app, initial_update_state, SettingsPage::General, cx)
+}
+
+pub(crate) fn open_agent_settings_window(
+    main_app: Entity<KiteApp>,
+    initial_update_state: SettingsUpdateState,
+    cx: &mut App,
+) -> Result<(), String> {
+    open_settings_window_at(main_app, initial_update_state, SettingsPage::Agent, cx)
+}
+
+fn open_settings_window_at(
+    main_app: Entity<KiteApp>,
+    initial_update_state: SettingsUpdateState,
+    initial_page: SettingsPage,
+    cx: &mut App,
+) -> Result<(), String> {
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some("Kite 设置".into()),
@@ -958,7 +1013,15 @@ pub(crate) fn open_settings_window(
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| SettingsWindow::new(main_app.clone(), initial_update_state, window, cx))
+        cx.new(|cx| {
+            SettingsWindow::new(
+                main_app.clone(),
+                initial_update_state,
+                initial_page,
+                window,
+                cx,
+            )
+        })
     })
     .map(|_| ())
     .map_err(|error| format!("无法打开设置窗口：{error}"))

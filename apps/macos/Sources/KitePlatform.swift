@@ -221,6 +221,16 @@ enum KitePlatform {
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
+    static func chooseContextPaths(prompt: String) -> [String] {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.prompt = prompt
+        return panel.runModal() == .OK ? panel.urls.map(\.path) : []
+    }
+
     static func share(_ path: String) {
         share([path])
     }
