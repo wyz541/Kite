@@ -918,7 +918,7 @@ pub fn install_windows_update(
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const WINDOWS_UPDATE_TARGET_REPLACEMENT: &str = r#"
 # Windows executable images can share delete access while running.
 # Rename the target directly instead of requiring an exclusive write lock.
@@ -949,7 +949,7 @@ function Move-UpdateTargetToBackup {
 }
 "#;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn windows_update_helper() -> String {
     WINDOWS_UPDATE_HELPER.replace(
         "__MOVE_UPDATE_TARGET_TO_BACKUP__",
@@ -957,7 +957,7 @@ fn windows_update_helper() -> String {
     )
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const WINDOWS_UPDATE_HELPER: &str = r#"
 param(
     [Parameter(Mandatory=$true)][int]$ProcessId,
