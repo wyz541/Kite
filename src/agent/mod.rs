@@ -1,6 +1,5 @@
 mod acp;
 mod config;
-mod context;
 mod events;
 pub mod model;
 mod process;
@@ -8,7 +7,6 @@ mod redact;
 mod session;
 mod transport;
 
-pub use context::*;
 pub use events::AgentEventSubscription;
 pub use model::*;
 pub use session::AgentSession;
