@@ -10,14 +10,14 @@ struct KiteGitBranchButton: View {
 
     var body: some View {
         Group {
-            if let summary {
+            if let currentSummary = summary {
                 Button {
                     showingBranches = true
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.triangle.branch")
                             .font(.system(size: 10, weight: .semibold))
-                        Text(branchLabel(summary))
+                        Text(branchLabel(currentSummary))
                             .font(.system(size: 11, weight: .medium))
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -36,7 +36,7 @@ struct KiteGitBranchButton: View {
                 .sheet(isPresented: $showingBranches, onDismiss: {
                     Task { summary = await model.gitHeadSummary(path: model.currentPath) }
                 }) {
-                    KiteGitBranchesView(model: model, repositoryRoot: summary.repositoryRoot)
+                    KiteGitBranchesView(model: model, repositoryRoot: currentSummary.repositoryRoot)
                         .frame(minWidth: 860, minHeight: 600)
                 }
             }
@@ -284,7 +284,7 @@ private extension KiteGitBranchesView {
         snapshot?.remoteBranches.compactMap(\.remote).first
     }
 
-    func defaultUpstream(for branch: KiteBranchDto) -> String {
+    func defaultUpstream(for branch: GitBranchDto) -> String {
         if let upstream = branch.upstream { return upstream }
         return snapshot?.remoteBranches.first { $0.name.hasSuffix("/\(branch.name)") }?.name ?? ""
     }
@@ -422,7 +422,7 @@ private extension KiteGitBranchesView {
 
     func setUpstream(_ branch: KiteGitReference) {
         let current = snapshot?.localBranches.first { $0.name == branch.name }
-        let defaultUpstream = current.map { defaultUpstream(for: $0) } ?? ""
+        let defaultUpstream = current.map { self.defaultUpstream(for: $0) } ?? ""
         guard let values = promptValues(
             title: "设置上游",
             message: "输入远程分支，例如 origin/main。留空会清除上游。",
