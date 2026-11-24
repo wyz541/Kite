@@ -88,7 +88,8 @@ struct KiteAgentContextPath: Identifiable, Hashable {
     }
 }
 
-@MainActor\nfinal class KiteAgentPanelModel: ObservableObject {
+@MainActor
+final class KiteAgentPanelModel: ObservableObject {
     @Published private(set) var contextPaths: [KiteAgentContextPath] = []
     @Published private(set) var primaryPath: String?
     @Published private(set) var workingDirectory = ""
