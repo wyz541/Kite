@@ -163,7 +163,7 @@ final class KiteAgentPanelModel: ObservableObject {
         guard FileManager.default.fileExists(atPath: primary) else {
             contextPaths = []
             primaryPath = nil
-            workingDirectory = ""
+            self.workingDirectory = ""
             phase = .error
             notice = "Agent 上下文目标已失效，请刷新后重试"
             presentationToken += 1
@@ -423,7 +423,7 @@ final class KiteAgentPanelModel: ObservableObject {
     }
 
     private func persistConversation() {
-        guard let profile, hasContext else { return }
+        guard hasContext, profile != nil else { return }
         let now = UInt64(Date().timeIntervalSince1970 * 1_000)
         let userMessageId = "\(conversationId):user:\(turnId)"
         let assistantMessageId = "\(conversationId):assistant:\(turnId)"
