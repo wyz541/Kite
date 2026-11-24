@@ -11,7 +11,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use kite_core::agent::{
+use kite_core::agent_context::{
     AgentContext, AgentContextMode, AgentLaunchRequest, AgentPath, AgentSessionPhase,
     default_working_directory,
 };
@@ -190,6 +190,12 @@ impl AgentPanel {
             main_app.update(cx, |app, cx| app.sync_agent_follow_selection(cx));
         }
         cx.notify();
+    }
+
+    fn import_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) {
+            main_app.update(cx, |app, cx| app.open_agent_review_file(window, cx));
+        }
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -451,6 +457,17 @@ impl AgentPanel {
                     .gap_2()
                     .justify_end()
                     .child(
+                        Button::new("agent-import-result")
+                            .small()
+                            .ghost()
+                            .icon(IconName::FilePen)
+                            .label("审阅结果")
+                            .tooltip("审阅结构化 Agent 结果并确认写入")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.import_result(window, cx)),
+                            ),
+                    )
+                    .child(
                         Button::new("agent-open-settings")
                             .small()
                             .outline()
@@ -510,12 +527,28 @@ impl AgentPanel {
                     ),
             )
             .child(
-                Button::new("agent-empty-settings")
-                    .small()
-                    .outline()
-                    .icon(IconName::Settings)
-                    .label("打开 Agent 设置")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("agent-empty-review")
+                            .small()
+                            .outline()
+                            .icon(IconName::FilePen)
+                            .label("审阅已有结果")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.import_result(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("agent-empty-settings")
+                            .small()
+                            .outline()
+                            .icon(IconName::Settings)
+                            .label("打开 Agent 设置")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
+                    ),
             )
             .into_any_element()
     }

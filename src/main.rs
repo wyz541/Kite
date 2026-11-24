@@ -2,6 +2,8 @@
 
 #[cfg(windows)]
 mod actions;
+#[cfg(windows)]
+mod agent_review_window;
 
 #[cfg(windows)]
 mod agent_panel;

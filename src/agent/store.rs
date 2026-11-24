@@ -338,17 +338,13 @@ fn load_config_at(
         });
     };
 
-    let warning = if let Some(from_version) = migrated_from {
-        Some(match write_config_at(path, &config) {
-            Ok(()) => AgentConfigWarning::MigrationApplied {
-                from_version,
-                to_version: AGENT_PROFILE_SCHEMA_VERSION,
-            },
-            Err(error) => error.warning(),
-        })
-    } else {
-        None
-    };
+    let warning = migrated_from.map(|from_version| match write_config_at(path, &config) {
+        Ok(()) => AgentConfigWarning::MigrationApplied {
+            from_version,
+            to_version: AGENT_PROFILE_SCHEMA_VERSION,
+        },
+        Err(error) => error.warning(),
+    });
     Ok((config, warning))
 }
 

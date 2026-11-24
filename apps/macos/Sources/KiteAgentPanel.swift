@@ -601,6 +601,14 @@ private struct KiteAgentPanelContent: View {
                 .accessibilityLabel("Agent 问题或指令")
             HStack {
                 Button {
+                    model.presentAgentReviewFile()
+                } label: {
+                    Label("审阅结果", systemImage: "doc.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("审阅结构化 Agent 结果并确认写入")
+                Button {
                     KiteSettingsWindowController.open(pane: .agent)
                 } label: {
                     Label("Agent 设置", systemImage: "gearshape")
@@ -636,13 +644,22 @@ private struct KiteAgentPanelContent: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Button {
-                KiteSettingsWindowController.open(pane: .agent)
-            } label: {
-                Label("打开 Agent 设置", systemImage: "gearshape")
+            HStack(spacing: 8) {
+                Button {
+                    model.presentAgentReviewFile()
+                } label: {
+                    Label("审阅已有结果", systemImage: "doc.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button {
+                    KiteSettingsWindowController.open(pane: .agent)
+                } label: {
+                    Label("打开 Agent 设置", systemImage: "gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 14)
