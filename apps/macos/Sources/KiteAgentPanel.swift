@@ -111,7 +111,7 @@ final class KiteAgentPanelModel: ObservableObject {
         guard FileManager.default.fileExists(atPath: primary) else {
             contextPaths = []
             primaryPath = nil
-            workingDirectory = ""
+            self.workingDirectory = ""
             phase = .error
             notice = "Agent 上下文目标已失效，请刷新后重试"
             presentationToken += 1
