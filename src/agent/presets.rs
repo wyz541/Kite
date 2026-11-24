@@ -37,6 +37,39 @@ pub struct AgentPresetSpec {
     pub verification_note: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AgentPreset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub executable: String,
+    pub arguments: Vec<String>,
+    pub transport: AgentPresetTransport,
+    pub permission: AgentPresetPermission,
+    pub install_hint: String,
+    pub documentation_url: String,
+    pub verified_version: String,
+    pub verification_note: String,
+}
+
+impl From<AgentPresetSpec> for AgentPreset {
+    fn from(preset: AgentPresetSpec) -> Self {
+        Self {
+            id: preset.id,
+            name: preset.name,
+            description: preset.description,
+            executable: preset.executable,
+            arguments: preset.arguments,
+            transport: preset.transport,
+            permission: preset.permission,
+            install_hint: preset.install_hint,
+            documentation_url: preset.documentation_url,
+            verified_version: preset.verified_version,
+            verification_note: preset.verification_note,
+        }
+    }
+}
+
 /// Presets with a documented ACP stdio entry point and a pinned adapter
 /// version. Authentication and Agent-native configuration are never included.
 pub fn preset_specs() -> Vec<AgentPresetSpec> {
@@ -78,6 +111,10 @@ pub fn preset_specs() -> Vec<AgentPresetSpec> {
 
 pub fn preset_spec(id: &str) -> Option<AgentPresetSpec> {
     preset_specs().into_iter().find(|preset| preset.id == id)
+}
+
+pub fn agent_presets() -> Vec<AgentPreset> {
+    preset_specs().into_iter().map(AgentPreset::from).collect()
 }
 
 #[cfg(test)]

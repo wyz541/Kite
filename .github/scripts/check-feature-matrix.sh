@@ -32,6 +32,7 @@ required_features=(
   "Agent 对话与任务控制"
   "Agent 会话恢复"
   "Agent 诊断与脱敏日志"
+  "Agent diff 审核与文件写入"
   "Agent 权限确认"
 )
 

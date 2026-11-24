@@ -8,10 +8,13 @@ Core、fixture、Windows 编译与性能基线已可复现；真实 Agent、双�
 
 ## 当前自动化证据
 
-- `cargo test --locked --lib --features windows-ui agent::`：27 项通过。
+- `cargo test --locked --lib`：319 项通过，9 项按设计忽略。
+- `cargo test --locked --lib agent`：56 项通过，覆盖配置、预设、会话、运行时、诊断和 #156 结果审核。
+- `cargo test --locked --features windows-ui --bin kite-explorer`：97 项通过，4 项按设计忽略。
 - `cargo test --locked --test agent_fixture`：7 项通过，覆盖正常流、权限、取消、超时、超大输出、失败和进程树清理。
 - `cargo test --locked --test agent_fixture_protocol`：6 项通过，覆盖 ACP 帧、Markdown、权限、取消、重试和脱敏输入。
 - `cargo check --locked --features windows-ui --bin kite-explorer`：通过。
+- `cargo clippy --locked --all-targets --features windows-ui -- -D warnings`：通过。
 - `bash .github/scripts/check-feature-matrix.sh`：通过。
 - Windows x64 性能基线：`docs/performance/results/v0.6.94-agent-windows-x64.json`。
 

@@ -1,35 +1,30 @@
-//! Adapter from the verified preset catalog to the AgentProfile shape used by
-//! the delivered #157 branch.
+//! Adapter from the verified preset catalog to the canonical `AgentProfile`.
 
 use crate::agent::presets::{AgentPresetPermission, AgentPresetTransport, preset_spec};
-use crate::agent::{
-    AgentEnvVar, AgentPermissionMode, AgentProfile, AgentTransport, AgentWorkingDirectoryPolicy,
-};
+use crate::agent::{AgentProfile, AgentTransport, PermissionPolicy, WorkingDirectoryPolicy};
 
 pub fn preset_profile(preset_id: &str, profile_id: String) -> Option<AgentProfile> {
     let preset = preset_spec(preset_id)?;
     Some(AgentProfile {
         id: profile_id,
         name: preset.name.clone(),
-        preset_id: Some(preset.id),
         transport: match preset.transport {
             AgentPresetTransport::AcpStdio => AgentTransport::AcpStdio,
         },
-        command: preset.executable,
-        args: preset.arguments,
-        env: Vec::<AgentEnvVar>::new(),
+        executable: Some(preset.executable),
+        endpoint: None,
+        arguments: preset.arguments,
+        environment: Vec::new(),
         model: None,
-        working_directory_policy: AgentWorkingDirectoryPolicy::SelectedItem,
-        custom_working_directory: None,
-        permission_mode: match preset.permission {
-            AgentPresetPermission::ReadOnly => AgentPermissionMode::ReadOnly,
-            AgentPresetPermission::AgentManaged => AgentPermissionMode::AgentManaged,
+        working_directory: WorkingDirectoryPolicy::SelectedItem,
+        permission: match preset.permission {
+            AgentPresetPermission::ReadOnly => PermissionPolicy::ReadOnly,
+            AgentPresetPermission::AgentManaged => PermissionPolicy::AgentManaged,
         },
-        startup_timeout_ms: 20_000,
-        idle_timeout_ms: 120_000,
-        max_output_bytes: 2 * 1024 * 1024,
+        timeout_seconds: 120,
+        output_limit_bytes: 2 * 1024 * 1024,
         credential_ref: None,
-        enabled: true,
+        capabilities: Default::default(),
     })
 }
 
@@ -38,13 +33,16 @@ pub fn apply_preset_to_existing(
     mut profile: AgentProfile,
 ) -> Option<AgentProfile> {
     let preset = preset_spec(preset_id)?;
-    if profile.command.trim().is_empty() {
-        profile.command = preset.executable;
-        profile.preset_id = Some(preset.id.clone());
+    if profile
+        .executable
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        profile.executable = Some(preset.executable);
     }
-    if profile.args.is_empty() {
-        profile.args = preset.arguments;
-        profile.preset_id.get_or_insert(preset.id);
+    if profile.arguments.is_empty() {
+        profile.arguments = preset.arguments;
     }
     Some(profile)
 }
@@ -52,14 +50,14 @@ pub fn apply_preset_to_existing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentEnvironmentVariable;
 
     #[test]
     fn preset_profile_keeps_auth_fields_empty() {
         let profile =
             preset_profile("claude-code-acp", "claude-profile".to_string()).expect("profile");
-        assert_eq!(profile.command, "claude-code-acp");
-        assert_eq!(profile.preset_id.as_deref(), Some("claude-code-acp"));
-        assert!(profile.env.is_empty());
+        assert_eq!(profile.executable.as_deref(), Some("claude-code-acp"));
+        assert!(profile.environment.is_empty());
         assert!(profile.model.is_none());
         assert!(profile.credential_ref.is_none());
     }
@@ -68,15 +66,15 @@ mod tests {
     fn applying_preset_preserves_existing_connection_configuration() {
         let mut profile =
             preset_profile("claude-code-acp", "profile".to_string()).expect("profile");
-        profile.command = "my-wrapper".to_string();
-        profile.args = vec!["--custom".to_string()];
-        profile.env.push(AgentEnvVar {
+        profile.executable = Some("my-wrapper".to_string());
+        profile.arguments = vec!["--custom".to_string()];
+        profile.environment.push(AgentEnvironmentVariable {
             name: "SAFE_SETTING".to_string(),
             value: "1".to_string(),
         });
         let merged = apply_preset_to_existing("codex-acp", profile.clone()).expect("merge");
-        assert_eq!(merged.command, profile.command);
-        assert_eq!(merged.args, profile.args);
-        assert_eq!(merged.env, profile.env);
+        assert_eq!(merged.executable, profile.executable);
+        assert_eq!(merged.arguments, profile.arguments);
+        assert_eq!(merged.environment, profile.environment);
     }
 }

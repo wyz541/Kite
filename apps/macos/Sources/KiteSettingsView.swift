@@ -595,7 +595,7 @@ struct KiteSettingsView: View {
         let isTesting = agentTestingId == profile.id
         return SettingsRow(
             title: profile.name + (isDefault ? " · 默认" : ""),
-            detail: "\(profile.command) · \(profile.model ?? "Agent 默认模型") · \(agentPermissionLabel(profile.permissionMode))"
+            detail: "\(profile.executable ?? "未设置命令") · \(profile.model ?? "Agent 默认模型") · \(agentPermissionLabel(profile.permission))"
         ) {
             HStack(spacing: 7) {
                 if !isDefault {
@@ -634,7 +634,7 @@ struct KiteSettingsView: View {
         agentDiagnostics = model.core.agentDiagnostics()
     }
 
-    private func saveAgentStore(_ store: AgentProfileStore) {
+    private func saveAgentStore(_ store: AgentProfileSnapshot) {
         do {
             let loaded = try model.core.saveAgentConfig(store: store)
             agentStore = loaded
@@ -716,10 +716,10 @@ struct KiteSettingsView: View {
         NSWorkspace.shared.activateFileViewerSelecting([target])
     }
 
-    private func agentPermissionLabel(_ mode: AgentPermissionMode) -> String {
+    private func agentPermissionLabel(_ mode: PermissionPolicy) -> String {
         switch mode {
         case .readOnly: return "只读"
-        case .workspaceWrite: return "写入前确认"
+        case .confirmWrites: return "写入前确认"
         case .agentManaged: return "由 Agent 自身管理"
         }
     }

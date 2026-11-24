@@ -8,8 +8,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::config::{AgentProfile, agent_config_path, load_agent_profiles};
 use super::process::{resolve_agent_command, spawn_agent_process, terminate_agent_process};
+use super::{AgentProfile, agent_config_path, load_agent_profiles};
 
 const MAX_LOG_ENTRIES: usize = 100;
 
@@ -148,19 +148,18 @@ pub fn redact_agent_text(value: &str) -> String {
 
 fn diagnose_profile(profile: &AgentProfile) -> AgentProfileDiagnostic {
     let resolved = resolve_agent_command(profile, Path::new(".")).ok();
+    let command = profile.executable.clone().unwrap_or_default();
     AgentProfileDiagnostic {
         profile_id: profile.id.clone(),
         profile_name: profile.name.clone(),
-        status: if !profile.enabled {
-            "disabled".to_string()
-        } else if resolved.is_some() {
+        status: if resolved.is_some() {
             "installed".to_string()
-        } else if profile.command.trim().is_empty() {
+        } else if command.trim().is_empty() {
             "invalid".to_string()
         } else {
             "not_installed".to_string()
         },
-        command: profile.command.clone(),
+        command,
         resolved_command: resolved
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
@@ -173,8 +172,8 @@ fn diagnose_profile(profile: &AgentProfile) -> AgentProfileDiagnostic {
 }
 
 fn probe_profile(profile: &AgentProfile) -> Result<(u32, String, String, Vec<String>), String> {
-    if !profile.enabled {
-        return Err("Agent 已禁用".to_string());
+    if profile.transport != super::AgentTransport::AcpStdio {
+        return Err("连接测试仅支持 ACP stdio 传输".to_string());
     }
     let mut child = spawn_agent_process(profile, Path::new("."))?;
     let stdout = child
@@ -225,7 +224,7 @@ fn probe_profile(profile: &AgentProfile) -> Result<(u32, String, String, Vec<Str
         }
     });
     writeln!(stdin, "{initialize}").map_err(|error| format!("无法写入 Agent 握手：{error}"))?;
-    let timeout = Duration::from_millis(profile.startup_timeout_ms.max(1) as u64);
+    let timeout = Duration::from_secs(u64::from(profile.timeout_seconds.max(1)));
     let deadline = Instant::now() + timeout;
     #[allow(unused_assignments)]
     let mut failure: Option<String> = None;

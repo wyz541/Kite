@@ -137,10 +137,10 @@ struct KiteAgentContextPath: Identifiable, Hashable {
     }
 
     var permissionLabel: String {
-        guard let mode = profile?.permissionMode else { return "只读" }
+        guard let mode = profile?.permission else { return "只读" }
         switch mode {
         case .readOnly: return "只读"
-        case .workspaceWrite: return "写入前确认"
+        case .confirmWrites: return "写入前确认"
         case .agentManaged: return "由 Agent 自身管理"
         }
     }
@@ -833,6 +833,14 @@ private struct KiteAgentPanelContent: View {
                 .accessibilityLabel("Agent 问题或指令")
             HStack {
                 Button {
+                    model.presentAgentReviewFile()
+                } label: {
+                    Label("审阅结果", systemImage: "doc.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("审阅结构化 Agent 结果并确认写入")
+                Button {
                     KiteSettingsWindowController.open(pane: .agent)
                 } label: {
                     Label("Agent 设置", systemImage: "gearshape")
@@ -979,13 +987,22 @@ private struct KiteAgentPanelContent: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Button {
-                KiteSettingsWindowController.open(pane: .agent)
-            } label: {
-                Label("打开 Agent 设置", systemImage: "gearshape")
+            HStack(spacing: 8) {
+                Button {
+                    model.presentAgentReviewFile()
+                } label: {
+                    Label("审阅已有结果", systemImage: "doc.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button {
+                    KiteSettingsWindowController.open(pane: .agent)
+                } label: {
+                    Label("打开 Agent 设置", systemImage: "gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 14)

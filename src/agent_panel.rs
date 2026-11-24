@@ -16,10 +16,13 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kite_core::agent::{
-    AgentContext, AgentContextMode, AgentConversation, AgentLaunchRequest, AgentMessage,
-    AgentMessageRole, AgentPath, AgentPermissionDecision, AgentProfile, AgentRuntime,
-    AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase, load_agent_profiles,
-    load_agent_sessions, new_agent_conversation_id, save_agent_conversation,
+    AgentConversation, AgentMessage, AgentMessageRole, AgentPermissionDecision, AgentProfile,
+    AgentProfileStore, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState, load_agent_sessions,
+    new_agent_conversation_id, save_agent_conversation,
+};
+use kite_core::agent_context::{
+    AgentContext, AgentContextMode, AgentLaunchRequest, AgentPath, AgentSessionPhase,
+    default_working_directory,
 };
 
 pub(crate) struct AgentPanel {
@@ -253,7 +256,7 @@ impl AgentPanel {
         } else {
             current_directory
                 .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or_else(|| kite_core::agent::default_working_directory(&primary.path))
+                .unwrap_or_else(|| default_working_directory(&primary.path))
         };
         match AgentContext::new(&primary.path, paths, Some(working_directory)) {
             Ok(context) => {
@@ -285,7 +288,7 @@ impl AgentPanel {
             let working_directory = if primary.is_dir {
                 primary.path.clone()
             } else {
-                kite_core::agent::default_working_directory(&primary.path)
+                default_working_directory(&primary.path)
             };
             match AgentContext::new(&primary.path, paths, Some(working_directory)) {
                 Ok(context) => {
@@ -361,6 +364,12 @@ impl AgentPanel {
             main_app.update(cx, |app, cx| app.sync_agent_follow_selection(cx));
         }
         cx.notify();
+    }
+
+    fn import_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) {
+            main_app.update(cx, |app, cx| app.open_agent_review_file(window, cx));
+        }
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -609,7 +618,7 @@ impl AgentPanel {
         let permission = self
             .profile
             .as_ref()
-            .map(|profile| profile.permission_mode.label().to_string())
+            .map(|profile| profile.permission.label().to_string())
             .unwrap_or_else(|| "只读".to_string());
         let working_directory = self
             .context
@@ -1069,6 +1078,17 @@ impl AgentPanel {
                     .gap_2()
                     .justify_end()
                     .child(
+                        Button::new("agent-import-result")
+                            .small()
+                            .ghost()
+                            .icon(IconName::FilePen)
+                            .label("审阅结果")
+                            .tooltip("审阅结构化 Agent 结果并确认写入")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.import_result(window, cx)),
+                            ),
+                    )
+                    .child(
                         Button::new("agent-open-settings")
                             .small()
                             .outline()
@@ -1131,12 +1151,28 @@ impl AgentPanel {
                     ),
             )
             .child(
-                Button::new("agent-empty-settings")
-                    .small()
-                    .outline()
-                    .icon(IconName::Settings)
-                    .label("打开 Agent 设置")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("agent-empty-review")
+                            .small()
+                            .outline()
+                            .icon(IconName::FilePen)
+                            .label("审阅已有结果")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.import_result(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("agent-empty-settings")
+                            .small()
+                            .outline()
+                            .icon(IconName::Settings)
+                            .label("打开 Agent 设置")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -1186,20 +1222,12 @@ impl Render for AgentPanel {
 }
 
 fn default_agent_profile() -> Option<AgentProfile> {
-    let loaded = load_agent_profiles();
-    loaded
-        .store
-        .default_profile_id
-        .as_ref()
-        .and_then(|id| {
-            loaded
-                .store
-                .profiles
-                .iter()
-                .find(|profile| &profile.id == id)
-        })
-        .cloned()
-        .or_else(|| loaded.store.profiles.first().cloned())
+    let store = AgentProfileStore::new();
+    store
+        .default_profile()
+        .ok()
+        .flatten()
+        .or_else(|| store.list_profiles().ok()?.into_iter().next())
 }
 
 fn now_unix_ms() -> u64 {

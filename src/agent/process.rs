@@ -34,7 +34,11 @@ const SAFE_ENV_NAMES: &[&str] = &[
 ];
 
 pub(crate) fn resolve_agent_command(profile: &AgentProfile, cwd: &Path) -> Result<PathBuf, String> {
-    let command = profile.command.trim();
+    let command = profile
+        .executable
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
     if command.is_empty() {
         return Err("Agent 命令为空".to_string());
     }
@@ -49,7 +53,7 @@ pub(crate) fn resolve_agent_command(profile: &AgentProfile, cwd: &Path) -> Resul
         return candidate
             .is_file()
             .then_some(candidate)
-            .ok_or_else(|| format!("找不到 Agent 可执行文件：{}", profile.command));
+            .ok_or_else(|| format!("找不到 Agent 可执行文件：{command}"));
     }
 
     let path_var = env::var_os("PATH").unwrap_or_default();
@@ -60,7 +64,7 @@ pub(crate) fn resolve_agent_command(profile: &AgentProfile, cwd: &Path) -> Resul
             }
         }
     }
-    Err(format!("在 PATH 中找不到 Agent 命令：{}", profile.command))
+    Err(format!("在 PATH 中找不到 Agent 命令：{command}"))
 }
 
 pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<Child, String> {
@@ -74,11 +78,11 @@ pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<
             .arg("/D")
             .arg("/S")
             .arg("/C")
-            .arg(batch_command_line(&executable, &profile.args));
+            .arg(batch_command_line(&executable, &profile.arguments));
         command
     } else {
         let mut command = Command::new(&executable);
-        command.args(&profile.args);
+        command.args(&profile.arguments);
         command
     };
 
@@ -93,7 +97,7 @@ pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<
             command.env(name, value);
         }
     }
-    for variable in &profile.env {
+    for variable in &profile.environment {
         if !variable.value.is_empty() {
             command.env(variable.name.trim(), &variable.value);
         }
@@ -190,11 +194,11 @@ mod tests {
     #[test]
     fn resolves_the_fixture_binary_from_path_or_workspace_target() {
         let profile = AgentProfile {
-            command: if cfg!(windows) {
+            executable: Some(if cfg!(windows) {
                 "kite-agent-fixture.exe".to_string()
             } else {
                 "kite-agent-fixture".to_string()
-            },
+            }),
             ..AgentProfile::default()
         };
         let cwd = env::current_dir().expect("cwd");

@@ -3754,6 +3754,7 @@ dependencies = [
  "trash",
  "uniffi",
  "ureq",
+ "url",
  "walkdir",
  "windows 0.62.2",
  "windows-core 0.62.2",

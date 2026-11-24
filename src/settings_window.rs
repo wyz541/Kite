@@ -15,7 +15,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kite_core::agent::{
-    AgentConnectionInfo, AgentDiagnostics, AgentProfile, AgentProfileStore, AgentStoreLoad,
+    AgentConnectionInfo, AgentDiagnostics, AgentProfile, AgentProfileSnapshot, AgentStoreLoad,
     agent_config_path, agent_presets, diagnose_agents, load_agent_profiles, preset_profile,
     probe_agent_connection, save_agent_profiles,
 };
@@ -517,7 +517,7 @@ impl SettingsWindow {
         content.into_any_element()
     }
 
-    fn save_agent_store(&mut self, store: AgentProfileStore, cx: &mut Context<Self>) {
+    fn save_agent_store(&mut self, store: AgentProfileSnapshot, cx: &mut Context<Self>) {
         match save_agent_profiles(store) {
             Ok(loaded) => {
                 self.agent_store = loaded;
@@ -530,7 +530,7 @@ impl SettingsWindow {
     }
 
     fn add_agent_preset(&mut self, preset_id: &str, cx: &mut Context<Self>) {
-        let Some(mut profile) = preset_profile(preset_id) else {
+        let Some(mut profile) = preset_profile(preset_id, preset_id.to_string()) else {
             self.status = Some("未知的 Agent 预设".into());
             cx.notify();
             return;
@@ -688,12 +688,15 @@ impl SettingsWindow {
                                             .text_color(cx.theme().muted_foreground)
                                             .child(format!(
                                                 "{} · {} · {}",
-                                                profile.command,
+                                                profile
+                                                    .executable
+                                                    .as_deref()
+                                                    .unwrap_or("未设置命令"),
                                                 profile
                                                     .model
                                                     .as_deref()
                                                     .unwrap_or("Agent 默认模型"),
-                                                profile.permission_mode.label()
+                                                profile.permission.label()
                                             )),
                                     ),
                             )

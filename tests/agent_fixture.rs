@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kite_core::agent::{
-    AgentEnvVar, AgentPermissionDecision, AgentProfile, AgentRuntime, AgentRuntimeSnapshot,
-    AgentRuntimeState,
+    AgentEnvironmentVariable, AgentPermissionDecision, AgentProfile, AgentRuntime,
+    AgentRuntimeSnapshot, AgentRuntimeState,
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -18,11 +18,10 @@ fn fixture_profile(scenario: &str) -> AgentProfile {
     AgentProfile {
         id: "fixture".to_string(),
         name: "Kite Fixture Agent".to_string(),
-        command: env!("CARGO_BIN_EXE_kite-agent-fixture").to_string(),
-        args: vec!["--scenario".to_string(), scenario.to_string()],
-        startup_timeout_ms: 20_000,
-        idle_timeout_ms: 20_000,
-        max_output_bytes: 256 * 1024,
+        executable: Some(env!("CARGO_BIN_EXE_kite-agent-fixture").to_string()),
+        arguments: vec!["--scenario".to_string(), scenario.to_string()],
+        timeout_seconds: 20,
+        output_limit_bytes: 256 * 1024,
         ..AgentProfile::default()
     }
 }
@@ -128,7 +127,7 @@ fn cancel_stops_a_hanging_turn() {
 #[test]
 fn idle_timeout_is_structured() {
     let mut profile = fixture_profile("idle");
-    profile.idle_timeout_ms = 1_000;
+    profile.timeout_seconds = 1;
     let runtime = start(profile);
     let snapshot = prompt_and_wait(&runtime, "", TURN_TIMEOUT);
     assert!(matches!(
@@ -147,7 +146,7 @@ fn idle_timeout_is_structured() {
 #[test]
 fn oversized_output_is_rejected() {
     let mut profile = fixture_profile("oversized");
-    profile.max_output_bytes = 16 * 1024;
+    profile.output_limit_bytes = 16 * 1024;
     let runtime = start(profile);
     runtime
         .send_prompt("fixture prompt".to_string(), Vec::new())
@@ -194,7 +193,7 @@ fn child_process_is_removed_with_the_agent_tree() {
             .as_nanos()
     ));
     let mut profile = fixture_profile("spawn-tree");
-    profile.env.push(AgentEnvVar {
+    profile.environment.push(AgentEnvironmentVariable {
         name: "KITE_AGENT_FIXTURE_CHILD_PID_FILE".to_string(),
         value: pid_path.to_string_lossy().into_owned(),
     });

@@ -8,10 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::agent::config::{AgentProfile, AgentTransport, validate_agent_profile};
 use crate::agent::diagnostics::{record_agent_event, redact_agent_text};
 use crate::agent::process::{spawn_agent_process, terminate_agent_process};
 use crate::agent::restore::{AgentMessage, AgentMessageRole};
+use crate::agent::{AgentProfile, AgentTransport, validate_and_normalize_profile};
 
 const MAX_ACP_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RUNTIME_EVENTS: usize = 4_096;
@@ -265,12 +265,13 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     #[uniffi::constructor]
     pub fn start(
-        profile: AgentProfile,
+        mut profile: AgentProfile,
         working_directory: String,
         context_paths: Vec<String>,
         restored_messages: Vec<AgentMessage>,
     ) -> Result<Arc<Self>, AgentRuntimeError> {
-        validate_agent_profile(&profile).map_err(AgentRuntimeError::from)?;
+        validate_and_normalize_profile(&mut profile)
+            .map_err(|error| AgentRuntimeError::from(error.to_string()))?;
         if profile.transport != AgentTransport::AcpStdio {
             return Err(AgentRuntimeError::from(
                 "P0 Agent 运行时仅支持 ACP / JSON-RPC stdio",
@@ -437,8 +438,9 @@ impl RuntimeWorker {
         restored_messages: Vec<AgentMessage>,
         receiver: mpsc::Receiver<RuntimeSignal>,
     ) -> Self {
-        let total_prompt_timeout = Duration::from_millis(u64::from(profile.idle_timeout_ms) * 10)
-            .clamp(Duration::from_secs(60), Duration::from_secs(30 * 60));
+        let total_prompt_timeout =
+            Duration::from_secs(u64::from(profile.timeout_seconds.max(1)).saturating_mul(10))
+                .clamp(Duration::from_secs(60), Duration::from_secs(30 * 60));
         Self {
             shared,
             profile,
@@ -879,7 +881,7 @@ impl RuntimeWorker {
                     self.received_any_output = true;
                     let accepted = self
                         .shared
-                        .append_output(&text, self.profile.max_output_bytes);
+                        .append_output(&text, self.profile.output_limit_bytes);
                     if !accepted && !self.output_limit_sent {
                         self.output_limit_sent = true;
                         let _ = self.write_cancel_notification();
@@ -1166,7 +1168,7 @@ impl RuntimeWorker {
             state,
             AgentRuntimeState::Starting | AgentRuntimeState::Initializing
         ) && self.started.elapsed()
-            >= Duration::from_millis(u64::from(self.profile.startup_timeout_ms))
+            >= Duration::from_secs(u64::from(self.profile.timeout_seconds.max(20)))
         {
             self.shutdown_child();
             self.fail("Agent 启动或 ACP 初始化超时");
@@ -1177,12 +1179,12 @@ impl RuntimeWorker {
             AgentRuntimeState::Running | AgentRuntimeState::WaitingPermission
         ) {
             if self.last_activity.elapsed()
-                >= Duration::from_millis(u64::from(self.profile.idle_timeout_ms))
+                >= Duration::from_secs(u64::from(self.profile.timeout_seconds.max(1)))
             {
                 self.shutdown_child();
                 self.fail(format!(
                     "Agent 空闲超时（{} 秒）",
-                    self.profile.idle_timeout_ms / 1_000
+                    self.profile.timeout_seconds.max(1)
                 ));
                 return true;
             }

@@ -1,0 +1,55 @@
+name: Agent FFI smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - src/agent/**
+      - src/ffi.rs
+      - src/lib.rs
+      - apps/macos/Tests/AgentProfileStoreSmoke.swift
+      - apps/macos/Tests/run-agent-profile-store-smoke.sh
+      - .github/workflows/agent-ffi-smoke.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - src/agent/**
+      - src/ffi.rs
+      - src/lib.rs
+      - apps/macos/Tests/AgentProfileStoreSmoke.swift
+      - apps/macos/Tests/run-agent-profile-store-smoke.sh
+      - .github/workflows/agent-ffi-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-ffi-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-agent-store:
+    name: macOS Swift UniFFI smoke
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Swift agent store smoke test
+        run: bash apps/macos/Tests/run-agent-profile-store-smoke.sh
