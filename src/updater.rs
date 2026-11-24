@@ -918,7 +918,7 @@ pub fn install_windows_update(
     Ok(())
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 const WINDOWS_UPDATE_TARGET_REPLACEMENT: &str = r#"
 # Windows executable images can share delete access while running.
 # Rename the target directly instead of requiring an exclusive write lock.
@@ -949,7 +949,7 @@ function Move-UpdateTargetToBackup {
 }
 "#;
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 fn windows_update_helper() -> String {
     WINDOWS_UPDATE_HELPER.replace(
         "__MOVE_UPDATE_TARGET_TO_BACKUP__",
@@ -957,7 +957,7 @@ fn windows_update_helper() -> String {
     )
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 const WINDOWS_UPDATE_HELPER: &str = r#"
 param(
     [Parameter(Mandatory=$true)][int]$ProcessId,
@@ -968,6 +968,19 @@ param(
     [Parameter(Mandatory=$true)][string]$ScriptPath
 )
 $ErrorActionPreference = 'Stop'
+$targetDirectory = Split-Path -Parent $Target
+$targetName = [IO.Path]::GetFileName($Target)
+$updatesDirectory = Split-Path -Parent $LogPath
+$backupDirectory = Join-Path $updatesDirectory ("backup-" + [Guid]::NewGuid().ToString('N'))
+$stagingDirectory = Join-Path $updatesDirectory ("staging-" + [Guid]::NewGuid().ToString('N'))
+$oldTarget = "$Target.old"
+$sidecarNames = @(
+    'kensaku-cli.exe',
+    'kensaku-daemon.exe',
+    'KENSAKU_LICENSE',
+    'kensaku-backend.md'
+)
+$managedNames = @((@($targetName) + $sidecarNames) | Select-Object -Unique)
 function Write-UpdateLog([string]$Message) {
     $line = "$(Get-Date -Format o) $Message"
     Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
@@ -990,7 +1003,7 @@ function Show-UpdateError([string]$Message) {
     try {
         Add-Type -AssemblyName PresentationFramework
         [System.Windows.MessageBox]::Show(
-            "$Message`n`n更新诊断日志：$LogPath",
+            "$Message`n`n更新日志：$LogPath",
             "Kite 更新失败",
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Error
@@ -1019,39 +1032,143 @@ function Stop-KiteProcesses {
         throw "无法结束现有 Kite 进程。请关闭所有 Kite 窗口后重试。"
     }
 }
+function Stop-KensakuProcesses {
+    $root = [IO.Path]::GetFullPath($targetDirectory).TrimEnd('\') + '\'
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        $processes = @(
+            Get-Process -Name 'kensaku-daemon', 'kensaku-cli' -ErrorAction SilentlyContinue |
+                Where-Object {
+                    try {
+                        $processPath = $_.Path
+                        $processPath -and [IO.Path]::GetFullPath($processPath).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+                    } catch {
+                        $false
+                    }
+                }
+        )
+        if ($processes.Count -eq 0) { return }
+        foreach ($process in $processes) {
+            try {
+                Write-UpdateLog "Stopping Kensaku process $($process.Id) before update"
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            } catch {
+                Write-UpdateLog "Unable to stop Kensaku process $($process.Id): $($_.Exception.Message)"
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "无法结束现有 Kensaku 进程。请关闭 Kite 后重试。"
+}
 __MOVE_UPDATE_TARGET_TO_BACKUP__
-$backup = "$Target.old"
-$targetDirectory = Split-Path -Parent $Target
+function Restore-ManagedFiles {
+    foreach ($name in $managedNames) {
+        $backupPath = Join-Path $backupDirectory $name
+        $destination = Join-Path $targetDirectory $name
+        if (Test-Path -LiteralPath $backupPath) {
+            Copy-Item -LiteralPath $backupPath -Destination $destination -Force
+        } elseif (Test-Path -LiteralPath $destination) {
+            Remove-Item -LiteralPath $destination -Force
+        }
+    }
+}
+function Start-UpdatedKite {
+    $deadline = (Get-Date).AddSeconds(15)
+    $attempt = 0
+    $lastError = $null
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        try {
+            $started = Start-Process -FilePath $Target -WorkingDirectory $targetDirectory -PassThru -ErrorAction Stop
+            Start-Sleep -Seconds 2
+            $started.Refresh()
+            if (-not $started.HasExited) {
+                if ($attempt -gt 1) {
+                    Write-UpdateLog "Updated Kite started after $attempt attempts"
+                }
+                return $started
+            }
+            $lastError = "Updated Kite exited during startup with code $($started.ExitCode)"
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+        Write-UpdateLog "Updated Kite launch attempt $attempt failed; retrying: $lastError"
+        Start-Sleep -Milliseconds 500
+    }
+    throw "无法启动更新后的 Kite：$lastError"
+}
+$kiteStopped = $false
+$backupReady = $false
 try {
     Write-UpdateLog "Starting update from $Source to $Target"
+    $actualPackageHash = Get-Sha256Hex $Source
+    if ($actualPackageHash -ne $ExpectedHash.ToLowerInvariant()) {
+        throw "更新包 SHA-256 不匹配"
+    }
+    New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
+    Expand-Archive -LiteralPath $Source -DestinationPath $stagingDirectory -Force
+    foreach ($name in @('Kite.exe', 'kensaku-cli.exe', 'kensaku-daemon.exe')) {
+        $sourcePath = Join-Path $stagingDirectory $name
+        if (-not (Test-Path -LiteralPath $sourcePath)) {
+            throw "更新包缺少文件：$name"
+        }
+    }
     $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($process) { $process.WaitForExit(10000) | Out-Null }
     Write-UpdateLog "Stopping existing Kite processes before update"
     Stop-KiteProcesses
-    Move-UpdateTargetToBackup -TargetPath $Target -BackupPath $backup
-    Copy-Item -LiteralPath $Source -Destination $Target -Force
-    $actualHash = Get-Sha256Hex $Target
-    if ($actualHash -ne $ExpectedHash) { throw "SHA-256 mismatch" }
-    Write-UpdateLog "Installed Kite update at $Target"
-    $started = Start-Process -FilePath $Target -WorkingDirectory $targetDirectory -PassThru
-    Start-Sleep -Seconds 2
-    $started.Refresh()
-    if ($started.HasExited) { throw "Updated Kite exited during startup" }
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
+    $kiteStopped = $true
+    Stop-KensakuProcesses
+    # Let image sections and antivirus/file-system notifications settle before
+    # replacing and launching the executable at the same path.
+    Start-Sleep -Milliseconds 1000
+    New-Item -ItemType Directory -Path $backupDirectory | Out-Null
+    foreach ($name in $managedNames) {
+        $existing = Join-Path $targetDirectory $name
+        if (Test-Path -LiteralPath $existing) {
+            Copy-Item -LiteralPath $existing -Destination (Join-Path $backupDirectory $name) -Force
+        }
+    }
+    $backupReady = $true
+    $expectedKiteHash = Get-Sha256Hex (Join-Path $stagingDirectory 'Kite.exe')
+    Move-UpdateTargetToBackup -TargetPath $Target -BackupPath $oldTarget
+    Copy-Item -LiteralPath (Join-Path $stagingDirectory 'Kite.exe') -Destination $Target -Force
+    foreach ($name in $sidecarNames) {
+        $sourcePath = Join-Path $stagingDirectory $name
+        if (Test-Path -LiteralPath $sourcePath) {
+            Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $targetDirectory $name) -Force
+        }
+    }
+    $installedKiteHash = Get-Sha256Hex $Target
+    if ($installedKiteHash -ne $expectedKiteHash) {
+        throw "Installed Kite.exe SHA-256 mismatch"
+    }
+    Write-UpdateLog "Installed Kite package at $Target"
+    $started = Start-UpdatedKite
+    if (Test-Path -LiteralPath $oldTarget) { Remove-Item -LiteralPath $oldTarget -Force }
     Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
 } catch {
     $failure = $_.Exception.Message
     Write-UpdateLog "Update failed: $($_.Exception.ToString())"
-    if (Test-Path -LiteralPath $backup) {
-        if (Test-Path -LiteralPath $Target) { Remove-Item -LiteralPath $Target -Force }
-        Move-Item -LiteralPath $backup -Destination $Target -Force
+    if ($kiteStopped) {
+        try {
+            Stop-KiteProcesses
+            Stop-KensakuProcesses
+            if ($backupReady) { Restore-ManagedFiles }
+            if (Test-Path -LiteralPath $oldTarget) { Remove-Item -LiteralPath $oldTarget -Force }
+        } catch {
+            Write-UpdateLog "Rollback failed: $($_.Exception.ToString())"
+        }
     }
     Show-UpdateError $failure
-    if (Test-Path -LiteralPath $Target) {
+    $currentProcess = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (($kiteStopped -or -not $currentProcess) -and (Test-Path -LiteralPath $Target)) {
         Start-Process -FilePath $Target -WorkingDirectory $targetDirectory
     }
     exit 1
 } finally {
+    Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
 }
 "#;
@@ -1180,6 +1297,20 @@ mod tests {
         assert!(helper.contains("-Force -ErrorAction Stop"));
         assert!(helper.contains("Stopping existing Kite processes before update"));
         assert!(!helper.contains("__MOVE_UPDATE_TARGET_TO_BACKUP__"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_update_helper_retries_transient_executable_launch_failures() {
+        let helper = windows_update_helper();
+        assert!(helper.contains("function Start-UpdatedKite"));
+        assert!(helper.contains("Updated Kite launch attempt"));
+        assert!(helper.contains("Installed Kite.exe SHA-256 mismatch"));
+        assert!(helper.contains("Start-Sleep -Milliseconds 1000"));
+        assert!(helper.contains("Expand-Archive"));
+        assert!(helper.contains("Join-Path $stagingDirectory 'Kite.exe'"));
+        assert!(helper.contains("kensaku-cli.exe"));
+        assert!(!helper.contains("Copy-Item -LiteralPath $Source -Destination $Target -Force"));
     }
 
     #[cfg(target_os = "windows")]
