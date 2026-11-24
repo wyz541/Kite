@@ -184,17 +184,22 @@ pub fn remove_git_worktree(path: &Path, force: bool) -> Result<(), String> {
     if check.has_uncommitted_changes && !force {
         return Err(format!("worktree 有未提交的改动：{}", check.summary));
     }
-    let root = GitService::shared()
-        .discover_repository(path)
-        .map_err(|error| error.to_string())?
-        .work_tree;
+    let list = git_worktrees(path)?.ok_or_else(|| "所选项目不在 Git 工作区中".to_string())?;
+    // Run from the primary checkout. Git on Windows cannot delete the directory
+    // that is the working directory of the `git` process removing it.
+    let primary_root = list
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.is_primary)
+        .map(|worktree| worktree.path.as_path())
+        .unwrap_or(list.repository_root.as_path());
     let path_text = path.to_string_lossy().into_owned();
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
     }
     args.push(path_text.as_str());
-    run_git(&root, &args)
+    run_git(primary_root, &args)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
