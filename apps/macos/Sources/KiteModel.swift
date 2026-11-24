@@ -758,12 +758,13 @@ struct UpdateDownloadState: Equatable {
 final class KiteModel: ObservableObject {
     static let restoreSessionDefaultsKey = "kite.macos.restore-session"
     static let appearanceDefaultsKey = "kite.macos.appearance"
+    static let gitAutoFetchDefaultsKey = "kite.macos.git-auto-fetch"
     private static let sessionSchemaVersion: UInt32 = 1
     private static let columnSearchDebounceNanoseconds: UInt64 = 180_000_000
     private static let columnViewRulesDefaultsKey = "kite.macos.column-view-rules-v1"
     private static let maxStoredColumnRules = 512
 
-    private let core: KiteCore
+    let core: KiteCore
     private var storedColumnViewRules: StoredColumnViewRules
     private var columnSearchGeneration: UInt64 = 0
     private var globalSearchGeneration: UInt64 = 0
@@ -775,6 +776,7 @@ final class KiteModel: ObservableObject {
     private var contentSearchPowerPolicyTask: Task<Void, Never>?
     private var columnKeyMonitor: Any?
     private var lastHoveredColumnPath: String?
+    private var gitAutoFetchTask: Task<Void, Never>?
     private lazy var columnDirectoryWatcher = DirectoryWatcher { [weak self] in
         self?.directoryContentsDidChange()
     }
@@ -805,17 +807,21 @@ final class KiteModel: ObservableObject {
     @Published private(set) var globalSearchLoading = false
     @Published private(set) var contentSearch: BrowserContentSearchState?
     @Published private(set) var contentSearchLoading = false
+    @Published private(set) var gitStatusMessage: String?
+    @Published private(set) var gitAutoFetchEnabled: Bool
 
     init(core: KiteCore = KiteCore()) {
         PerformanceTrace.mark("macos.model_start")
         let storedColumnViewRules = Self.loadStoredColumnViewRules()
         self.core = core
         self.storedColumnViewRules = storedColumnViewRules
+        self.gitAutoFetchEnabled = UserDefaults.standard.bool(forKey: Self.gitAutoFetchDefaultsKey)
         self.favorites = core.favorites()
         self.volumes = core.devices().volumes
         restoreOrCreateTabs()
         syncColumnDirectoryWatchers()
         updateContentSearchPowerPolicy()
+        scheduleGitAutoFetch()
         contentSearchPowerPolicyTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -833,8 +839,54 @@ final class KiteModel: ObservableObject {
     deinit {
         contentSearchPowerPolicyTask?.cancel()
         globalSearchDebounceTask?.cancel()
+        gitAutoFetchTask?.cancel()
         if let columnKeyMonitor {
             NSEvent.removeMonitor(columnKeyMonitor)
+        }
+    }
+
+    func setGitAutoFetchEnabled(_ enabled: Bool) {
+        gitAutoFetchEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.gitAutoFetchDefaultsKey)
+        scheduleGitAutoFetch()
+    }
+
+    func updateGitOperationStatus(_ message: String) {
+        errorMessage = nil
+        gitStatusMessage = message
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard let self, self.gitStatusMessage == message else { return }
+            self.gitStatusMessage = nil
+        }
+    }
+
+    private func scheduleGitAutoFetch() {
+        gitAutoFetchTask?.cancel()
+        gitAutoFetchTask = nil
+        guard gitAutoFetchEnabled else { return }
+        gitAutoFetchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15 * 60 * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                guard KiteGitService.shared.operation == nil else { continue }
+                let path = self.currentPath
+                let core = self.core
+                _ = await Task.detached(priority: .utility) {
+                    guard let repository = try? core.gitRepository(path: path) else {
+                        return
+                    }
+                    let monitor = GitProgressMonitor()
+                    _ = try? core.gitFetch(
+                        path: repository.root,
+                        options: GitFetchOptionsDto(remote: nil, allRemotes: false, prune: true),
+                        credentials: nil,
+                        monitor: monitor
+                    )
+                }.value
+                guard !Task.isCancelled else { return }
+                self.refresh()
+            }
         }
     }
 
@@ -881,17 +933,6 @@ final class KiteModel: ObservableObject {
 
     var currentPath: String {
         activeTab?.currentPath ?? core.defaultDirectory()
-    }
-
-    func gitPreviewSummary(for path: String) async -> GitPreviewSummaryDto? {
-        let core = self.core
-        return await Task.detached(priority: .utility) {
-            do {
-                return try core.gitPreviewSummary(path: path)
-            } catch {
-                return nil
-            }
-        }.value
     }
 
     var canCloseTab: Bool { tabs.count > 1 }
@@ -1914,11 +1955,75 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
+    func gitRepositoryRoot(path: String) async -> String? {
+        let core = self.core
+        return try? await Task.detached(priority: .utility) {
+            try core.gitRepositoryRoot(path: path)
+        }.value
+    }
+
+    func loadGitClientWindowState(repositoryRoot: String) -> GitClientWindowSessionDto? {
+        core.loadGitClientWindowState(repositoryRoot: repositoryRoot)
+    }
+
+    func saveGitClientWindowState(_ state: GitClientWindowSessionDto) {
+        do {
+            try core.saveGitClientWindowState(state: state)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func runGitOperationControl(
+        path: String,
+        control: GitOperationControlDto
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.runGitOperationControl(path: path, control: control)
+        }.value
+    }
+
+    func runVcsOperationCancellable(
+        operation: VcsOperationDto,
+        path: String,
+        cancellation: VcsCancellation
+    ) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.runVcsOperationCancellable(
+                tool: .git,
+                operation: operation,
+                path: path,
+                cancellation: cancellation
+            )
+        }.value
+        refresh()
+        return message
+    }
+
     func gitFileDiff(path: String) async throws -> [GitDiffLineDto] {
         let core = self.core
         return try await Task.detached(priority: .userInitiated) {
             try core.gitFileDiff(path: path)
         }.value
+    }
+
+    func gitCommitState(path: String) async throws -> GitCommitStateDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCommitState(path: path)
+        }.value
+    }
+
+    func gitCommit(options: GitCommitOptionsDto) async throws -> GitCommitResultDto {
+        let core = self.core
+        let result = try await Task.detached(priority: .userInitiated) {
+            try core.gitCommit(options: options)
+        }.value
+        errorMessage = nil
+        refresh()
+        return result
     }
 
     func gitRepositoryChanges(
@@ -2052,6 +2157,13 @@ final class KiteModel: ObservableObject {
         return message
     }
 
+    func gitDiff(request: GitDiffRequestDto) async throws -> GitDiffDocumentDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDiff(request: request)
+        }.value
+    }
+
     /// Runs a Git or SVN operation, refreshes the columns, and returns the
     /// status message for the caller to show.
     @discardableResult
@@ -2072,6 +2184,345 @@ final class KiteModel: ObservableObject {
             errorMessage = error.localizedDescription
             return error.localizedDescription
         }
+    }
+
+    func gitOperationStatus(path: String) async throws -> GitRepositoryStatusDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitOperationStatus(path: path)
+        }.value
+    }
+
+    func gitStashList(path: String) async throws -> [GitStashEntryDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashList(path: path)
+        }.value
+    }
+
+    func gitStashDiff(path: String, index: UInt32) async throws -> [GitDiffLineDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashDiff(path: path, index: index)
+        }.value
+    }
+
+    func gitStashSave(
+        path: String,
+        message: String?,
+        includeUntracked: Bool,
+        keepIndex: Bool,
+        paths: [String]
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashSave(
+                path: path,
+                message: message,
+                includeUntracked: includeUntracked,
+                keepIndex: keepIndex,
+                paths: paths
+            )
+        }.value
+    }
+
+    func gitStashApply(path: String, index: UInt32) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashApply(path: path, index: index)
+        }.value
+    }
+
+    func gitStashPop(path: String, index: UInt32) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashPop(path: path, index: index)
+        }.value
+    }
+
+    func gitStashDrop(path: String, index: UInt32, confirmed: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashDrop(path: path, index: index, confirmed: confirmed)
+        }.value
+    }
+
+    func gitStashClear(path: String, confirmed: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashClear(path: path, confirmed: confirmed)
+        }.value
+    }
+
+    func gitStashBranch(
+        path: String,
+        index: UInt32,
+        branch: String
+    ) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitStashBranch(path: path, index: index, branch: branch)
+        }.value
+    }
+
+    func gitReset(
+        path: String,
+        mode: GitResetModeDto,
+        target: String,
+        confirmed: Bool
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitReset(path: path, mode: mode, target: target, confirmed: confirmed)
+        }.value
+    }
+
+    func gitRevert(path: String, commits: [String]) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRevert(path: path, commits: commits)
+        }.value
+    }
+
+    func gitRevertContinue(path: String) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRevertContinue(path: path)
+        }.value
+    }
+
+    func gitRevertAbort(path: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRevertAbort(path: path)
+        }.value
+    }
+
+    func gitCherryPick(path: String, commits: [String]) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPick(path: path, commits: commits)
+        }.value
+    }
+
+    func gitCherryPickContinue(path: String) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPickContinue(path: path)
+        }.value
+    }
+
+    func gitCherryPickSkip(path: String) async throws -> GitCommandOutcomeDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPickSkip(path: path)
+        }.value
+    }
+
+    func gitCherryPickAbort(path: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCherryPickAbort(path: path)
+        }.value
+    }
+
+    func gitLogText(path: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.runVcsQuery(tool: .git, query: .log, path: path)
+        }.value
+    }
+
+    func gitLogContext(path: String) async throws -> GitLogContextDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitLogContext(path: path)
+        }.value
+    }
+
+    func gitLogPage(
+        path: String,
+        filter: GitLogFilterDto,
+        cursor: String?,
+        pageSize: UInt32
+    ) async throws -> GitLogPageDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitLogPage(
+                path: path,
+                filter: filter,
+                cursor: cursor,
+                pageSize: pageSize
+            )
+        }.value
+    }
+
+    func gitCommitDetails(path: String, hash: String) async throws -> GitCommitDetailsDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCommitDetails(path: path, hash: hash)
+        }.value
+    }
+
+    func gitCommitTree(path: String, hash: String) async throws -> [GitTreeEntryDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCommitTree(path: path, hash: hash)
+        }.value
+    }
+
+    func gitFileHistory(
+        path: String,
+        relativePath: String,
+        cursor: String?,
+        pageSize: UInt32
+    ) async throws -> GitLogPageDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitFileHistory(
+                path: path,
+                relativePath: relativePath,
+                cursor: cursor,
+                pageSize: pageSize
+            )
+        }.value
+    }
+
+    func openGitLog(path: String) {
+        KiteGitLogWindowController.shared.show(model: self, path: path)
+    }
+
+    func gitHeadSummary(path: String) async -> GitHeadSummaryDto? {
+        let core = self.core
+        return try? await Task.detached(priority: .utility) {
+            try core.gitHeadSummary(path: path)
+        }.value
+    }
+
+    func gitBranchSnapshot(path: String) async throws -> GitBranchSnapshotDto {
+        let core = self.core
+        return try await Task.detached(priority: .utility) {
+            try core.gitBranchSnapshot(path: path)
+        }.value
+    }
+
+    func gitCheckout(
+        path: String,
+        target: String,
+        kind: GitRefKindDto,
+        dirtyPolicy: GitDirtyPolicyDto
+    ) async throws -> String {
+        let core = self.core
+        let message = try await Task.detached(priority: .userInitiated) {
+            try core.gitCheckout(
+                path: path,
+                target: target,
+                kind: kind,
+                dirtyPolicy: dirtyPolicy
+            )
+        }.value
+        refresh()
+        return message
+    }
+
+    func gitCreateBranch(path: String, name: String, startPoint: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCreateBranch(path: path, name: name, startPoint: startPoint)
+        }.value
+    }
+
+    func gitRenameBranch(path: String, oldName: String, newName: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitRenameBranch(path: path, oldName: oldName, newName: newName)
+        }.value
+    }
+
+    func gitDeleteLocalBranch(path: String, name: String, force: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteLocalBranch(path: path, name: name, force: force)
+        }.value
+    }
+
+    func gitDeleteLocalBranches(path: String, names: [String], force: Bool) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteLocalBranches(path: path, names: names, force: force)
+        }.value
+    }
+
+    func gitDeleteRemoteBranch(path: String, remote: String, branch: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteRemoteBranch(path: path, remote: remote, branch: branch)
+        }.value
+    }
+
+    func gitSetBranchUpstream(
+        path: String,
+        branch: String,
+        upstream: String?
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitSetBranchUpstream(path: path, branch: branch, upstream: upstream)
+        }.value
+    }
+
+    func gitCompareBranches(path: String, base: String, head: String) async throws -> GitCompareResultDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCompareBranches(path: path, base: base, head: head)
+        }.value
+    }
+
+    func gitCreateTag(
+        path: String,
+        name: String,
+        target: String,
+        annotated: Bool,
+        message: String?
+    ) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCreateTag(
+                path: path,
+                name: name,
+                target: target,
+                annotated: annotated,
+                message: message
+            )
+        }.value
+    }
+
+    func gitDeleteTag(path: String, name: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteTag(path: path, name: name)
+        }.value
+    }
+
+    func gitPushTag(path: String, remote: String, name: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitPushTag(path: path, remote: remote, name: name)
+        }.value
+    }
+
+    func gitDeleteRemoteTag(path: String, remote: String, name: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitDeleteRemoteTag(path: path, remote: remote, name: name)
+        }.value
+    }
+
+    func gitCreateWorktree(path: String, destination: String, branch: String) async throws -> String {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitCreateWorktree(path: path, destination: destination, branch: branch)
+        }.value
     }
 
     /// Writes the log to a temporary file and opens it, matching the Windows
@@ -2666,7 +3117,8 @@ final class KiteModel: ObservableObject {
         let state = SessionStateDto(
             schemaVersion: Self.sessionSchemaVersion,
             activeTab: activeTab,
-            tabs: savedTabs
+            tabs: savedTabs,
+            gitClientWindows: core.loadSession()?.gitClientWindows ?? []
         )
         do {
             try core.saveSession(state: state)

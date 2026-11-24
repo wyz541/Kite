@@ -441,12 +441,13 @@ private struct KiteBrowserColumn: View {
                     }
                     .scrollIndicators(.hidden)
                     .onChange(of: column.searchQuery) { _ in
-                        guard let firstMatchID = column.displayRows.compactMap({ row in
-                            guard case .entry(let entry) = row else { return nil }
-                            return entry.id
-                        }).first else {
-                            return
-                        }
+                        let firstMatchID = column.displayRows
+                            .compactMap { row -> String? in
+                                guard case .entry(let entry) = row else { return nil }
+                                return entry.id
+                            }
+                            .first
+                        guard let firstMatchID else { return }
                         DispatchQueue.main.async {
                             proxy.scrollTo(firstMatchID, anchor: .top)
                         }
@@ -1799,7 +1800,7 @@ private struct KiteEntryMenu: View {
 
         if entry.gitStatus != nil || model.isGitAvailable(forEntryPath: entry.path) {
             Button {
-                KiteGitClientWindowController.shared.show(
+                KiteGitClientWindowController.show(
                     model: model,
                     repositoryPath: entry.isDirectory
                         ? entry.path
@@ -1808,12 +1809,25 @@ private struct KiteEntryMenu: View {
             } label: {
                 Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
             }
+            Divider()
         }
+
+        KiteGitMenu(model: model, path: entry.path)
+
+        Divider()
 
         Button {
             KitePlatform.open(entry.path)
         } label: {
             Label("打开", systemImage: "arrow.up.forward.app")
+        }
+
+        if model.isGitAvailable(forEntryPath: entry.path) {
+            Button {
+                model.openGitLog(path: entry.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
         }
 
         if KitePlatform.isEditableTextFile(entry.path) {
@@ -1840,6 +1854,21 @@ private struct KiteEntryMenu: View {
             KitePlatform.copyPath(entry.path)
         } label: {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+        }
+        if model.columns.last?.gitAvailable == true {
+            Menu {
+                Button("打开 Git 客户端…") {
+                    KiteGitClientWindowController.show(model: model, repositoryPath: entry.path)
+                }
+            } label: {
+                Label("Git", systemImage: "arrow.triangle.branch")
+            }
+        }
+
+        Button {
+            KiteGitRebaseWindowController.show(path: entry.path, model: model)
+        } label: {
+            Label("交互式 Rebase…", systemImage: "arrow.triangle.branch")
         }
 
         Divider()
@@ -2013,14 +2042,19 @@ private struct KiteDirectoryMenu: View {
 
         if column.gitAvailable {
             Button {
-                KiteGitClientWindowController.shared.show(
+                KiteGitClientWindowController.show(
                     model: model,
                     repositoryPath: column.path
                 )
             } label: {
                 Label("打开 Git 客户端", systemImage: "arrow.triangle.branch")
             }
+            Divider()
         }
+
+        KiteGitMenu(model: model, path: column.path)
+
+        Divider()
 
         Button {
             KitePlatform.open(column.path)
@@ -2045,7 +2079,30 @@ private struct KiteDirectoryMenu: View {
         } label: {
             Label("拷贝路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
         }
+        if column.gitAvailable {
+            Menu {
+                Button("打开 Git 客户端…") {
+                    KiteGitClientWindowController.show(model: model, repositoryPath: column.path)
+                }
+            } label: {
+                Label("Git", systemImage: "arrow.triangle.branch")
+            }
+        }
 
+        Button {
+            KiteGitRebaseWindowController.show(path: column.path, model: model)
+        } label: {
+            Label("交互式 Rebase…", systemImage: "arrow.triangle.branch")
+        }
+
+        if column.gitAvailable {
+            Divider()
+            Button {
+                model.openGitLog(path: column.path)
+            } label: {
+                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+            }
+        }
         Divider()
 
         Button {

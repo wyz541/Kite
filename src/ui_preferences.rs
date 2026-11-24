@@ -12,6 +12,11 @@ const UI_PREFERENCES_SCHEMA_VERSION: u32 = 1;
 const MAX_UI_PREFERENCES_BYTES: u64 = 64 * 1024;
 const MAX_COLUMN_RULES: usize = 512;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitRepositoryPreferences {
+    pub favorites: BTreeSet<String>,
+    pub protected_patterns: BTreeSet<String>,
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppearancePreference {
@@ -32,8 +37,12 @@ pub struct UiPreferences {
     pub kind_column_visible: bool,
     pub size_column_visible: bool,
     pub column_width: u16,
+    pub git_auto_fetch: bool,
+    pub git_auto_fetch_minutes: u32,
     pub default_column_rule: ColumnViewRule,
     pub column_rules: BTreeMap<String, ColumnViewRule>,
+    pub git_branch_favorites: BTreeMap<String, BTreeSet<String>>,
+    pub git_protected_patterns: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Default for UiPreferences {
@@ -48,8 +57,12 @@ impl Default for UiPreferences {
             kind_column_visible: true,
             size_column_visible: true,
             column_width: 320,
+            git_auto_fetch: false,
+            git_auto_fetch_minutes: 15,
             default_column_rule: ColumnViewRule::default(),
             column_rules: BTreeMap::new(),
+            git_branch_favorites: BTreeMap::new(),
+            git_protected_patterns: BTreeMap::new(),
         }
     }
 }
@@ -109,9 +122,17 @@ struct UiPreferencesFile {
     #[serde(default = "default_column_width")]
     column_width: u16,
     #[serde(default)]
+    git_auto_fetch: bool,
+    #[serde(default = "default_git_auto_fetch_minutes")]
+    git_auto_fetch_minutes: u32,
+    #[serde(default)]
     default_column_rule: ColumnViewRule,
     #[serde(default)]
     column_rules: BTreeMap<String, ColumnViewRule>,
+    #[serde(default)]
+    git_branch_favorites: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    git_protected_patterns: BTreeMap<String, BTreeSet<String>>,
 }
 
 pub fn load_ui_preferences() -> UiPreferences {
@@ -131,6 +152,83 @@ pub fn save_column_view_rule(path: &Path, rule: ColumnViewRule) -> Result<(), St
     save_column_view_rule_at(&preferences_path, path, rule)
 }
 
+pub fn load_git_repository_preferences(path: &Path) -> GitRepositoryPreferences {
+    let preferences = load_ui_preferences();
+    git_repository_preferences(&preferences, path)
+}
+
+pub fn save_git_branch_favorite(
+    repository_root: &Path,
+    name: &str,
+    favorite: bool,
+) -> Result<(), String> {
+    let preferences_path =
+        ui_preferences_path().ok_or_else(|| "无法确定界面配置目录".to_string())?;
+    let mut preferences = load_ui_preferences_at(&preferences_path).unwrap_or_default();
+    let key = repository_preference_key(repository_root);
+    if favorite {
+        preferences
+            .git_branch_favorites
+            .entry(key)
+            .or_default()
+            .insert(name.to_string());
+    } else if let Some(favorites) = preferences.git_branch_favorites.get_mut(&key) {
+        favorites.remove(name);
+        if favorites.is_empty() {
+            preferences.git_branch_favorites.remove(&key);
+        }
+    }
+    prune_repository_preferences(&mut preferences.git_branch_favorites);
+    save_ui_preferences_at(&preferences_path, preferences)
+}
+
+pub fn save_git_protected_pattern(
+    repository_root: &Path,
+    pattern: &str,
+    protected: bool,
+) -> Result<(), String> {
+    let preferences_path =
+        ui_preferences_path().ok_or_else(|| "无法确定界面配置目录".to_string())?;
+    let mut preferences = load_ui_preferences_at(&preferences_path).unwrap_or_default();
+    let key = repository_preference_key(repository_root);
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err("受保护分支规则不能为空".to_string());
+    }
+    if protected {
+        preferences
+            .git_protected_patterns
+            .entry(key)
+            .or_default()
+            .insert(pattern.to_string());
+    } else if let Some(patterns) = preferences.git_protected_patterns.get_mut(&key) {
+        patterns.remove(pattern);
+        if patterns.is_empty() {
+            preferences.git_protected_patterns.remove(&key);
+        }
+    }
+    prune_repository_preferences(&mut preferences.git_protected_patterns);
+    save_ui_preferences_at(&preferences_path, preferences)
+}
+
+fn git_repository_preferences(
+    preferences: &UiPreferences,
+    path: &Path,
+) -> GitRepositoryPreferences {
+    let key = repository_preference_key(path);
+    GitRepositoryPreferences {
+        favorites: preferences
+            .git_branch_favorites
+            .get(&key)
+            .cloned()
+            .unwrap_or_default(),
+        protected_patterns: preferences
+            .git_protected_patterns
+            .get(&key)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
 pub fn save_default_column_sort(sort: SortSpec) -> Result<(), String> {
     let path = ui_preferences_path().ok_or_else(|| "无法确定界面配置目录".to_string())?;
     save_default_column_sort_at(&path, sort)
@@ -201,8 +299,12 @@ fn load_ui_preferences_at(path: &Path) -> Option<UiPreferences> {
         kind_column_visible: file.kind_column_visible,
         size_column_visible: file.size_column_visible,
         column_width: file.column_width.clamp(240, 480),
+        git_auto_fetch: file.git_auto_fetch,
+        git_auto_fetch_minutes: file.git_auto_fetch_minutes.clamp(5, 240),
         default_column_rule: file.default_column_rule,
         column_rules,
+        git_branch_favorites: file.git_branch_favorites,
+        git_protected_patterns: file.git_protected_patterns,
     })
 }
 
@@ -217,8 +319,12 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
         kind_column_visible,
         size_column_visible,
         column_width,
+        git_auto_fetch,
+        git_auto_fetch_minutes,
         default_column_rule,
         mut column_rules,
+        git_branch_favorites,
+        git_protected_patterns,
     } = preferences;
     prune_column_rules(&mut column_rules);
     let file = UiPreferencesFile {
@@ -232,8 +338,12 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
         kind_column_visible,
         size_column_visible,
         column_width: column_width.clamp(240, 480),
+        git_auto_fetch,
+        git_auto_fetch_minutes: git_auto_fetch_minutes.clamp(5, 240),
         default_column_rule,
         column_rules,
+        git_branch_favorites,
+        git_protected_patterns,
     };
     let bytes =
         serde_json::to_vec_pretty(&file).map_err(|error| format!("无法序列化界面配置：{error}"))?;
@@ -248,12 +358,32 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
         .map_err(|error| format!("无法保存界面配置：{error}"))
 }
 
+fn repository_preference_key(path: &Path) -> String {
+    dunce::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn prune_repository_preferences<T>(preferences: &mut BTreeMap<String, BTreeSet<T>>) {
+    const MAX_REPOSITORIES: usize = 128;
+    while preferences.len() > MAX_REPOSITORIES {
+        let Some(key) = preferences.keys().next().cloned() else {
+            break;
+        };
+        preferences.remove(&key);
+    }
+}
 fn default_true() -> bool {
     true
 }
 
 fn default_column_width() -> u16 {
     320
+}
+
+fn default_git_auto_fetch_minutes() -> u32 {
+    15
 }
 
 fn prune_column_rules(rules: &mut BTreeMap<String, ColumnViewRule>) {

@@ -206,6 +206,7 @@ enum IndexCommand {
         path: PathBuf,
         root: PathBuf,
     },
+    #[cfg(windows)]
     JournalAdvanced {
         roots: Vec<PathBuf>,
         journal_id: u64,
@@ -1357,6 +1358,7 @@ fn index_worker(
                     result,
                 );
             }
+            #[cfg(windows)]
             IndexCommand::JournalAdvanced {
                 roots,
                 journal_id,
@@ -1960,6 +1962,7 @@ mod tests {
         panic!("name index did not become ready");
     }
 
+    #[cfg(windows)]
     fn wait_for_name(service: &NameIndexService, root: &Path, query: &str, path: &Path) {
         let root = root.to_path_buf();
         let cancel = AtomicBool::new(false);

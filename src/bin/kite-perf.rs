@@ -1239,6 +1239,7 @@ fn measure_tabs_and_session(
                 show_path_bar: true,
             })
             .collect(),
+        git_client_windows: Vec::new(),
     };
     save_session_for_performance(&session_path, &state)?;
 

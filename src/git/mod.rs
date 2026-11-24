@@ -5,26 +5,39 @@
 //! logging are implemented once.
 
 mod command;
+mod commit;
 mod error;
 mod events;
+#[allow(dead_code)]
 mod external;
 mod operation;
 mod repository;
+#[allow(dead_code)]
 mod status;
 mod watch;
 
+#[cfg(test)]
+use status::GitPathStatus;
+
+pub mod log;
 pub mod preview;
+pub mod remote;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
+#[cfg(test)]
 use crate::fs::{FileEntry, VcsStatus};
 
 pub use command::{
     CancellationToken, GitCommandOptions, GitCommandResult, GitConsole, GitConsoleEntry,
     GitExecutor, GitVersion, MIN_GIT_VERSION, detect_git_version,
+};
+pub use commit::{
+    COMMIT_SUBJECT_WARNING_CHARS, GitCommitOptions, GitCommitResult, GitCommitState,
+    GitSigningMode, commit, commit_subject_warning, git_commit_state,
 };
 pub use error::{GitError, GitErrorKind, classify_git_failure};
 pub use events::{
@@ -34,8 +47,9 @@ pub use events::{
 };
 pub use operation::{GitOperation, GitOperationResult, GitQuery, execute_operation, execute_query};
 pub use preview::{
-    GitChangeCounts, GitCommitSummary, GitDiffLine, GitDiffLineKind, GitPathSummary, git_file_diff,
-    git_path_summary,
+    GitChangeCounts, GitChangedFile, GitCommitSummary, GitDiffLine, GitDiffLineKind,
+    GitOperationAction, GitPathSummary, GitRepositorySnapshot, git_file_diff, git_path_summary,
+    git_repository_root, git_repository_snapshot, run_git_operation_control,
 };
 pub use repository::{
     GitHead, GitRepository, GitRepositoryState, discover_repository, operation_state,
@@ -43,7 +57,52 @@ pub use repository::{
 };
 pub use watch::{GitRepositoryEvent, GitRepositoryWatcher};
 
-pub(crate) use status::{GitPathStatus, git_statuses};
+#[derive(Clone, Debug)]
+pub(crate) struct GitOutput {
+    pub status: GitExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GitExitStatus {
+    success: bool,
+}
+
+impl GitExitStatus {
+    pub(crate) fn success(self) -> bool {
+        self.success
+    }
+}
+
+pub(crate) fn run_git(current_dir: &Path, args: &[&str]) -> Option<GitOutput> {
+    let result = GitService::shared()
+        .run_preview_command(current_dir, args)
+        .ok()?;
+    Some(GitOutput {
+        status: GitExitStatus {
+            success: result.exit_code == Some(0),
+        },
+        stdout: result.stdout.into_bytes(),
+        stderr: result.stderr.into_bytes(),
+    })
+}
+
+pub(crate) fn output_error(output: &GitOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        "Git 操作失败".to_string()
+    } else {
+        format!(
+            "Git 操作失败：{}",
+            stderr
+                .replace(['\r', '\n'], " ")
+                .chars()
+                .take(300)
+                .collect::<String>()
+        )
+    }
+}
 
 #[derive(Clone)]
 pub struct GitService {
@@ -269,6 +328,21 @@ impl GitService {
         })
     }
 
+    pub(crate) fn run_log_command(
+        &self,
+        current_dir: &Path,
+        args: &[&str],
+    ) -> Result<GitCommandResult, GitError> {
+        self.executor.run(
+            current_dir,
+            args.iter().map(OsString::from).collect::<Vec<_>>(),
+            GitCommandOptions::new("Git 历史"),
+            &CancellationToken::default(),
+            &NoopGitEventSink,
+            None,
+        )
+    }
+
     pub(crate) fn run_preview_command(
         &self,
         current_dir: &Path,
@@ -291,6 +365,21 @@ impl GitService {
     ) -> Result<String, GitError> {
         self.require_supported_version()?;
         operation::execute_vcs_operation(&self.executor, target, operation)
+    }
+
+    pub fn run_legacy_operation_cancellable(
+        &self,
+        target: &Path,
+        operation: &crate::vcs::VcsOperation,
+        cancellation: &CancellationToken,
+    ) -> Result<String, GitError> {
+        self.require_supported_version()?;
+        operation::execute_vcs_operation_cancellable(
+            &self.executor,
+            target,
+            operation,
+            cancellation,
+        )
     }
 
     pub fn run_legacy_query(
@@ -374,6 +463,7 @@ impl Drop for GitOperationTask {
 
 /// Compat shim for the existing VCS status snapshot. Git data now comes from
 /// the Git service while SVN remains in `vcs.rs`.
+#[cfg(test)]
 pub(crate) fn apply_git_statuses(
     entries: &mut [FileEntry],
     view_root: &Path,
@@ -487,5 +577,3 @@ mod tests {
         assert!(task.is_cancelled());
     }
 }
-
-pub(crate) use external::open_log_window;

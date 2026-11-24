@@ -68,6 +68,7 @@ $summary = [ordered]@{
     uploads = @()
 }
 $failure = $null
+$kite = $null
 
 function Track-Process {
     param([System.Diagnostics.Process]$Process)
@@ -306,6 +307,14 @@ function Move-NativeCursor {
     Start-Sleep -Milliseconds 12
 }
 
+function Invoke-NativeClick {
+    param([int]$X, [int]$Y)
+    Move-NativeCursor -X $X -Y $Y
+    Start-Sleep -Milliseconds 150
+    [KiteDragNative]::mouse_event([KiteDragNative]::LeftDown, 0, 0, 0, [UIntPtr]::Zero)
+    [KiteDragNative]::mouse_event([KiteDragNative]::LeftUp, 0, 0, 0, [UIntPtr]::Zero)
+}
+
 function Invoke-NativeDrag {
     param([int]$FromX, [int]$FromY, [int]$ToX, [int]$ToY)
     Move-NativeCursor -X $FromX -Y $FromY
@@ -362,6 +371,20 @@ function Wait-ForUpload {
             }
             foreach ($file in @($record.files)) {
                 if ($file.name -eq $FileName -and $file.sha256 -eq $ExpectedHash) {
+                    $fileItems = @($record.items | Where-Object {
+                        $_.kind -eq "file" -and $_.hasFile -eq $true
+                    })
+                    if ($fileItems.Count -eq 0) {
+                        $itemSummary = @($record.items) | ConvertTo-Json -Compress
+                        return [pscustomobject]@{
+                            contract_error = "$Browser exposed the accepted drop without a file DataTransferItem: $itemSummary"
+                        }
+                    }
+                    if (@($record.types) -notcontains "Files") {
+                        return [pscustomobject]@{
+                            contract_error = "$Browser did not advertise Files during drop: $(@($record.types) -join ', ')"
+                        }
+                    }
                     return $record
                 }
             }
@@ -408,9 +431,21 @@ function Test-BrowserUpload {
         } else {
             $kiteWindow = [System.Windows.Automation.AutomationElement]::FromHandle($KiteHandle)
             $rect = $kiteWindow.Current.BoundingRectangle
-            # The E2E directory contains one file in the rightmost active column.
-            $fromX = [int]($rect.Left + ($rect.Width * 0.75))
             $columnHeaderBottom = Find-ColumnHeaderBottom -ProcessId $KiteProcess.Id
+            $primerY = if ($null -ne $columnHeaderBottom) {
+                [int]($columnHeaderBottom + 15)
+            } else {
+                [int]($rect.Top + 178)
+            }
+            # Focusing a column can reflow the column strip. Establish that layout first,
+            # then drag from the stable file column before invoking the actual gesture.
+            Invoke-NativeClick -X ([int]($rect.Left + ($rect.Width * 0.75))) -Y $primerY
+            Start-Sleep -Milliseconds 700
+            $kiteWindow = [System.Windows.Automation.AutomationElement]::FromHandle($KiteHandle)
+            $rect = $kiteWindow.Current.BoundingRectangle
+            $columnHeaderBottom = Find-ColumnHeaderBottom -ProcessId $KiteProcess.Id
+            # After focus, the current file column sits between the sidebar and preview pane.
+            $fromX = [int]($rect.Left + ($rect.Width * 0.45))
             if ($null -ne $columnHeaderBottom) {
                 # The first file row follows the 32 px column header and 30 px row.
                 $fromY = [int]($columnHeaderBottom + 15)
@@ -426,6 +461,9 @@ function Test-BrowserUpload {
         $record = Wait-ForUpload -Browser $Name -FileName $FileName -ExpectedHash $ExpectedHash -KiteProcess $KiteProcess
         if ($record.PSObject.Properties.Name -contains "upload_error") {
             throw "$Name reported upload error: $($record.upload_error)"
+        }
+        if ($record.PSObject.Properties.Name -contains "contract_error") {
+            throw "$Name drag contract failed: $($record.contract_error)"
         }
         Write-Host "$Name upload verified: $($record.files[0].name) ($($record.files[0].size) bytes)"
         return $record

@@ -15,6 +15,7 @@ use crate::context_menu::{
     show_properties,
 };
 use crate::devices::{DeviceSnapshot, PortableDevice, StorageVolume, VolumeKind};
+use crate::diff_viewer_window;
 use crate::favorites::{self as favorites_store, FavoriteEntryDto};
 use crate::file_clipboard::{self, ClipboardMode, FileClipboard};
 use crate::fs::{
@@ -22,7 +23,10 @@ use crate::fs::{
     format_size, load_directory, open_file, recycle_entry, rename_entry, search_directory,
     sort_entries, transfer_entry, validate_name, worse_status,
 };
-use crate::git_client_window::open_git_client_window;
+use crate::git_branches::GitHeadSummary;
+use crate::git_branches_window;
+use crate::git_client_window;
+use crate::git_log_window;
 use crate::global_search_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
@@ -42,7 +46,7 @@ use crate::vcs::{
 };
 use crate::workspace_window::WorkspaceWindow;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{SelectableText, TextSelectionHandle};
+use gpui_kit::base::{Selectable as _, SelectableText, TextSelectionHandle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -58,10 +62,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
+use kite_core::diff::DiffEndpoint;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
-    GitChangeCounts, GitDiffLine, GitDiffLineKind, GitPathSummary, GitService, git_file_diff,
-    git_path_summary,
+    GitChangeCounts, GitPathSummary, GitService, git_path_summary, git_repository_root,
 };
 pub(crate) use kite_core::preview::read_log_preview;
 use kite_core::preview::{PreviewImageData, load_image_preview};
@@ -179,12 +183,206 @@ enum ModalKind {
 
     GitCommit(PathBuf),
     SvnCommit(PathBuf),
+    GitUsername(GitNetworkRequest),
+    GitPassword {
+        request: GitNetworkRequest,
+        username: String,
+    },
 }
 
 struct ModalState {
     kind: ModalKind,
     input: Entity<InputState>,
     _subscription: Subscription,
+}
+
+#[derive(Clone)]
+enum GitOperationCommand {
+    Fetch {
+        path: PathBuf,
+        all_remotes: bool,
+    },
+    Pull {
+        path: PathBuf,
+        options: kite_core::git::remote::GitPullOptions,
+    },
+    Push {
+        path: PathBuf,
+        options: kite_core::git::remote::GitPushOptions,
+    },
+    Clone {
+        url: String,
+        target: PathBuf,
+        shallow_depth: Option<u32>,
+    },
+    PullThenPush {
+        path: PathBuf,
+        pull: kite_core::git::remote::GitPullOptions,
+        push: kite_core::git::remote::GitPushOptions,
+    },
+}
+
+impl GitOperationCommand {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Fetch { .. } => "获取远程更新",
+            Self::Pull { .. } | Self::PullThenPush { .. } => "拉取远程更新",
+            Self::Push { .. } => "推送提交",
+            Self::Clone { .. } => "克隆仓库",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct GitNetworkRequest {
+    command: GitOperationCommand,
+    credentials: Option<kite_core::git::remote::GitCredentials>,
+}
+
+struct GitOperationOutcome {
+    message: String,
+    open_path: Option<PathBuf>,
+}
+
+impl GitNetworkRequest {
+    fn new(command: GitOperationCommand) -> Self {
+        Self {
+            command,
+            credentials: None,
+        }
+    }
+
+    fn with_credentials(mut self, username: String, password: String) -> Self {
+        self.credentials = Some(kite_core::git::remote::GitCredentials { username, password });
+        self
+    }
+
+    fn execute(
+        &self,
+        monitor: &kite_core::git::remote::GitOperationMonitor,
+    ) -> Result<GitOperationOutcome, kite_core::git::remote::GitFailure> {
+        use kite_core::git::remote::{self as git_remote, GitFetchOptions};
+        let credentials = self.credentials.as_ref();
+        match &self.command {
+            GitOperationCommand::Fetch { path, all_remotes } => {
+                let message = git_remote::fetch(
+                    path,
+                    &GitFetchOptions {
+                        remote: None,
+                        all_remotes: *all_remotes,
+                        prune: true,
+                    },
+                    credentials,
+                    monitor,
+                )?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+            GitOperationCommand::Pull { path, options } => {
+                let message = git_remote::pull(path, options, credentials, monitor)?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+            GitOperationCommand::Push { path, options } => {
+                let message = git_remote::push(path, options, credentials, monitor)?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+            GitOperationCommand::Clone {
+                url,
+                target,
+                shallow_depth,
+            } => {
+                let result = git_remote::clone_repository(
+                    url,
+                    target,
+                    &git_remote::GitCloneOptions {
+                        shallow_depth: *shallow_depth,
+                    },
+                    credentials,
+                    monitor,
+                )?;
+                Ok(GitOperationOutcome {
+                    message: format!("已克隆到 {}", result.path.display()),
+                    open_path: Some(result.path),
+                })
+            }
+            GitOperationCommand::PullThenPush { path, pull, push } => {
+                git_remote::pull(path, pull, credentials, monitor)?;
+                let message = git_remote::push(path, push, credentials, monitor)?;
+                Ok(GitOperationOutcome {
+                    message,
+                    open_path: None,
+                })
+            }
+        }
+    }
+}
+
+struct ActiveGitOperation {
+    label: SharedString,
+    monitor: Arc<kite_core::git::remote::GitOperationMonitor>,
+    progress: kite_core::git::remote::GitOperationProgress,
+    _task: Task<()>,
+}
+
+struct CloneCleanupPrompt {
+    partial_path: PathBuf,
+    target: PathBuf,
+}
+
+struct GitRecoveryPrompt {
+    path: PathBuf,
+    push: kite_core::git::remote::GitPushOptions,
+    credentials: Option<kite_core::git::remote::GitCredentials>,
+}
+
+struct GitPushDialogState {
+    path: PathBuf,
+    remote_input: Entity<InputState>,
+    branch_input: Entity<InputState>,
+    preview: Option<kite_core::git::remote::GitPushPreview>,
+    selected_commit: Option<usize>,
+    files: Vec<kite_core::git::remote::GitFileChange>,
+    include_tags: bool,
+    force_with_lease: bool,
+    loading: bool,
+    error: Option<SharedString>,
+    _preview_task: Task<()>,
+    _files_task: Task<()>,
+}
+
+struct GitCloneDialogState {
+    directory: PathBuf,
+    url_input: Entity<InputState>,
+    target_input: Entity<InputState>,
+    depth_input: Entity<InputState>,
+    shallow: bool,
+    error: Option<SharedString>,
+}
+
+struct GitRemotesDialogState {
+    path: PathBuf,
+    remotes: Vec<kite_core::git::remote::GitRemote>,
+    name_input: Entity<InputState>,
+    fetch_url_input: Entity<InputState>,
+    push_url_input: Entity<InputState>,
+    selected: Option<String>,
+    loading: bool,
+    error: Option<SharedString>,
+    _task: Task<()>,
+}
+
+enum GitDialogState {
+    Push(GitPushDialogState),
+    Clone(GitCloneDialogState),
+    Remotes(GitRemotesDialogState),
 }
 
 #[derive(Clone)]
@@ -295,13 +493,6 @@ impl Render for KiteFileDragPreview {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct ColumnSelection {
-    selected_path: Option<PathBuf>,
-    selected_paths: Vec<PathBuf>,
-    anchor_path: Option<PathBuf>,
-}
-
 #[derive(Clone)]
 struct ColumnPane {
     path: PathBuf,
@@ -317,11 +508,6 @@ struct ColumnPane {
     collapsed_groups: BTreeSet<String>,
     search_query: Option<String>,
     search_truncated: bool,
-    /// Results came from the local listing, not the recursive walk.
-    search_preview: bool,
-    /// Selection from before the search started; restored when it ends so a
-    /// query that hides the selected file does not lose it.
-    pre_search_selection: Option<ColumnSelection>,
     loading: bool,
     skipped: usize,
     git_available: bool,
@@ -352,8 +538,6 @@ impl ColumnPane {
             collapsed_groups: rule.collapsed_groups,
             search_query: None,
             search_truncated: false,
-            search_preview: false,
-            pre_search_selection: None,
             loading,
             skipped,
             git_available,
@@ -376,10 +560,7 @@ impl ColumnPane {
             .filter(|entry| self.filter.matches(entry))
             .cloned()
             .collect::<Vec<_>>();
-        // Search results arrive ranked by relevance; keep that order.
-        if self.search_entries.is_none() {
-            sort_entries(&mut entries, self.sort);
-        }
+        sort_entries(&mut entries, self.sort);
         self.entries = entries;
         self.selected_paths.retain(|selected| {
             self.entries
@@ -512,8 +693,6 @@ impl ColumnPane {
         self.search_entries = None;
         self.search_query = None;
         self.search_truncated = false;
-        self.search_preview = false;
-        self.pre_search_selection = None;
         self.skipped = skipped;
         self.loading = false;
         self.refresh_view();
@@ -538,58 +717,17 @@ impl ColumnPane {
     }
 
     fn set_search_results(&mut self, query: String, entries: Vec<FileEntry>, truncated: bool) {
-        self.remember_pre_search_selection();
         self.search_entries = Some(entries);
         self.search_query = Some(query);
         self.search_truncated = truncated;
-        self.search_preview = false;
-        self.refresh_view();
-    }
-
-    fn set_search_preview(&mut self, query: String, mut entries: Vec<FileEntry>) {
-        self.remember_pre_search_selection();
-        sort_entries(&mut entries, self.sort);
-        self.search_entries = Some(entries);
-        self.search_query = Some(query);
-        self.search_truncated = false;
-        self.search_preview = true;
         self.refresh_view();
     }
 
     fn clear_search_results(&mut self) {
-        let was_searching = self.search_entries.is_some();
         self.search_entries = None;
         self.search_query = None;
         self.search_truncated = false;
-        self.search_preview = false;
-        if let Some(saved) = self.pre_search_selection.take()
-            && was_searching
-        {
-            self.selected_path = saved.selected_path;
-            self.selected_paths = saved.selected_paths;
-            self.selection_anchor_path = saved.anchor_path;
-        }
         self.refresh_view();
-    }
-
-    /// Captures the selection the first time results replace the listing.
-    fn remember_pre_search_selection(&mut self) {
-        if self.search_entries.is_none() && self.pre_search_selection.is_none() {
-            self.pre_search_selection = Some(ColumnSelection {
-                selected_path: self.selected_path.clone(),
-                selected_paths: self.selected_paths.clone(),
-                anchor_path: self.selection_anchor_path.clone(),
-            });
-        }
-    }
-
-    #[cfg(test)]
-    fn first_search_row_index(&self) -> Option<usize> {
-        let first_match = self.entries.first()?.path.as_path();
-        self.display_rows().iter().position(|row| match row {
-            ColumnDisplayRow::Entry(entry) => same_path(&entry.path, first_match),
-            ColumnDisplayRow::Group { .. } => false,
-        })
     }
 
     fn display_rows(&self) -> Vec<ColumnDisplayRow> {
@@ -611,10 +749,7 @@ impl ColumnPane {
 
         let mut rows = Vec::new();
         for ((_, label), mut entries) in groups {
-            // Search results arrive ranked; keep that order inside each group.
-            if self.search_entries.is_none() {
-                sort_entries(&mut entries, self.sort);
-            }
+            sort_entries(&mut entries, self.sort);
             let collapsed = self.collapsed_groups.contains(&label);
             rows.push(ColumnDisplayRow::Group {
                 label: SharedString::from(label),
@@ -857,8 +992,6 @@ struct ColumnGitPreview {
     path: PathBuf,
     summary: Option<GitPathSummary>,
     loading: bool,
-    diff_visible: bool,
-    diff: Option<Result<Arc<Vec<GitDiffLine>>, SharedString>>,
 }
 
 enum PreviewScrollbar {
@@ -930,6 +1063,9 @@ pub struct KiteApp {
     _search_task: Task<()>,
     _column_search_task: Task<()>,
     _vcs_task: Task<()>,
+    git_head: Option<GitHeadSummary>,
+    pending_git_refresh: bool,
+    pending_git_open: Option<PathBuf>,
     view_mode: ViewMode,
     show_path_bar: bool,
     show_sidebar: bool,
@@ -946,10 +1082,6 @@ pub struct KiteApp {
     column_scroll: ScrollHandle,
     column_vertical_scrolls: Vec<ColumnListScroll>,
     column_scroll_pending: bool,
-    /// Column to bring into view on the next frame, used when search opens.
-    column_scroll_to_column: Option<usize>,
-    /// Row to reveal in the search column after keyboard selection.
-    column_search_scroll_target: Option<(PathBuf, usize)>,
     column_preview: Option<ColumnPreviewState>,
     pending_file_selection: Option<PathBuf>,
     preview_generation: u64,
@@ -966,6 +1098,11 @@ pub struct KiteApp {
     _column_refresh_task: Task<()>,
     column_refresh_generation: u64,
     _device_task: Task<()>,
+    _git_auto_fetch_task: Task<()>,
+    git_dialog: Option<GitDialogState>,
+    active_git_operation: Option<ActiveGitOperation>,
+    clone_cleanup_prompt: Option<CloneCleanupPrompt>,
+    git_recovery_prompt: Option<GitRecoveryPrompt>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1145,16 +1282,17 @@ impl KiteApp {
             &column_search_input,
             window,
             |this: &mut Self, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { secondary, .. } => {
+                InputEvent::PressEnter { .. } => {
                     let value = this.column_search_input.read(cx).value().to_string();
-                    if !secondary && this.activate_column_search_selection(window, cx) {
-                        return;
-                    }
-                    this.start_column_search(value, Duration::ZERO, window, cx);
+                    this.submit_column_search(value, window, cx);
                 }
                 InputEvent::Change => {
                     let value = this.column_search_input.read(cx).value().to_string();
-                    this.apply_column_search_input(value, window, cx);
+                    if value.trim().is_empty() {
+                        this.clear_column_search_results(window, cx);
+                    } else {
+                        this.schedule_column_search(value, window, cx);
+                    }
                 }
                 _ => {}
             },
@@ -1199,6 +1337,9 @@ impl KiteApp {
             _search_task: Task::ready(()),
             _column_search_task: Task::ready(()),
             _vcs_task: Task::ready(()),
+            git_head: None,
+            pending_git_refresh: false,
+            pending_git_open: None,
             view_mode,
             show_path_bar,
             show_sidebar: ui_preferences.sidebar_visible,
@@ -1215,8 +1356,6 @@ impl KiteApp {
             column_scroll: ScrollHandle::new(),
             column_vertical_scrolls: Vec::new(),
             column_scroll_pending: false,
-            column_scroll_to_column: None,
-            column_search_scroll_target: None,
             column_preview: None,
             pending_file_selection: initial_file.clone(),
             preview_generation: 0,
@@ -1233,6 +1372,11 @@ impl KiteApp {
             _column_refresh_task: Task::ready(()),
             column_refresh_generation: 0,
             _device_task: Task::ready(()),
+            _git_auto_fetch_task: Task::ready(()),
+            git_dialog: None,
+            active_git_operation: None,
+            clone_cleanup_prompt: None,
+            git_recovery_prompt: None,
             _subscriptions: vec![
                 address_subscription,
                 search_subscription,
@@ -1242,6 +1386,11 @@ impl KiteApp {
         };
         app.start_device_watcher(cx);
         app.start_directory_watcher(cx);
+        app.start_git_auto_fetch(
+            ui_preferences.git_auto_fetch,
+            ui_preferences.git_auto_fetch_minutes,
+            cx,
+        );
         app.request_load_with_file_selection(
             home,
             NavigationIntent::Initial,
@@ -1264,7 +1413,7 @@ impl KiteApp {
     pub(crate) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
         self.show_preview = !self.show_preview;
         if self.show_preview {
-            if let Some((_, entry)) = self.preview_target() {
+            if let Some(entry) = self.selected_last_column_file() {
                 self.start_column_preview(entry, cx);
             }
         } else {
@@ -1459,7 +1608,7 @@ impl KiteApp {
         self.clear_hidden_column_selection();
         if self.show_preview {
             self.clear_column_preview();
-            if let Some((_, entry)) = self.preview_target() {
+            if let Some(entry) = self.selected_last_column_file() {
                 self.start_column_preview(entry, cx);
             }
         }
@@ -1488,28 +1637,7 @@ impl KiteApp {
             return false;
         }
         self.column_panes.truncate(keep);
-        self.drop_search_for_removed_column();
         true
-    }
-
-    /// Clears search state when the column that hosted it was closed.
-    fn drop_search_for_removed_column(&mut self) {
-        let Some(search_path) = self.column_search_path.as_ref() else {
-            return;
-        };
-        if self
-            .column_panes
-            .iter()
-            .any(|pane| same_path(&pane.path, search_path))
-        {
-            return;
-        }
-        self.cancel_column_search_task();
-        self.column_search_path = None;
-        for pane in &mut self.column_panes {
-            pane.clear_search_results();
-        }
-        self.clear_hidden_column_selection();
     }
 
     fn apply_device_snapshot(&mut self, snapshot: DeviceSnapshot, cx: &mut Context<Self>) {
@@ -1561,7 +1689,18 @@ impl KiteApp {
             KeyBinding::new("delete", RecycleSelection, Some("Kite")),
             KeyBinding::new("enter", OpenSelection, Some("Kite")),
             KeyBinding::new("escape", ClearSearchOverlay, Some("Kite")),
+            KeyBinding::new("secondary-shift-r", GitClientRefresh, Some("GitClient")),
+            KeyBinding::new("secondary-shift-f", GitClientFetch, Some("GitClient")),
+            KeyBinding::new("secondary-shift-p", GitClientPull, Some("GitClient")),
+            KeyBinding::new("secondary-shift-k", GitClientPush, Some("GitClient")),
+            KeyBinding::new("secondary-k", GitClientCommit, Some("GitClient")),
+            KeyBinding::new("secondary-alt-s", GitClientStash, Some("GitClient")),
+            KeyBinding::new("secondary-j", GitClientToggleConsole, Some("GitClient")),
+            KeyBinding::new("f1", GitClientShowShortcuts, Some("GitClient")),
+            KeyBinding::new("escape", GitClientDismiss, Some("GitClient")),
             KeyBinding::new("secondary-s", SaveEditor, Some("KiteEditor")),
+            KeyBinding::new("f7", DiffNextChange, Some("KiteDiff")),
+            KeyBinding::new("shift-f7", DiffPreviousChange, Some("KiteDiff")),
         ]);
     }
     pub fn install_menus(cx: &mut App) {
@@ -1577,8 +1716,8 @@ impl KiteApp {
                 MenuItem::action("聚焦路径栏", FocusAddress),
                 MenuItem::separator(),
                 MenuItem::action("全局搜索…", OpenGlobalSearch),
-                MenuItem::action("打开 Git 客户端", OpenGitClient),
             ]),
+            Menu::new("Git").items([MenuItem::action("打开 Git 客户端…", OpenGitClient)]),
             Menu::new("显示").items([
                 MenuItem::action("列表视图", ShowListView),
                 MenuItem::action("分栏视图", ShowColumnsView),
@@ -1917,21 +2056,6 @@ impl KiteApp {
         self.error = None;
         if let Some(search) = self.active_search.clone() {
             self.start_search(search.query, window, cx);
-        } else if self.column_search_path.is_some() {
-            // File operations call refresh; rerun the active query so the
-            // result list reflects the new directory contents.
-            let query = self.column_search_input.read(cx).value().to_string();
-            if query.trim().is_empty() {
-                self.close_column_search(window, cx);
-                self.request_load(
-                    self.current_dir.clone(),
-                    NavigationIntent::Refresh,
-                    window,
-                    cx,
-                );
-            } else {
-                self.start_column_search(query, Duration::ZERO, window, cx);
-            }
         } else {
             self.request_load(
                 self.current_dir.clone(),
@@ -1987,7 +2111,7 @@ impl KiteApp {
             self.column_search_input.update(cx, |input, cx| {
                 input.set_value(query.clone(), window, cx);
             });
-            self.apply_column_search_input(query, window, cx);
+            self.schedule_column_search(query, window, cx);
         }
         let search_input = self.column_search_input.clone();
         window.defer(cx, move |window, cx| {
@@ -2038,13 +2162,7 @@ impl KiteApp {
         }
 
         self.cancel_column_search_task();
-        let index = self
-            .column_panes
-            .iter()
-            .position(|pane| same_path(&pane.path, &path));
         self.column_search_path = Some(path);
-        self.column_search_scroll_target = None;
-        self.column_scroll_to_column = index;
         for pane in &mut self.column_panes {
             pane.clear_search_results();
         }
@@ -2055,6 +2173,10 @@ impl KiteApp {
         cx.notify();
     }
 
+    fn submit_column_search(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_column_search(query, Duration::ZERO, window, cx);
+    }
+
     fn schedule_column_search(
         &mut self,
         query: String,
@@ -2062,132 +2184,6 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         self.start_column_search(query, COLUMN_SEARCH_DEBOUNCE, window, cx);
-    }
-
-    fn apply_column_search_input(
-        &mut self,
-        value: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if value.trim().is_empty() {
-            self.clear_column_search_results(window, cx);
-        } else if !self.preview_column_search(&value, cx) {
-            self.schedule_column_search(value, window, cx);
-        }
-    }
-
-    /// Applies local results before the debounced recursive walk runs.
-    ///
-    /// Returns `true` when the previous complete result set already contains
-    /// every possible match, so the walk can be skipped entirely.
-    fn preview_column_search(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
-        let query = query.trim().to_string();
-        if query.is_empty() {
-            return false;
-        }
-        let Some(column) = self.column_search_root_index() else {
-            return false;
-        };
-        let query_lower = query.to_lowercase();
-        let pane = &mut self.column_panes[column];
-        let narrowing = !pane.search_preview
-            && pane
-                .search_query
-                .as_deref()
-                .is_some_and(|previous| search_query_narrows(previous, &query));
-
-        let complete;
-        if narrowing {
-            complete = !pane.search_truncated;
-            let narrowed =
-                narrow_search_entries(pane.search_entries.as_deref().unwrap_or_default(), &query);
-            pane.set_search_results(query, narrowed, !complete);
-        } else if pane.search_entries.is_some() {
-            // Keep the previous list on screen while the walk for the new
-            // query runs. Replacing it with directory-only matches on every
-            // keystroke makes the list shrink and grow, which reads as jitter.
-            complete = false;
-        } else {
-            complete = false;
-            let direct = pane
-                .directory_entries
-                .iter()
-                .filter(|entry| entry.name.to_lowercase().contains(&query_lower))
-                .cloned()
-                .collect::<Vec<_>>();
-            pane.set_search_preview(query, direct);
-        }
-        if complete {
-            self.cancel_column_search_task();
-        }
-        self.clear_hidden_column_selection();
-        cx.notify();
-        complete
-    }
-
-    /// Opens the highlighted search result, or the first result when nothing is
-    /// highlighted. Returns `false` while the search is still running or empty.
-    fn activate_column_search_selection(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.column_search_loading {
-            return false;
-        }
-        let Some(column) = self.column_search_root_index() else {
-            return false;
-        };
-        let entry = {
-            let pane = &self.column_panes[column];
-            pane.selected_path
-                .as_ref()
-                .and_then(|selected| {
-                    pane.entries
-                        .iter()
-                        .find(|entry| same_path(&entry.path, selected))
-                })
-                .or_else(|| pane.entries.first())
-                .cloned()
-        };
-        let Some(entry) = entry else {
-            return false;
-        };
-        self.open_entry(entry, window, cx);
-        true
-    }
-
-    fn move_column_search_selection(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
-        let Some(column) = self.column_search_root_index() else {
-            return false;
-        };
-        let (entry_rows, current_row, path) = {
-            let pane = &self.column_panes[column];
-            let rows = pane.display_rows();
-            let entry_rows = rows
-                .iter()
-                .enumerate()
-                .filter_map(|(index, row)| {
-                    matches!(row, ColumnDisplayRow::Entry(_)).then_some(index)
-                })
-                .collect::<Vec<_>>();
-            let current_row = pane.selected_path.as_ref().and_then(|selected| {
-                rows.iter().position(|row| {
-                    matches!(
-                        row,
-                        ColumnDisplayRow::Entry(entry) if same_path(&entry.path, selected)
-                    )
-                })
-            });
-            (entry_rows, current_row, pane.path.clone())
-        };
-        let Some(row) = entry_row_step(&entry_rows, current_row, forward) else {
-            return false;
-        };
-        self.select_column_entry(column, row, cx);
-        self.column_search_scroll_target = Some((path, row));
-        true
     }
 
     fn start_column_search(
@@ -2294,11 +2290,6 @@ impl KiteApp {
     fn close_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_column_search_results(window, cx);
         self.column_search_path = None;
-        // The restored selection may point at a file again.
-        self.sync_column_preview(cx);
-        // Return keyboard focus to the column view. Without this the removed
-        // input keeps focus and typing no longer opens a search bar.
-        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -2310,39 +2301,8 @@ impl KiteApp {
         });
         if !selection_is_visible {
             self.column_selected_path = None;
-            // Keep the preview while something is still previewable; it is
-            // tied to the preview target, not to the last-clicked path.
-            if self.preview_target().is_none() {
-                self.clear_column_preview();
-            }
+            self.clear_column_preview();
         }
-    }
-
-    /// Restarts the preview for the current target if the pane is showing a
-    /// different file or nothing at all.
-    fn sync_column_preview(&mut self, cx: &mut Context<Self>) {
-        if !self.show_preview {
-            return;
-        }
-        match self.preview_target() {
-            Some((_, entry)) => {
-                let current = self
-                    .column_preview
-                    .as_ref()
-                    .is_some_and(|preview| same_path(&preview.path, &entry.path));
-                if !current {
-                    self.start_column_preview(entry, cx);
-                }
-            }
-            None => self.clear_column_preview(),
-        }
-    }
-
-    fn column_search_root_index(&self) -> Option<usize> {
-        let root = self.column_search_path.as_ref()?;
-        self.column_panes
-            .iter()
-            .position(|pane| same_path(&pane.path, root))
     }
 
     fn on_column_pane_action(
@@ -2520,24 +2480,86 @@ impl KiteApp {
     fn invalidate_vcs(&mut self) {
         self.vcs_generation = self.vcs_generation.wrapping_add(1);
         self._vcs_task = Task::ready(());
+        self.git_head = None;
+    }
+
+    fn start_git_auto_fetch(
+        &mut self,
+        enabled: bool,
+        interval_minutes: u32,
+        cx: &mut Context<Self>,
+    ) {
+        self._git_auto_fetch_task = Task::ready(());
+        if !enabled {
+            return;
+        }
+        let interval = Duration::from_secs(u64::from(interval_minutes.clamp(5, 240)) * 60);
+        self._git_auto_fetch_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(interval).await;
+                let Ok(path) = this.update(cx, |this, _| {
+                    this.active_git_operation
+                        .is_none()
+                        .then(|| this.current_dir.clone())
+                }) else {
+                    return;
+                };
+                let Some(path) = path else {
+                    continue;
+                };
+                let fetched = cx
+                    .background_spawn(async move {
+                        let repository = kite_core::git::remote::repository(&path).ok()?;
+                        let monitor = kite_core::git::remote::GitOperationMonitor::new();
+                        kite_core::git::remote::fetch(
+                            &repository.root,
+                            &kite_core::git::remote::GitFetchOptions {
+                                remote: None,
+                                all_remotes: false,
+                                prune: true,
+                            },
+                            None,
+                            &monitor,
+                        )
+                        .ok()
+                    })
+                    .await
+                    .is_some();
+                if fetched {
+                    let _ = this.update(cx, |this, cx| {
+                        this.invalidate_vcs();
+                        this.refresh_vcs_statuses(this.current_dir.clone(), cx);
+                    });
+                }
+            }
+        });
     }
 
     fn refresh_vcs_statuses(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.vcs_generation = self.vcs_generation.wrapping_add(1);
         if shell_fs::is_shell_namespace_path(&root) {
             self._vcs_task = Task::ready(());
+            self.git_head = None;
             return;
         }
         let generation = self.vcs_generation;
         let status_root = root.clone();
+        let head_root = root.clone();
         self._vcs_task = cx.spawn(async move |this, cx| {
-            let snapshot = cx
-                .background_spawn(async move { load_vcs_snapshot(&status_root) })
+            let (snapshot, git_head) = cx
+                .background_spawn(async move {
+                    let snapshot = load_vcs_snapshot(&status_root);
+                    let git_head = crate::git_branches::git_head_summary(&head_root)
+                        .ok()
+                        .flatten();
+                    (snapshot, git_head)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.vcs_generation != generation {
                     return;
                 }
+                this.git_head = git_head;
                 this.table.update(cx, |state, cx| {
                     state.delegate_mut().apply_vcs_statuses(&root, &snapshot);
                     state.refresh(cx);
@@ -3499,11 +3521,47 @@ impl KiteApp {
         cx: &mut Context<Self>,
     ) {
         match command {
-            VcsMenuCommand::GitClient => {
-                match open_git_client_window(path, cx) {
+            VcsMenuCommand::GitOpenClient => self.open_git_client_at_path(path, window, cx),
+            VcsMenuCommand::GitAdd => {
+                self.run_vcs_task(VcsTool::Git, VcsOperation::Add, path, window, cx)
+            }
+            VcsMenuCommand::GitUnstage => {
+                self.run_vcs_task(VcsTool::Git, VcsOperation::Unstage, path, window, cx)
+            }
+            VcsMenuCommand::GitCommit => self.begin_vcs_commit(VcsTool::Git, path, window, cx),
+            VcsMenuCommand::GitPull => self.begin_git_pull(path, window, cx),
+            VcsMenuCommand::GitPush => self.open_git_push_dialog(path, window, cx),
+            VcsMenuCommand::GitFetch => self.start_git_network(
+                GitNetworkRequest::new(GitOperationCommand::Fetch {
+                    path,
+                    all_remotes: false,
+                }),
+                window,
+                cx,
+            ),
+            VcsMenuCommand::GitFetchAll => self.start_git_network(
+                GitNetworkRequest::new(GitOperationCommand::Fetch {
+                    path,
+                    all_remotes: true,
+                }),
+                window,
+                cx,
+            ),
+            VcsMenuCommand::GitManageRemotes => self.open_git_remotes_dialog(path, window, cx),
+            VcsMenuCommand::GitClone => {
+                self.open_git_clone_dialog(working_directory_for_path(&path), window, cx)
+            }
+            VcsMenuCommand::GitInit => {
+                self.initialize_git_repository(working_directory_for_path(&path), window, cx)
+            }
+            VcsMenuCommand::GitDiff => {
+                self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
+            }
+            VcsMenuCommand::GitLog => {
+                match git_log_window::open_git_log_window(path, cx) {
                     Ok(()) => {
                         self.error = None;
-                        self.notice = Some("已打开 Git 客户端窗口".into());
+                        self.notice = Some("已打开提交历史窗口".into());
                     }
                     Err(error) => {
                         self.notice = None;
@@ -3512,26 +3570,19 @@ impl KiteApp {
                 }
                 cx.notify();
             }
-            VcsMenuCommand::GitAdd => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Add, path, window, cx)
+            VcsMenuCommand::GitRebase => {
+                match crate::git_rebase_window::open_git_rebase_window(path, cx) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = Some("已打开交互式 Rebase 窗口".into());
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
             }
-            VcsMenuCommand::GitUnstage => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Unstage, path, window, cx)
-            }
-            VcsMenuCommand::GitCommit => self.begin_vcs_commit(VcsTool::Git, path, window, cx),
-            VcsMenuCommand::GitPull => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Pull, path, window, cx)
-            }
-            VcsMenuCommand::GitPush => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Push, path, window, cx)
-            }
-            VcsMenuCommand::GitFetch => {
-                self.run_vcs_task(VcsTool::Git, VcsOperation::Fetch, path, window, cx)
-            }
-            VcsMenuCommand::GitDiff => {
-                self.run_vcs_query_task(VcsTool::Git, VcsQuery::Diff, path, window, cx)
-            }
-            VcsMenuCommand::GitLog => self.open_vcs_log_window_task(VcsTool::Git, path, window, cx),
             VcsMenuCommand::GitRevert => self.confirm_vcs_revert(VcsTool::Git, path, window, cx),
             VcsMenuCommand::GitClean => self.confirm_git_clean(path, window, cx),
             VcsMenuCommand::SvnUpdate => {
@@ -3573,6 +3624,7 @@ impl KiteApp {
             VcsOperation::Pull => format!("正在{}拉取…", tool.label()),
             VcsOperation::Push => format!("正在{}推送…", tool.label()),
             VcsOperation::Fetch => format!("正在{}获取…", tool.label()),
+            VcsOperation::Stash => format!("正在{}暂存…", tool.label()),
             VcsOperation::Revert => format!("正在{}还原…", tool.label()),
             VcsOperation::Clean => format!("正在{}清理…", tool.label()),
             VcsOperation::Update => format!("正在{}更新…", tool.label()),
@@ -3676,6 +3728,31 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(tool, VcsTool::Git) {
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Kite — Git 提交".into()),
+                    ..Default::default()
+                }),
+                window_bounds: Some(WindowBounds::centered(size(px(980.), px(720.)), cx)),
+                window_min_size: Some(size(px(760.), px(600.))),
+                ..Default::default()
+            };
+            match gpui_kit::open_window(options, cx, move |window, cx| {
+                cx.new(|cx| crate::git_commit_window::GitCommitWindow::new(path, window, cx))
+            }) {
+                Ok(_) => {
+                    self.error = None;
+                    self.notice = Some("Git 提交窗口已打开".into());
+                }
+                Err(error) => {
+                    self.notice = None;
+                    self.error = Some(format!("无法打开 Git 提交窗口：{error}").into());
+                }
+            }
+            cx.notify();
+            return;
+        }
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("提交说明")
@@ -3875,26 +3952,17 @@ impl KiteApp {
             return;
         };
         if !entry.is_dir() {
-            // Picking a search result must not close the columns to the right.
-            let search_here = self
-                .column_search_path
-                .as_ref()
-                .is_some_and(|path| same_path(path, &self.column_panes[column].path));
-            if !search_here {
-                self.column_panes
-                    .truncate(column_count_after_file_selection(
-                        column,
-                        self.column_panes.len(),
-                    ));
-            }
+            self.column_panes
+                .truncate(column_count_after_file_selection(
+                    column,
+                    self.column_panes.len(),
+                ));
             if self.show_preview {
                 self.start_column_preview(entry, cx);
             } else {
                 self.clear_column_preview();
             }
-            if !search_here {
-                self.column_scroll_pending = true;
-            }
+            self.column_scroll_pending = true;
         } else {
             self.clear_column_preview();
         }
@@ -3914,10 +3982,6 @@ impl KiteApp {
         // Paths without a Git status from the directory snapshot are outside a
         // work tree or ignored; skip the extra git processes for them.
         let path = entry.path.clone();
-        let keep_diff = self
-            .column_git_preview
-            .as_ref()
-            .is_some_and(|preview| preview.diff_visible && same_path(&preview.path, &path));
         if entry.git_status.is_none() && !self.git_available_for(&path) {
             self._git_preview_task = Task::ready(());
             self.column_git_preview = None;
@@ -3928,8 +3992,6 @@ impl KiteApp {
             path: path.clone(),
             summary: None,
             loading: true,
-            diff_visible: false,
-            diff: None,
         });
         self._git_preview_task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PREVIEW_LOAD_DEBOUNCE).await;
@@ -3945,9 +4007,6 @@ impl KiteApp {
                     preview.loading = false;
                     preview.summary = summary;
                 }
-                if keep_diff {
-                    this.toggle_column_git_diff(cx);
-                }
                 cx.notify();
             });
         });
@@ -3960,35 +4019,6 @@ impl KiteApp {
         self.column_panes
             .iter()
             .any(|pane| pane.git_available && same_path(&pane.path, parent))
-    }
-
-    fn toggle_column_git_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(preview) = self.column_git_preview.as_mut() else {
-            return;
-        };
-        preview.diff_visible = !preview.diff_visible;
-        if !preview.diff_visible || preview.diff.is_some() {
-            cx.notify();
-            return;
-        }
-        let path = preview.path.clone();
-        let generation = self.preview_generation;
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { git_file_diff(&path) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.preview_generation != generation {
-                    return;
-                }
-                if let Some(preview) = this.column_git_preview.as_mut() {
-                    preview.diff = Some(result.map(Arc::new).map_err(SharedString::from));
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
     fn start_column_preview(&mut self, entry: FileEntry, cx: &mut Context<Self>) {
@@ -4860,6 +4890,12 @@ impl KiteApp {
                 Err("请输入提交说明".to_string())
             }
             ModalKind::GitCommit(_) | ModalKind::SvnCommit(_) => Ok(()),
+            ModalKind::GitUsername(_) if value.is_empty() => Err("请输入用户名".to_string()),
+            ModalKind::GitUsername(_) => Ok(()),
+            ModalKind::GitPassword { .. } if value.is_empty() => {
+                Err("请输入密码或令牌".to_string())
+            }
+            ModalKind::GitPassword { .. } => Ok(()),
         };
         if let Err(error) = validation {
             self.error = Some(error.into());
@@ -4970,6 +5006,14 @@ impl KiteApp {
             ModalKind::SvnCommit(path) => {
                 self.close_modal(window, cx);
                 self.run_vcs_task(VcsTool::Svn, VcsOperation::Commit(value), path, window, cx);
+            }
+            ModalKind::GitUsername(request) => {
+                self.close_modal(window, cx);
+                self.begin_git_password(request, value, window, cx);
+            }
+            ModalKind::GitPassword { request, username } => {
+                self.close_modal(window, cx);
+                self.start_git_network(request.with_credentials(username, value), window, cx);
             }
         }
     }
@@ -5132,6 +5176,8 @@ impl KiteApp {
         let can_modify_current = !self.current_dir.as_os_str().is_empty();
         let has_clipboard = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let current_favorite = self.current_dir_is_favorite();
+        let git_available = self.current_git_available(cx);
+        let git_head = self.git_head.clone();
         let loading = self.loading;
         let search_expanded = self.search_visible
             || self.active_search.is_some()
@@ -5214,6 +5260,41 @@ impl KiteApp {
                         this.toggle_current_favorite(cx)
                     })),
             )
+            .when_some(git_head, |this, head| {
+                let branch = head.branch.clone().unwrap_or_else(|| {
+                    head.short_hash
+                        .map(|hash| format!("HEAD {hash}"))
+                        .unwrap_or_else(|| "分离 HEAD".to_string())
+                });
+                let label = if head.ahead > 0 || head.behind > 0 {
+                    format!("{branch}  ↑{} ↓{}", head.ahead, head.behind)
+                } else {
+                    branch
+                };
+                this.child(
+                    Button::new("git-branches")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::GitBranch)
+                        .label(label)
+                        .tooltip("分支与标签")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_git_branches_window(window, cx)
+                        })),
+                )
+            })
+            .when(git_available, |this| {
+                this.child(
+                    Button::new("open-git-client")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::GitBranch)
+                        .tooltip("打开 Git 客户端 (Ctrl+Shift+G)")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_git_client_for_current(&OpenGitClient, window, cx)
+                        })),
+                )
+            })
             .child(
                 Button::new("open-workspace-editor")
                     .ghost()
@@ -5350,6 +5431,107 @@ impl KiteApp {
         toolbar.into_any_element()
     }
 
+    fn current_git_available(&self, cx: &App) -> bool {
+        if self.view_mode == ViewMode::Columns && self.active_search.is_none() {
+            self.column_panes
+                .last()
+                .is_some_and(|pane| pane.git_available)
+        } else {
+            self.table.read(cx).delegate().git_available()
+        }
+    }
+
+    fn open_git_client_for_current(
+        &mut self,
+        _: &OpenGitClient,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self
+            .selected_entries(cx)
+            .first()
+            .map(|entry| entry.path.clone())
+            .unwrap_or_else(|| self.current_dir.clone());
+        self.open_git_client_at_path(path, window, cx);
+    }
+
+    fn open_git_client_at_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.notice = Some("正在查找 Git 仓库…".into());
+        self.error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { git_repository_root(&path) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Some(root)) => this.open_git_client_root(root, window, cx),
+                    Ok(None) => {
+                        this.notice = None;
+                        this.error = Some("当前项目不在 Git 仓库中".into());
+                    }
+                    Err(error) => {
+                        this.notice = None;
+                        this.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_git_client_root(
+        &mut self,
+        repository_root: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match git_client_window::open_git_client_window(repository_root, window, cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("Git 客户端已打开".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_git_branches_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(head) = self.git_head.as_ref() else {
+            self.notice = None;
+            self.error = Some("当前文件夹不在 Git 工作区中".into());
+            cx.notify();
+            return;
+        };
+        git_branches_window::open_git_branches_window(
+            cx.entity(),
+            head.repository_root.clone(),
+            cx,
+        );
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn request_git_refresh(&mut self, cx: &mut Context<Self>) {
+        self.pending_git_refresh = true;
+        self.git_head = None;
+        cx.notify();
+    }
+
+    pub(crate) fn open_git_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.pending_git_open = Some(path);
+        cx.notify();
+    }
+
     fn open_global_search(
         &mut self,
         _: &OpenGlobalSearch,
@@ -5408,20 +5590,6 @@ impl KiteApp {
         cx.notify();
     }
 
-    fn open_git_client(&mut self, _: &OpenGitClient, _window: &mut Window, cx: &mut Context<Self>) {
-        match open_git_client_window(self.current_dir.clone(), cx) {
-            Ok(()) => {
-                self.error = None;
-                self.notice = Some("已打开 Git 客户端窗口".into());
-            }
-            Err(error) => {
-                self.notice = None;
-                self.error = Some(error.into());
-            }
-        }
-        cx.notify();
-    }
-
     fn open_settings_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let initial_update_state = self.settings_update_state();
         match settings_window::open_settings_window(cx.entity(), initial_update_state, cx) {
@@ -5441,6 +5609,8 @@ impl KiteApp {
         preferences: UiPreferences,
         cx: &mut Context<Self>,
     ) {
+        let git_auto_fetch = preferences.git_auto_fetch;
+        let git_auto_fetch_minutes = preferences.git_auto_fetch_minutes;
         self.show_sidebar = preferences.sidebar_visible;
         self.show_preview = preferences.preview_visible;
         self.show_column_details = preferences.column_details_visible;
@@ -5448,6 +5618,7 @@ impl KiteApp {
         self.show_kind_column = preferences.kind_column_visible;
         self.show_size_column = preferences.size_column_visible;
         self.preferred_column_width = preferences.column_width;
+        self.start_git_auto_fetch(git_auto_fetch, git_auto_fetch_minutes, cx);
         cx.notify();
     }
 
@@ -6074,7 +6245,6 @@ impl KiteApp {
         let mut strip = h_flex()
             .id("column-strip")
             .size_full()
-            .relative()
             .items_stretch()
             .gap(px(COLUMN_STRIP_GAP))
             .p(px(COLUMN_STRIP_PADDING))
@@ -6113,17 +6283,10 @@ impl KiteApp {
         for index in 0..self.column_panes.len() {
             strip = strip.child(self.render_column(index, window, cx));
         }
-        if self.show_preview {
-            match self.preview_target() {
-                Some((index, entry)) if index + 1 == self.column_panes.len() => {
-                    strip = strip.child(self.render_column_preview(&entry, cx));
-                }
-                Some((index, entry)) => {
-                    let preview = self.render_column_preview(&entry, cx);
-                    strip = strip.child(Self::floating_column_preview(index, preview));
-                }
-                None => {}
-            }
+        if self.show_preview
+            && let Some(entry) = self.selected_last_column_file()
+        {
+            strip = strip.child(self.render_column_preview(&entry, cx));
         }
         let horizontal_wheel_handle = scroll_handle.clone();
         div()
@@ -6145,49 +6308,14 @@ impl KiteApp {
             .into_any_element()
     }
 
-    fn selected_column_file(&self, index: usize) -> Option<FileEntry> {
-        let pane = self.column_panes.get(index)?;
+    fn selected_last_column_file(&self) -> Option<FileEntry> {
+        let pane = self.column_panes.last()?;
         let selected = pane.selected_path.as_ref()?;
         pane.entries
             .iter()
             .find(|entry| same_path(&entry.path, selected))
             .filter(|entry| !entry.is_dir())
             .cloned()
-    }
-
-    /// The column and file to preview. A file selected in the search column
-    /// wins; otherwise the last column's selection keeps its preview, so
-    /// opening search never hides a preview that was already showing.
-    fn preview_target(&self) -> Option<(usize, FileEntry)> {
-        if let Some(index) = self.column_search_root_index()
-            && let Some(entry) = self.selected_column_file(index)
-        {
-            return Some((index, entry));
-        }
-        let last = self.column_panes.len().checked_sub(1)?;
-        self.selected_column_file(last).map(|entry| (last, entry))
-    }
-
-    /// Previews of non-last columns float above the columns to their right so
-    /// the strip keeps its width.
-    fn floating_column_preview(index: usize, content: AnyElement) -> AnyElement {
-        let left = COLUMN_STRIP_PADDING
-            + index as f32 * (COLUMN_WIDTH + COLUMN_STRIP_GAP)
-            + COLUMN_WIDTH
-            + COLUMN_STRIP_GAP;
-        div()
-            .id("column-floating-preview")
-            .absolute()
-            .left(px(left))
-            .top(px(COLUMN_STRIP_PADDING))
-            .bottom(px(COLUMN_STRIP_PADDING))
-            .w(px(PREVIEW_WIDTH))
-            .rounded_lg()
-            .shadow_lg()
-            // Swallow pointer input so clicks do not reach the covered columns.
-            .occlude()
-            .child(content)
-            .into_any_element()
     }
 
     fn render_column_preview(&mut self, entry: &FileEntry, cx: &mut Context<Self>) -> AnyElement {
@@ -6697,22 +6825,45 @@ impl KiteApp {
             );
         }
 
+        let repository_root = summary.repository_root.clone();
+        section = section.child(
+            Button::new("column-preview-git-client")
+                .ghost()
+                .compact()
+                .label("Git 客户端")
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_git_client_root(repository_root.clone(), window, cx);
+                })),
+        );
         if !summary.is_directory && !summary.ignored {
             let changed = summary.staged_status.is_some() || summary.unstaged_status.is_some();
             let path = preview.path.clone();
             let mut actions = h_flex().gap_1().flex_wrap();
             if changed {
+                let viewer_path = path.clone();
+                let viewer_old = DiffEndpoint::Revision("HEAD".to_string());
+                let viewer_new =
+                    if summary.staged_status.is_some() && summary.unstaged_status.is_none() {
+                        DiffEndpoint::Index
+                    } else {
+                        DiffEndpoint::WorkingTree
+                    };
                 actions = actions.child(
                     Button::new("column-preview-git-diff")
                         .ghost()
                         .compact()
-                        .label(if preview.diff_visible {
-                            "隐藏差异"
-                        } else {
-                            "查看差异"
-                        })
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.toggle_column_git_diff(cx);
+                        .label("Diff 查看器")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            match diff_viewer_window::open_diff_viewer_window(
+                                viewer_path.clone(),
+                                viewer_old.clone(),
+                                viewer_new.clone(),
+                                cx,
+                            ) {
+                                Ok(()) => this.error = None,
+                                Err(error) => this.error = Some(error.into()),
+                            }
+                            cx.notify();
                         })),
                 );
             }
@@ -6752,6 +6903,16 @@ impl KiteApp {
                         })),
                 );
             }
+            let commit_path = path.clone();
+            actions = actions.child(
+                Button::new("column-preview-git-commit")
+                    .ghost()
+                    .compact()
+                    .label("提交…")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.begin_vcs_commit(VcsTool::Git, commit_path.clone(), window, cx);
+                    })),
+            );
             actions = actions.child(
                 Button::new("column-preview-git-log")
                     .ghost()
@@ -6770,9 +6931,6 @@ impl KiteApp {
             section = section.child(actions);
         }
 
-        if preview.diff_visible {
-            section = section.child(render_git_diff(preview.diff.as_ref(), cx));
-        }
         section.into_any_element()
     }
 
@@ -6823,14 +6981,6 @@ impl KiteApp {
             .get(index)
             .map(|state| state.handle.clone())
             .unwrap_or_default();
-        if self
-            .column_search_scroll_target
-            .as_ref()
-            .is_some_and(|(target, _)| same_path(target, &path))
-            && let Some((_, row)) = self.column_search_scroll_target.take()
-        {
-            vertical_scroll.scroll_to_item(row, ScrollStrategy::Nearest);
-        }
         let search_open = self
             .column_search_path
             .as_ref()
@@ -6882,11 +7032,7 @@ impl KiteApp {
             cx.theme().secondary.opacity(0.72)
         };
         let empty_label = if search_query.is_some() {
-            if search_loading {
-                ""
-            } else {
-                "无搜索结果"
-            }
+            "无搜索结果"
         } else if rules.filter != ColumnFilter::All {
             "筛选后无项目"
         } else {
@@ -7020,18 +7166,9 @@ impl KiteApp {
                 Button::new(("column-search", index))
                     .ghost()
                     .compact()
-                    .toggled(search_open)
                     .icon(IconName::Search)
-                    .tooltip(if search_open {
-                        "关闭分栏搜索 (Esc)"
-                    } else {
-                        "搜索此分栏及子目录（跳过 node_modules、target 等生成目录）"
-                    })
-                    .accessibility_label(if search_open {
-                        "关闭分栏搜索"
-                    } else {
-                        "搜索此分栏及子目录"
-                    })
+                    .tooltip("搜索此分栏")
+                    .accessibility_label("搜索此分栏")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.toggle_column_search(search_path.clone(), window, cx)
                     })),
@@ -7217,77 +7354,28 @@ impl KiteApp {
                 .w_full()
                 .px_2()
                 .py_1()
-                .gap_1()
                 .items_center()
                 .bg(cx.theme().status_bar)
                 .border_b_1()
                 .border_color(border)
-                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    let modifiers = event.keystroke.modifiers;
-                    if modifiers.control || modifiers.alt || modifiers.platform {
-                        return;
-                    }
-                    match event.keystroke.key.as_str() {
-                        "down" if !modifiers.shift => {
-                            if this.move_column_search_selection(true, cx) {
-                                cx.stop_propagation();
-                            }
-                        }
-                        "up" if !modifiers.shift => {
-                            if this.move_column_search_selection(false, cx) {
-                                cx.stop_propagation();
-                            }
-                        }
-                        "escape" => {
-                            this.close_column_search(window, cx);
-                            cx.stop_propagation();
-                        }
-                        _ => {}
-                    }
-                }))
                 .child(
                     Input::new(&self.column_search_input)
-                        .aria_label("搜索当前分栏及子目录")
-                        .prefix(Icon::new(IconName::Search).size_3().text_color(
-                            if search_loading {
-                                cx.theme().accent_foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            },
-                        ))
+                        .aria_label("搜索当前分栏")
+                        .prefix(Icon::new(IconName::Search).size_3())
+                        .cleanable(true)
                         .suffix(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .when(search_query.is_some(), |this| {
-                                    this.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(if search_truncated {
-                                                format!("{entry_count}+")
-                                            } else {
-                                                entry_count.to_string()
-                                            }),
-                                    )
-                                })
-                                .child(
-                                    Button::new(("column-close-search", index))
-                                        .ghost()
-                                        .compact()
-                                        .icon(IconName::X)
-                                        .tooltip("关闭分栏搜索 (Esc)")
-                                        .accessibility_label("关闭分栏搜索")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if this.column_search_path.as_ref().is_some_and(
-                                                |active_path| {
-                                                    same_path(active_path, &close_search_path)
-                                                },
-                                            ) {
-                                                this.close_column_search(window, cx);
-                                            }
-                                        })),
-                                ),
+                            Button::new(("column-close-search", index))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::X)
+                                .tooltip("关闭分栏搜索 (Esc)")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if this.column_search_path.as_ref().is_some_and(|active_path| {
+                                        same_path(active_path, &close_search_path)
+                                    }) {
+                                        this.close_column_search(window, cx);
+                                    }
+                                })),
                         )
                         .small()
                         .flex_1()
@@ -7703,6 +7791,16 @@ impl KiteApp {
                 "输入提交说明。SVN 将提交所选路径的本地更改。",
                 "提交",
             ),
+            ModalKind::GitUsername(_) => (
+                "Git 认证",
+                "输入远程仓库的用户名。凭据只用于本次操作，不会保存。",
+                "继续",
+            ),
+            ModalKind::GitPassword { .. } => (
+                "Git 认证",
+                "输入密码或个人访问令牌。凭据只用于本次操作，不会保存。",
+                "连接",
+            ),
         };
         let input = Input::new(&modal.input)
             .aria_label(title)
@@ -7782,6 +7880,1510 @@ impl KiteApp {
                     ),
             )
             .into_any_element()
+    }
+    fn begin_git_pull(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let answers = [
+            PromptButton::ok("合并"),
+            PromptButton::new("变基"),
+            PromptButton::new("仅快进"),
+            PromptButton::cancel("取消"),
+        ];
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "选择拉取方式",
+            Some("工作区有未提交更改时会先自动暂存，并在拉取后恢复。"),
+            &answers,
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            let strategy = match choice {
+                0 => kite_core::git::remote::GitPullStrategy::Merge,
+                1 => kite_core::git::remote::GitPullStrategy::Rebase,
+                2 => kite_core::git::remote::GitPullStrategy::FastForwardOnly,
+                _ => return,
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.start_git_network(
+                    GitNetworkRequest::new(GitOperationCommand::Pull {
+                        path,
+                        options: kite_core::git::remote::GitPullOptions {
+                            strategy,
+                            auto_stash: true,
+                            remote: None,
+                            branch: None,
+                        },
+                    }),
+                    window,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn open_git_push_dialog(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let remote_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("自动选择（通常为 origin）")
+                .clean_on_escape()
+        });
+        let branch_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("自动选择当前分支")
+                .clean_on_escape()
+        });
+        self.git_dialog = Some(GitDialogState::Push(GitPushDialogState {
+            path,
+            remote_input: remote_input.clone(),
+            branch_input,
+            preview: None,
+            selected_commit: None,
+            files: Vec::new(),
+            include_tags: false,
+            force_with_lease: false,
+            loading: true,
+            error: None,
+            _preview_task: Task::ready(()),
+            _files_task: Task::ready(()),
+        }));
+        remote_input.update(cx, |input, cx| input.focus(window, cx));
+        self.refresh_git_push_preview(cx);
+        cx.notify();
+    }
+
+    fn refresh_git_push_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let remote = nonempty_input(dialog.remote_input.read(cx));
+        let branch = nonempty_input(dialog.branch_input.read(cx));
+        let include_tags = dialog.include_tags;
+        let force_with_lease = dialog.force_with_lease;
+        dialog.loading = true;
+        dialog.error = None;
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    kite_core::git::remote::push_preview(
+                        &path,
+                        &kite_core::git::remote::GitPushOptions {
+                            remote,
+                            branch,
+                            include_tags,
+                            force_with_lease,
+                            up_to_commit: None,
+                        },
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let selected_oid = {
+                    let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut() else {
+                        return;
+                    };
+                    dialog.loading = false;
+                    match result {
+                        Ok(preview) => {
+                            let selected = preview.commits.len().checked_sub(1);
+                            dialog.selected_commit = selected;
+                            let oid =
+                                selected.and_then(|index| preview.commits.get(index).cloned());
+                            dialog.preview = Some(preview);
+                            dialog.error = None;
+                            oid.map(|commit| commit.oid)
+                        }
+                        Err(error) => {
+                            dialog.preview = None;
+                            dialog.files.clear();
+                            dialog.error = Some(error.message.into());
+                            None
+                        }
+                    }
+                };
+                if let Some(oid) = selected_oid {
+                    this.load_git_commit_files(oid, cx);
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+            dialog._preview_task = task;
+        }
+    }
+
+    fn select_git_push_commit(&mut self, index: usize, cx: &mut Context<Self>) {
+        let oid = {
+            let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() else {
+                return;
+            };
+            let Some(commit) = dialog
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.commits.get(index))
+            else {
+                return;
+            };
+            let oid = commit.oid.clone();
+            dialog.selected_commit = Some(index);
+            dialog.files.clear();
+            oid
+        };
+        self.load_git_commit_files(oid, cx);
+        cx.notify();
+    }
+
+    fn load_git_commit_files(&mut self, oid: String, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let requested_oid = oid.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    kite_core::git::remote::commit_files(&path, &requested_oid)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut() else {
+                    return;
+                };
+                let still_selected = dialog
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| {
+                        dialog
+                            .selected_commit
+                            .and_then(|index| preview.commits.get(index))
+                    })
+                    .is_some_and(|commit| commit.oid == oid);
+                if still_selected {
+                    match result {
+                        Ok(files) => dialog.files = files,
+                        Err(error) => dialog.error = Some(error.message.into()),
+                    }
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+            dialog._files_task = task;
+        }
+    }
+
+    fn submit_git_push(
+        &mut self,
+        up_to_selected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let remote = nonempty_input(dialog.remote_input.read(cx));
+        let branch = nonempty_input(dialog.branch_input.read(cx));
+        let include_tags = dialog.include_tags;
+        let force_with_lease = dialog.force_with_lease;
+        let up_to_commit = up_to_selected
+            .then(|| {
+                dialog
+                    .selected_commit
+                    .and_then(|index| dialog.preview.as_ref()?.commits.get(index))
+                    .map(|commit| commit.oid.clone())
+            })
+            .flatten();
+        if up_to_selected && up_to_commit.is_none() {
+            if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("请先选择要推送到的提交".into());
+            }
+            cx.notify();
+            return;
+        }
+        if force_with_lease
+            && dialog
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.protected_branch)
+        {
+            if let Some(GitDialogState::Push(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("受保护分支不能强制推送".into());
+            }
+            cx.notify();
+            return;
+        }
+        self.git_dialog = None;
+        self.start_git_network(
+            GitNetworkRequest::new(GitOperationCommand::Push {
+                path,
+                options: kite_core::git::remote::GitPushOptions {
+                    remote,
+                    branch,
+                    include_tags,
+                    force_with_lease,
+                    up_to_commit,
+                },
+            }),
+            window,
+            cx,
+        );
+    }
+
+    fn open_git_clone_dialog(
+        &mut self,
+        directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("https://example.com/repository.git 或 SSH URL")
+                .clean_on_escape()
+        });
+        let target_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("目标目录（留空则使用仓库名称）")
+                .clean_on_escape()
+        });
+        let depth_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("1")
+                .clean_on_escape()
+        });
+        self.git_dialog = Some(GitDialogState::Clone(GitCloneDialogState {
+            directory,
+            url_input: url_input.clone(),
+            target_input,
+            depth_input,
+            shallow: false,
+            error: None,
+        }));
+        url_input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn submit_git_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Clone(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let url = dialog.url_input.read(cx).value().trim().to_string();
+        let target_value = dialog.target_input.read(cx).value().trim().to_string();
+        let directory = dialog.directory.clone();
+        let shallow = dialog.shallow;
+        let depth = if shallow {
+            dialog
+                .depth_input
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|depth| *depth > 0)
+        } else {
+            None
+        };
+        if url.is_empty() {
+            if let Some(GitDialogState::Clone(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("请输入仓库 URL".into());
+            }
+            cx.notify();
+            return;
+        }
+        if shallow && depth.is_none() {
+            if let Some(GitDialogState::Clone(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("浅克隆深度必须是大于 0 的整数".into());
+            }
+            cx.notify();
+            return;
+        }
+        let target_name = clone_target_name(&url);
+        let target = if target_value.is_empty() {
+            directory.join(target_name)
+        } else {
+            let path = PathBuf::from(target_value);
+            if path.is_absolute() {
+                path
+            } else {
+                directory.join(path)
+            }
+        };
+        self.git_dialog = None;
+        self.start_git_network(
+            GitNetworkRequest::new(GitOperationCommand::Clone {
+                url,
+                target,
+                shallow_depth: depth,
+            }),
+            window,
+            cx,
+        );
+    }
+
+    fn initialize_git_repository(
+        &mut self,
+        path: PathBuf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = None;
+        self.notice = Some("正在初始化 Git 仓库…".into());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { kite_core::git::remote::init_repository(&path) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(path) => {
+                        this.notice = Some(format!("Git 仓库已初始化：{}", path.display()).into());
+                        this.invalidate_vcs();
+                        this.refresh_vcs_statuses(this.current_dir.clone(), cx);
+                    }
+                    Err(error) => {
+                        this.notice = None;
+                        this.error = Some(error.message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_git_remotes_dialog(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("远程名称，例如 origin")
+                .clean_on_escape()
+        });
+        let fetch_url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Fetch URL")
+                .clean_on_escape()
+        });
+        let push_url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Push URL（可选）")
+                .clean_on_escape()
+        });
+        self.git_dialog = Some(GitDialogState::Remotes(GitRemotesDialogState {
+            path,
+            remotes: Vec::new(),
+            name_input: name_input.clone(),
+            fetch_url_input,
+            push_url_input,
+            selected: None,
+            loading: true,
+            error: None,
+            _task: Task::ready(()),
+        }));
+        name_input.update(cx, |input, cx| input.focus(window, cx));
+        self.reload_git_remotes(cx);
+        cx.notify();
+    }
+
+    fn reload_git_remotes(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        dialog.loading = true;
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { kite_core::git::remote::list_remotes(&path) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(GitDialogState::Remotes(dialog)) = this.git_dialog.as_mut() else {
+                    return;
+                };
+                dialog.loading = false;
+                match result {
+                    Ok(remotes) => {
+                        if dialog.selected.as_ref().is_some_and(|selected| {
+                            !remotes.iter().any(|remote| &remote.name == selected)
+                        }) {
+                            dialog.selected = None;
+                        }
+                        dialog.remotes = remotes;
+                        dialog.error = None;
+                    }
+                    Err(error) => dialog.error = Some(error.message.into()),
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog._task = task;
+        }
+    }
+
+    fn select_git_remote(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() else {
+            return;
+        };
+        let Some(remote) = dialog.remotes.iter().find(|remote| remote.name == name) else {
+            return;
+        };
+        dialog.selected = Some(remote.name.clone());
+        dialog.name_input.update(cx, |input, cx| {
+            input.set_value(remote.name.clone(), window, cx);
+        });
+        dialog.fetch_url_input.update(cx, |input, cx| {
+            input.set_value(remote.fetch_url.clone(), window, cx);
+        });
+        dialog.push_url_input.update(cx, |input, cx| {
+            input.set_value(remote.push_url.clone().unwrap_or_default(), window, cx);
+        });
+        cx.notify();
+    }
+
+    fn save_git_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let path = dialog.path.clone();
+        let selected = dialog.selected.clone();
+        let name = dialog.name_input.read(cx).value().trim().to_string();
+        let fetch_url = dialog.fetch_url_input.read(cx).value().trim().to_string();
+        let push_url = dialog.push_url_input.read(cx).value().trim().to_string();
+        if name.is_empty() || fetch_url.is_empty() {
+            if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("远程名称和 Fetch URL 不能为空".into());
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog.loading = true;
+            dialog.error = None;
+        }
+        let worker_name = name.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if let Some(old_name) = selected {
+                        if old_name != worker_name {
+                            kite_core::git::remote::rename_remote(&path, &old_name, &worker_name)?;
+                        }
+                        kite_core::git::remote::set_remote_url(
+                            &path,
+                            &worker_name,
+                            &fetch_url,
+                            (!push_url.is_empty()).then_some(push_url.as_str()),
+                        )?;
+                    } else {
+                        kite_core::git::remote::add_remote(&path, &worker_name, &fetch_url)?;
+                        if !push_url.is_empty() {
+                            kite_core::git::remote::set_remote_url(
+                                &path,
+                                &worker_name,
+                                &fetch_url,
+                                Some(&push_url),
+                            )?;
+                        }
+                    }
+                    Ok::<(), kite_core::git::remote::GitFailure>(())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(GitDialogState::Remotes(dialog)) = this.git_dialog.as_mut() {
+                    dialog.loading = false;
+                    let succeeded = result.is_ok();
+                    match result {
+                        Ok(()) => {
+                            dialog.selected = Some(name);
+                            dialog.error = None;
+                        }
+                        Err(error) => dialog.error = Some(error.message.into()),
+                    }
+                    if succeeded {
+                        this.reload_git_remotes(cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog._task = task;
+        }
+    }
+
+    fn delete_selected_git_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_ref() else {
+            return;
+        };
+        let Some(name) = dialog.selected.clone() else {
+            if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+                dialog.error = Some("请先选择一个远程".into());
+            }
+            cx.notify();
+            return;
+        };
+        let path = dialog.path.clone();
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog.loading = true;
+        }
+        let requested_name = name.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    kite_core::git::remote::remove_remote(&path, &requested_name)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(GitDialogState::Remotes(dialog)) = this.git_dialog.as_mut() {
+                    dialog.loading = false;
+                    let succeeded = result.is_ok();
+                    match result {
+                        Ok(()) => {
+                            dialog.selected = None;
+                            dialog.error = None;
+                        }
+                        Err(error) => dialog.error = Some(error.message.into()),
+                    }
+                    if succeeded {
+                        this.reload_git_remotes(cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        if let Some(GitDialogState::Remotes(dialog)) = self.git_dialog.as_mut() {
+            dialog._task = task;
+        }
+    }
+
+    fn start_git_network(
+        &mut self,
+        request: GitNetworkRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_git_operation.is_some() {
+            self.notice = Some("已有 Git 网络操作正在进行".into());
+            cx.notify();
+            return;
+        }
+        let label = request.command.label();
+        let monitor = kite_core::git::remote::GitOperationMonitor::new();
+        self.git_dialog = None;
+        self.error = None;
+        self.git_recovery_prompt = None;
+        self.notice = Some(format!("{label}…").into());
+        self.active_git_operation = Some(ActiveGitOperation {
+            label: label.into(),
+            monitor: monitor.clone(),
+            progress: monitor.snapshot(),
+            _task: Task::ready(()),
+        });
+        let finished = Arc::new(AtomicBool::new(false));
+        let observed_finished = finished.clone();
+        let progress_monitor = monitor.clone();
+        let progress_entity = cx.entity();
+        let worker_request = request.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let progress_task = cx.spawn(async move |cx| {
+                loop {
+                    let progress = progress_monitor.snapshot();
+                    progress_entity.update(cx, |this, cx| {
+                        if let Some(operation) = this.active_git_operation.as_mut() {
+                            operation.progress = progress;
+                            cx.notify();
+                        }
+                    });
+                    if observed_finished.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                }
+            });
+            let result = cx
+                .background_spawn(async move { worker_request.execute(&monitor) })
+                .await;
+            finished.store(true, Ordering::Relaxed);
+            let _ = progress_task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_git_network(result, request, window, cx);
+            });
+        });
+        if let Some(operation) = self.active_git_operation.as_mut() {
+            operation._task = task;
+        }
+        cx.notify();
+    }
+
+    fn finish_git_network(
+        &mut self,
+        result: Result<GitOperationOutcome, kite_core::git::remote::GitFailure>,
+        request: GitNetworkRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_git_operation = None;
+        match result {
+            Ok(outcome) => {
+                self.error = None;
+                self.notice = Some(outcome.message.into());
+                self.invalidate_vcs();
+                if let Some(path) = outcome.open_path {
+                    self.navigate_to(path, NavigationIntent::Refresh, window, cx);
+                } else {
+                    self.refresh_vcs_statuses(self.current_dir.clone(), cx);
+                }
+            }
+            Err(error) => match error.kind {
+                kite_core::git::remote::GitFailureKind::AuthenticationRequired => {
+                    self.notice = None;
+                    self.begin_git_credentials(request, window, cx);
+                    return;
+                }
+                kite_core::git::remote::GitFailureKind::PushRejected => {
+                    self.notice = None;
+                    if let GitOperationCommand::Push { path, options } = request.command {
+                        self.git_recovery_prompt = Some(GitRecoveryPrompt {
+                            path,
+                            push: options,
+                            credentials: request.credentials,
+                        });
+                        self.error = None;
+                    } else {
+                        self.error = Some(error.message.into());
+                    }
+                }
+                kite_core::git::remote::GitFailureKind::Cancelled => {
+                    self.notice = Some(error.message.clone().into());
+                    if let Some(partial_path) = error.partial_clone_path {
+                        let target = match &request.command {
+                            GitOperationCommand::Clone { target, .. } => Some(target.clone()),
+                            _ => None,
+                        };
+                        if let Some(target) = target {
+                            self.clone_cleanup_prompt = Some(CloneCleanupPrompt {
+                                partial_path,
+                                target,
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    self.notice = None;
+                    self.error = Some(error.message.into());
+                }
+            },
+        }
+        cx.notify();
+    }
+
+    fn cancel_git_network_operation(&mut self, cx: &mut Context<Self>) {
+        if let Some(operation) = self.active_git_operation.as_ref() {
+            operation.monitor.cancel();
+            self.notice = Some("正在取消 Git 操作…".into());
+            cx.notify();
+        }
+    }
+
+    fn resolve_clone_cleanup(&mut self, delete: bool, cx: &mut Context<Self>) {
+        let Some(prompt) = self.clone_cleanup_prompt.take() else {
+            return;
+        };
+        self.error = None;
+        self.notice = Some(if delete {
+            "正在删除未完成的克隆目录…".into()
+        } else {
+            "正在保留未完成的克隆目录…".into()
+        });
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if delete {
+                        kite_core::git::remote::delete_partial_clone(&prompt.partial_path)
+                    } else {
+                        kite_core::git::remote::adopt_partial_clone(
+                            &prompt.partial_path,
+                            &prompt.target,
+                        )
+                    }
+                    .map(|()| prompt.target)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_target) if delete => this.notice = Some("未完成的克隆目录已删除".into()),
+                    Ok(target) => {
+                        this.notice = Some(format!("已保留克隆目录：{}", target.display()).into());
+                    }
+                    Err(error) => {
+                        this.notice = None;
+                        this.error = Some(error.message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn begin_git_credentials(
+        &mut self,
+        request: GitNetworkRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("用户名")
+                .clean_on_escape()
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_modal(window, cx);
+                }
+            },
+        );
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.modal = Some(ModalState {
+            kind: ModalKind::GitUsername(request),
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn begin_git_password(
+        &mut self,
+        request: GitNetworkRequest,
+        username: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("密码或个人访问令牌")
+                .masked(true)
+                .clean_on_escape()
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_modal(window, cx);
+                }
+            },
+        );
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.modal = Some(ModalState {
+            kind: ModalKind::GitPassword { request, username },
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn handle_git_pull_recovery(
+        &mut self,
+        strategy: kite_core::git::remote::GitPullStrategy,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(recovery) = self.git_recovery_prompt.take() else {
+            return;
+        };
+        self.start_git_network(
+            GitNetworkRequest {
+                command: GitOperationCommand::PullThenPush {
+                    path: recovery.path,
+                    pull: kite_core::git::remote::GitPullOptions {
+                        strategy,
+                        auto_stash: true,
+                        remote: Some(recovery.push.remote.clone().unwrap_or_default())
+                            .filter(|remote| !remote.is_empty()),
+                        branch: Some(recovery.push.branch.clone().unwrap_or_default())
+                            .filter(|branch| !branch.is_empty()),
+                    },
+                    push: recovery.push,
+                },
+                credentials: recovery.credentials,
+            },
+            window,
+            cx,
+        );
+    }
+    fn render_git_operation_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let operation = self.active_git_operation.as_ref()?;
+        let progress = &operation.progress;
+        let fraction = progress.fraction.unwrap_or(0.0) as f32;
+        Some(
+            h_flex()
+                .h(px(46.))
+                .px_3()
+                .gap_3()
+                .items_center()
+                .bg(cx.theme().primary.opacity(0.10))
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(Icon::new(IconName::GitBranch).size_4())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().text_xs().font_medium().child(operation.label.clone()))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(progress.message.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .h(px(3.))
+                                .w_full()
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(cx.theme().border)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(fraction.clamp(0.02, 1.0)))
+                                        .bg(cx.theme().primary),
+                                ),
+                        ),
+                )
+                .child(
+                    Button::new("cancel-git-network-operation")
+                        .small()
+                        .outline()
+                        .label("取消")
+                        .disabled(progress.cancelled)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.cancel_git_network_operation(cx)
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_clone_cleanup_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let prompt = self.clone_cleanup_prompt.as_ref()?;
+        Some(
+            h_flex()
+                .min_h(px(46.))
+                .px_3()
+                .py_2()
+                .gap_3()
+                .items_center()
+                .bg(cx.theme().warning.opacity(0.12))
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(Icon::new(IconName::TriangleAlert).size_4())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child("克隆已取消。是否删除未完成的目录？")
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(prompt.partial_path.display().to_string()),
+                        ),
+                )
+                .child(
+                    Button::new("clone-cleanup-delete")
+                        .small()
+                        .danger()
+                        .label("删除")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.resolve_clone_cleanup(true, cx)
+                        })),
+                )
+                .child(
+                    Button::new("clone-cleanup-keep")
+                        .small()
+                        .outline()
+                        .label("保留")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.resolve_clone_cleanup(false, cx)
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_git_recovery_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.git_recovery_prompt.as_ref()?;
+        Some(
+            h_flex()
+                .min_h(px(46.))
+                .px_3()
+                .py_2()
+                .gap_3()
+                .items_center()
+                .bg(cx.theme().danger.opacity(0.10))
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(Icon::new(IconName::TriangleAlert).size_4())
+                .child(
+                    div()
+                        .flex_1()
+                        .child("远程包含新的提交，推送被拒绝。先整合远程历史再重试。"),
+                )
+                .child(
+                    Button::new("git-recovery-merge")
+                        .small()
+                        .outline()
+                        .label("合并后重试")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.handle_git_pull_recovery(
+                                kite_core::git::remote::GitPullStrategy::Merge,
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+                .child(
+                    Button::new("git-recovery-rebase")
+                        .small()
+                        .outline()
+                        .label("变基后重试")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.handle_git_pull_recovery(
+                                kite_core::git::remote::GitPullStrategy::Rebase,
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+                .child(
+                    Button::new("git-recovery-dismiss")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::X)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.git_recovery_prompt = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_git_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dialog) = self.git_dialog.take() else {
+            return div().into_any_element();
+        };
+        let (element, restored) = match dialog {
+            GitDialogState::Push(dialog) => {
+                let element = self.render_git_push_dialog(&dialog, cx);
+                (element, GitDialogState::Push(dialog))
+            }
+            GitDialogState::Clone(dialog) => {
+                let element = self.render_git_clone_dialog(&dialog, cx);
+                (element, GitDialogState::Clone(dialog))
+            }
+            GitDialogState::Remotes(dialog) => {
+                let element = self.render_git_remotes_dialog(&dialog, cx);
+                (element, GitDialogState::Remotes(dialog))
+            }
+        };
+        self.git_dialog = Some(restored);
+        element
+    }
+
+    fn git_dialog_shell(
+        &self,
+        title: &'static str,
+        description: &'static str,
+        body: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000a8))
+            .child(
+                v_flex()
+                    .w(px(920.))
+                    .max_w(relative(0.94))
+                    .max_h(relative(0.92))
+                    .overflow_hidden()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .shadow_lg()
+                    .child(
+                        h_flex()
+                            .items_start()
+                            .justify_between()
+                            .gap_4()
+                            .px_5()
+                            .pt_5()
+                            .pb_4()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_lg().font_semibold().child(title))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(description),
+                                    ),
+                            )
+                            .child(
+                                Button::new("close-git-dialog")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::X)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.git_dialog = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(div().flex_1().min_h_0().px_5().pb_5().child(body)),
+            )
+            .into_any_element()
+    }
+
+    fn render_git_push_dialog(
+        &mut self,
+        dialog: &GitPushDialogState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let remote = Input::new(&dialog.remote_input)
+            .aria_label("目标远程")
+            .cleanable(true)
+            .w_full();
+        let branch = Input::new(&dialog.branch_input)
+            .aria_label("目标分支")
+            .cleanable(true)
+            .w_full();
+        let preview = dialog.preview.as_ref();
+        let commits = preview.map(|preview| &preview.commits[..]).unwrap_or(&[]);
+        let protected = preview.is_some_and(|preview| preview.protected_branch);
+        let mut commit_rows = v_flex().gap_1();
+        for (index, commit) in commits.iter().enumerate().rev() {
+            let selected = dialog.selected_commit == Some(index);
+            commit_rows = commit_rows.child(
+                Button::new(("git-push-commit", index))
+                    .ghost()
+                    .selected(selected)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_git_push_commit(index, cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(commit.short_oid.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(commit.subject.clone()),
+                            ),
+                    ),
+            );
+        }
+        let mut file_rows = v_flex().gap_1();
+        for change in &dialog.files {
+            file_rows = file_rows.child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .font_family("monospace")
+                            .text_color(cx.theme().primary)
+                            .child(change.status.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(change.path.clone()),
+                    ),
+            );
+        }
+        let body = v_flex()
+            .gap_4()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(v_flex().flex_1().gap_1().child("远程").child(remote))
+                    .child(v_flex().flex_1().gap_1().child("目标分支").child(branch)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("git-push-tags")
+                            .small()
+                            .outline()
+                            .selected(dialog.include_tags)
+                            .label("同时推送标签")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut()
+                                {
+                                    dialog.include_tags = !dialog.include_tags;
+                                }
+                                this.refresh_git_push_preview(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-force")
+                            .small()
+                            .outline()
+                            .selected(dialog.force_with_lease)
+                            .disabled(protected)
+                            .label(if protected {
+                                "受保护分支禁止强制推送"
+                            } else {
+                                "force-with-lease"
+                            })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(GitDialogState::Push(dialog)) = this.git_dialog.as_mut()
+                                {
+                                    dialog.force_with_lease = !dialog.force_with_lease;
+                                }
+                                this.refresh_git_push_preview(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-refresh")
+                            .small()
+                            .ghost()
+                            .label("刷新预览")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_git_push_preview(cx)
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_4()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .gap_2()
+                            .child(
+                                h_flex().justify_between().child("待推送提交").child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{} 个", commits.len())),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(320.))
+                                    .overflow_y_scrollbar()
+                                    .child(commit_rows),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .gap_2()
+                            .child("选中提交更改的文件")
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(320.))
+                                    .overflow_y_scrollbar()
+                                    .child(file_rows),
+                            ),
+                    ),
+            )
+            .when(dialog.loading, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("正在读取推送预览…"),
+                )
+            })
+            .when_some(dialog.error.clone(), |this, error| {
+                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("git-push-cancel")
+                            .outline()
+                            .label("取消")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.git_dialog = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-to-selected")
+                            .outline()
+                            .label("只推送到所选提交")
+                            .disabled(
+                                dialog.selected_commit.is_none()
+                                    || protected && dialog.force_with_lease,
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.submit_git_push(true, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push-submit")
+                            .primary()
+                            .label("推送")
+                            .disabled(dialog.loading || protected && dialog.force_with_lease)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.submit_git_push(false, window, cx)
+                            })),
+                    ),
+            );
+        self.git_dialog_shell(
+            "推送提交",
+            "检查待推送提交和文件，选择目标远程与分支。强制推送始终使用 --force-with-lease。",
+            body.into_any_element(),
+            cx,
+        )
+    }
+
+    fn render_git_clone_dialog(
+        &mut self,
+        dialog: &GitCloneDialogState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let url = Input::new(&dialog.url_input)
+            .aria_label("仓库 URL")
+            .cleanable(true)
+            .w_full();
+        let target = Input::new(&dialog.target_input)
+            .aria_label("目标目录")
+            .cleanable(true)
+            .w_full();
+        let depth = Input::new(&dialog.depth_input)
+            .aria_label("浅克隆深度")
+            .w_full();
+        let body = v_flex()
+            .gap_4()
+            .child(v_flex().gap_1().child("仓库 URL").child(url))
+            .child(
+                v_flex().gap_1().child("目标目录").child(target).child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(dialog.directory.display().to_string()),
+                ),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        Button::new("git-clone-shallow")
+                            .small()
+                            .outline()
+                            .selected(dialog.shallow)
+                            .label("浅克隆")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(GitDialogState::Clone(dialog)) =
+                                    this.git_dialog.as_mut()
+                                {
+                                    dialog.shallow = !dialog.shallow;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(dialog.shallow, |this| {
+                        this.child(div().w(px(120.)).child(depth))
+                    }),
+            )
+            .when_some(dialog.error.clone(), |this, error| {
+                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("git-clone-cancel")
+                            .outline()
+                            .label("取消")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.git_dialog = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("git-clone-submit")
+                            .primary()
+                            .label("克隆")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.submit_git_clone(window, cx)
+                            })),
+                    ),
+            );
+        self.git_dialog_shell(
+            "克隆 Git 仓库",
+            "克隆在后台进行，可随时取消。完成后 Kite 会打开目标目录。",
+            body.into_any_element(),
+            cx,
+        )
+    }
+
+    fn render_git_remotes_dialog(
+        &mut self,
+        dialog: &GitRemotesDialogState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = Input::new(&dialog.name_input)
+            .aria_label("远程名称")
+            .cleanable(true)
+            .w_full();
+        let fetch_url = Input::new(&dialog.fetch_url_input)
+            .aria_label("Fetch URL")
+            .cleanable(true)
+            .w_full();
+        let push_url = Input::new(&dialog.push_url_input)
+            .aria_label("Push URL")
+            .cleanable(true)
+            .w_full();
+        let mut remote_rows = v_flex().gap_1();
+        for remote in &dialog.remotes {
+            let selected = dialog.selected.as_deref() == Some(remote.name.as_str());
+            remote_rows = remote_rows.child(
+                Button::new(SharedString::from(format!("git-remote-{}", remote.name)))
+                    .ghost()
+                    .selected(selected)
+                    .on_click(cx.listener({
+                        let remote_name = remote.name.clone();
+                        move |this, _: &ClickEvent, window, cx| {
+                            this.select_git_remote(remote_name.clone(), window, cx)
+                        }
+                    }))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .items_start()
+                            .child(div().font_medium().child(remote.name.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(remote.fetch_url.clone()),
+                            ),
+                    ),
+            );
+        }
+        let body = h_flex()
+            .gap_4()
+            .child(
+                v_flex()
+                    .w(px(340.))
+                    .flex_shrink_0()
+                    .gap_2()
+                    .child("远程")
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(300.))
+                            .overflow_y_scrollbar()
+                            .child(remote_rows),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .gap_3()
+                    .child(v_flex().gap_1().child("名称").child(name))
+                    .child(v_flex().gap_1().child("Fetch URL").child(fetch_url))
+                    .child(v_flex().gap_1().child("Push URL（可选）").child(push_url))
+                    .when_some(dialog.error.clone(), |this, error| {
+                        this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("git-remote-delete")
+                                    .outline()
+                                    .danger()
+                                    .label("删除所选远程")
+                                    .disabled(dialog.selected.is_none() || dialog.loading)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.delete_selected_git_remote(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("git-remote-save")
+                                    .primary()
+                                    .label(if dialog.selected.is_some() {
+                                        "保存远程"
+                                    } else {
+                                        "添加远程"
+                                    })
+                                    .disabled(dialog.loading)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.save_git_remote(cx)
+                                    })),
+                            ),
+                    ),
+            );
+        self.git_dialog_shell(
+            "管理 Git 远程",
+            "添加、改名、删除或修改 Fetch/Push URL。",
+            body.into_any_element(),
+            cx,
+        )
     }
 }
 
@@ -7960,6 +9562,34 @@ fn navigation_parent(path: &Path) -> Option<PathBuf> {
 
 fn path_text(path: &Path) -> String {
     path.display().to_string()
+}
+
+fn nonempty_input(input: &InputState) -> Option<String> {
+    let value = input.value();
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn working_directory_for_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(path).to_path_buf()
+    }
+}
+
+fn clone_target_name(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches(['/', '\\']);
+    let name = trimmed
+        .rsplit(['/', '\\', ':'])
+        .find(|part| !part.is_empty() && *part != ".git")
+        .unwrap_or("repository");
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    if name.is_empty() {
+        "repository".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 fn absolute_path(path: PathBuf) -> PathBuf {
@@ -8248,54 +9878,6 @@ fn git_commit_time_label(unix_seconds: i64) -> String {
                 .to_string()
         })
         .unwrap_or_default()
-}
-
-fn render_git_diff(
-    diff: Option<&Result<Arc<Vec<GitDiffLine>>, SharedString>>,
-    cx: &App,
-) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let body = v_flex()
-        .id("column-preview-git-diff")
-        .w_full()
-        .max_h(px(320.))
-        .overflow_y_scroll()
-        .rounded_sm()
-        .bg(cx.theme().muted.opacity(0.25))
-        .p_1()
-        .text_xs();
-    match diff {
-        None => body.child(div().text_color(muted).child("正在读取差异…")),
-        Some(Err(error)) => body.child(div().text_color(cx.theme().danger).child(error.clone())),
-        Some(Ok(lines)) if lines.is_empty() => {
-            body.child(div().text_color(muted).child("没有可显示的差异"))
-        }
-        Some(Ok(lines)) => body.children(lines.iter().map(|line| {
-            let (prefix, color, background) = match line.kind {
-                GitDiffLineKind::Added => (
-                    "+",
-                    vcs_status_color(VcsStatus::Added),
-                    Some(vcs_status_color(VcsStatus::Added).opacity(0.12)),
-                ),
-                GitDiffLineKind::Removed => (
-                    "-",
-                    vcs_status_color(VcsStatus::Deleted),
-                    Some(vcs_status_color(VcsStatus::Deleted).opacity(0.12)),
-                ),
-                GitDiffLineKind::Hunk => ("", muted, None),
-                GitDiffLineKind::Context => (" ", cx.theme().foreground, None),
-            };
-            div()
-                .w_full()
-                .px_1()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .text_color(color)
-                .when_some(background, |this, background| this.bg(background))
-                .child(format!("{prefix}{}", line.text))
-        })),
-    }
-    .into_any_element()
 }
 
 fn preview_property(label: &str, value: String, cx: &App) -> AnyElement {
@@ -8805,48 +10387,6 @@ fn column_count_after_file_selection(column: usize, current_count: usize) -> usi
     (column + 1).min(current_count)
 }
 
-fn search_selection_step(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
-    if len == 0 {
-        return None;
-    }
-    Some(match current {
-        Some(index) if forward => (index + 1).min(len - 1),
-        Some(index) => index.saturating_sub(1),
-        None if forward => 0,
-        None => len - 1,
-    })
-}
-
-/// Steps over display rows that hold entries, skipping group headers.
-fn entry_row_step(
-    entry_rows: &[usize],
-    current_row: Option<usize>,
-    forward: bool,
-) -> Option<usize> {
-    let position =
-        current_row.and_then(|row| entry_rows.iter().position(|candidate| *candidate == row));
-    let next = search_selection_step(position, entry_rows.len(), forward)?;
-    entry_rows.get(next).copied()
-}
-
-fn search_query_narrows(previous: &str, next: &str) -> bool {
-    let previous = previous.trim().to_lowercase();
-    let next = next.trim().to_lowercase();
-    !previous.is_empty() && next.contains(&previous)
-}
-
-fn narrow_search_entries(entries: &[FileEntry], query: &str) -> Vec<FileEntry> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return Vec::new();
-    }
-    entries
-        .iter()
-        .filter(|entry| entry.name.to_lowercase().contains(&query))
-        .cloned()
-        .collect()
-}
-
 impl Focusable for KiteApp {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -8899,19 +10439,26 @@ impl Render for KiteApp {
         let active_search = self.active_search.clone();
         let search_truncated = self.search_truncated;
         let skipped = self.skipped;
+        if self.pending_git_refresh {
+            self.pending_git_refresh = false;
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |this, cx| this.refresh(window, cx));
+            });
+        }
+        if let Some(path) = self.pending_git_open.take() {
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |this, cx| {
+                    this.navigate_to(path.clone(), NavigationIntent::Push, window, cx)
+                });
+            });
+        }
         if self.column_scroll_pending {
             self.column_scroll_pending = false;
             let handle = self.column_scroll.clone();
             window.defer(cx, move |_, _| {
                 handle.set_offset(point(-handle.max_offset().x, handle.offset().y));
-            });
-        }
-        if let Some(index) = self.column_scroll_to_column.take() {
-            let offset = COLUMN_STRIP_PADDING + index as f32 * (COLUMN_WIDTH + COLUMN_STRIP_GAP);
-            let handle = self.column_scroll.clone();
-            window.defer(cx, move |_, _| {
-                let max = handle.max_offset().x.as_f32().max(0.0);
-                handle.set_offset(point(px(-offset.min(max)), handle.offset().y));
             });
         }
         if self.show_path_bar && !self.address_editing && self.path_bar_scroll_pending {
@@ -8987,6 +10534,9 @@ impl Render for KiteApp {
                 )
                 .into_any_element()
         });
+        let git_operation_banner = self.render_git_operation_banner(cx);
+        let clone_cleanup_banner = self.render_clone_cleanup_banner(cx);
+        let git_recovery_banner = self.render_git_recovery_banner(cx);
 
         let show_sidebar = self.show_sidebar;
         let sidebar = self.render_sidebar(cx);
@@ -9062,7 +10612,7 @@ impl Render for KiteApp {
                 this.open_global_search(action, window, cx)
             }))
             .on_action(cx.listener(|this, action: &OpenGitClient, window, cx| {
-                this.open_git_client(action, window, cx)
+                this.open_git_client_for_current(action, window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &CreateFolder, window, cx| this.begin_new_folder(window, cx)),
@@ -9161,6 +10711,9 @@ impl Render for KiteApp {
                                     .into_any_element()
                             })
                             .when_some(search_banner, |this, banner| this.child(banner))
+                            .when_some(git_operation_banner, |this, banner| this.child(banner))
+                            .when_some(clone_cleanup_banner, |this, banner| this.child(banner))
+                            .when_some(git_recovery_banner, |this, banner| this.child(banner))
                             .child(div().flex_1().min_h_0().w_full().child(main_view)),
                     ),
             )
@@ -9210,6 +10763,7 @@ impl Render for KiteApp {
                             .child(div().max_w(px(500.)).truncate().child(footer_right)),
                     ),
             )
+            .child(self.render_git_dialog(cx))
             .child(self.render_modal(cx))
     }
 }
@@ -9978,7 +11532,9 @@ mod column_details_tests {
 
 #[cfg(test)]
 mod scroll_routing_tests {
-    use super::{directory_scroll_offset, horizontal_wheel_delta, wheel_scrolls_columns};
+    use super::{
+        clone_target_name, directory_scroll_offset, horizontal_wheel_delta, wheel_scrolls_columns,
+    };
 
     #[test]
     fn horizontal_gesture_takes_priority_over_vertical_noise() {
@@ -10018,6 +11574,16 @@ mod scroll_routing_tests {
     #[test]
     fn non_scrollable_directory_stays_at_start() {
         assert_eq!(directory_scroll_offset(-90.0, 0.0), 0.0);
+    }
+    #[test]
+    fn derives_clone_directory_from_common_git_urls() {
+        assert_eq!(
+            clone_target_name("https://example.com/team/kite.git"),
+            "kite"
+        );
+        assert_eq!(clone_target_name("git@example.com:team/kite.git"), "kite");
+        assert_eq!(clone_target_name("ssh://example.com/team/kite"), "kite");
+        assert_eq!(clone_target_name("https://example.com/"), "example.com");
     }
 }
 

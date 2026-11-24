@@ -8,10 +8,8 @@ struct KiteGitPreviewSection: View {
 
     @State private var summary: GitPathSummaryDto?
     @State private var loading = false
-    @State private var diffVisible = false
-    @State private var diff: [GitDiffLineDto]?
-    @State private var diffError: String?
     @State private var actionMessage: String?
+    @State private var commitPresented = false
 
     var body: some View {
         // A VStack always exists in the hierarchy, so `.task` runs even while
@@ -28,6 +26,12 @@ struct KiteGitPreviewSection: View {
             }
         }
         .task(id: entry.path) { await load() }
+        .sheet(isPresented: $commitPresented, onDismiss: {
+            Task { await load() }
+        }) {
+            KiteGitCommitSheet(model: model, path: entry.path)
+                .frame(minWidth: 760, minHeight: 620)
+        }
     }
 
     private func container<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -121,16 +125,13 @@ struct KiteGitPreviewSection: View {
                 .lineLimit(2)
         }
 
-        if diffVisible {
-            diffView
-        }
     }
 
     private func actions(_ summary: GitPathSummaryDto) -> some View {
         let changed = summary.stagedStatus != nil || summary.unstagedStatus != nil
         return HStack(spacing: 6) {
             if changed {
-                actionButton(diffVisible ? "隐藏差异" : "查看差异") { toggleDiff() }
+                actionButton("Diff 查看器") { openDiffViewer(summary) }
             }
             if summary.unstagedStatus != nil {
                 actionButton("暂存") { run(.add) }
@@ -139,6 +140,10 @@ struct KiteGitPreviewSection: View {
                 actionButton("取消暂存") { run(.unstage) }
             }
             actionButton("历史") { showLog() }
+            actionButton("提交…") { commitPresented = true }
+            actionButton("Git 客户端") {
+                KiteGitClientWindowController.show(model: model, repositoryPath: summary.repositoryRoot)
+            }
         }
     }
 
@@ -149,70 +154,6 @@ struct KiteGitPreviewSection: View {
             .help(title)
     }
 
-    @ViewBuilder
-    private var diffView: some View {
-        if let diffError {
-            Text(diffError)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.red)
-        } else if let diff {
-            if diff.isEmpty {
-                Text("没有可显示的差异")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-            } else {
-                ScrollView([.vertical, .horizontal]) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(diff.enumerated()), id: \.offset) { _, line in
-                            diffLine(line)
-                        }
-                    }
-                    .padding(4)
-                }
-                .frame(maxHeight: 320)
-                .background(
-                    Color.primary.opacity(0.035),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                )
-            }
-        } else {
-            Text("正在读取差异…")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    private func diffLine(_ line: GitDiffLineDto) -> some View {
-        let prefix: String
-        let color: Color
-        let background: Color
-        switch line.kind {
-        case .added:
-            prefix = "+"
-            color = .green
-            background = Color.green.opacity(0.12)
-        case .removed:
-            prefix = "-"
-            color = .red
-            background = Color.red.opacity(0.12)
-        case .hunk:
-            prefix = ""
-            color = .secondary
-            background = .clear
-        case .context:
-            prefix = " "
-            color = .primary
-            background = .clear
-        }
-        return Text(prefix + line.text)
-            .font(.system(size: 10, design: .monospaced))
-            .foregroundStyle(color)
-            .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(background)
-    }
-
     private func load() async {
         // Entries without a status in a column without Git are outside a work
         // tree; skip the extra git processes for them.
@@ -221,25 +162,25 @@ struct KiteGitPreviewSection: View {
             return
         }
         loading = true
-        diff = nil
-        diffError = nil
-        diffVisible = false
         actionMessage = nil
         summary = await model.gitPathSummary(path: entry.path)
         loading = false
     }
 
-    private func toggleDiff() {
-        diffVisible.toggle()
-        guard diffVisible, diff == nil, diffError == nil else { return }
-        let path = entry.path
-        Task {
-            do {
-                diff = try await model.gitFileDiff(path: path)
-            } catch {
-                diffError = error.localizedDescription
-            }
+    private func openDiffViewer(_ summary: GitPathSummaryDto) {
+        let preset: DiffComparisonPreset
+        if summary.stagedStatus != nil && summary.unstagedStatus == nil {
+            preset = .headToIndex
+        } else if summary.stagedStatus != nil {
+            preset = .headToWorkingTree
+        } else {
+            preset = .headToWorkingTree
         }
+        KiteDiffViewerWindowController.shared.show(
+            path: entry.path,
+            appModel: model,
+            preset: preset
+        )
     }
 
     private func run(_ operation: VcsOperationDto) {
@@ -247,20 +188,11 @@ struct KiteGitPreviewSection: View {
         Task {
             actionMessage = await model.runVcsOperation(tool: .git, operation: operation, path: path)
             summary = await model.gitPathSummary(path: path)
-            diff = nil
-            diffError = nil
-            if diffVisible {
-                diffVisible = false
-                toggleDiff()
-            }
         }
     }
 
     private func showLog() {
-        let path = entry.path
-        Task {
-            await model.openVcsLog(tool: .git, path: path)
-        }
+        model.openGitLog(path: entry.path)
     }
 
     private func branchLine(_ summary: GitPathSummaryDto) -> String {

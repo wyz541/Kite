@@ -50,7 +50,22 @@ actions!(
         CheckForUpdates,
         OpenSettings,
         OpenWorkspaceEditor,
+        GitClientRefresh,
+        GitClientFetch,
+        GitClientPull,
+        GitClientPush,
+        GitClientCommit,
+        GitClientStash,
+        GitClientToggleConsole,
+        GitClientShowShortcuts,
+        GitClientContinue,
+        GitClientSkip,
+        GitClientAbort,
+        GitClientCancelTask,
+        GitClientDismiss,
         SaveEditor,
+        DiffNextChange,
+        DiffPreviousChange,
     ]
 );
 
@@ -120,17 +135,29 @@ pub struct ColumnPaneAction {
     pub command: ColumnPaneCommand,
 }
 
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = kite, no_json)]
+pub struct GitRebaseSetAction {
+    pub index: usize,
+    pub action: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VcsMenuCommand {
-    GitClient,
+    GitOpenClient,
     GitAdd,
     GitUnstage,
     GitCommit,
     GitPull,
     GitPush,
     GitFetch,
+    GitFetchAll,
+    GitManageRemotes,
+    GitClone,
+    GitInit,
     GitDiff,
     GitLog,
+    GitRebase,
     GitRevert,
     GitClean,
     SvnUpdate,

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_SESSION_TABS: usize = 64;
+const MAX_GIT_CLIENT_WINDOWS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct SessionTabDto {
@@ -20,6 +21,23 @@ pub struct SessionStateDto {
     pub schema_version: u32,
     pub active_tab: u32,
     pub tabs: Vec<SessionTabDto>,
+    #[serde(default)]
+    pub git_client_windows: Vec<GitClientWindowSessionDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct GitClientWindowSessionDto {
+    pub repository_root: String,
+    pub width: u32,
+    pub height: u32,
+    /// Percentage of the content width, expressed in basis points.
+    pub changes_ratio_bp: u16,
+    /// Percentage of the content width, expressed in basis points.
+    pub details_ratio_bp: u16,
+    /// Percentage of the content height, expressed in basis points.
+    pub console_ratio_bp: u16,
+    pub console_expanded: bool,
+    pub last_view: String,
 }
 
 pub fn load_session() -> Option<SessionStateDto> {
@@ -30,6 +48,31 @@ pub fn load_session() -> Option<SessionStateDto> {
 pub fn save_session(state: &SessionStateDto) -> Result<(), String> {
     let path = session_path().ok_or_else(|| "cannot resolve the session directory".to_string())?;
     save_session_at(&path, state)
+}
+
+pub fn load_git_client_window_state(repository_root: &Path) -> Option<GitClientWindowSessionDto> {
+    let state = load_session()?;
+    state
+        .git_client_windows
+        .into_iter()
+        .find(|window| same_repository(&window.repository_root, repository_root))
+}
+
+pub fn save_git_client_window_state(state: &GitClientWindowSessionDto) -> Result<(), String> {
+    let state = normalize_git_client_window(state)
+        .ok_or_else(|| "Git client window state is invalid".to_string())?;
+    let mut session = load_session().unwrap_or_else(empty_session_state);
+    if let Some(existing) = session
+        .git_client_windows
+        .iter_mut()
+        .find(|window| same_repository(&window.repository_root, Path::new(&state.repository_root)))
+    {
+        *existing = state;
+    } else {
+        session.git_client_windows.push(state);
+    }
+    session.git_client_windows.truncate(MAX_GIT_CLIENT_WINDOWS);
+    save_session(&session)
 }
 
 #[cfg(feature = "performance")]
@@ -74,18 +117,98 @@ fn normalize_state(state: &SessionStateDto) -> Option<SessionStateDto> {
         });
     }
 
-    if tabs.is_empty() {
+    let git_client_windows = state
+        .git_client_windows
+        .iter()
+        .take(MAX_GIT_CLIENT_WINDOWS)
+        .filter_map(normalize_git_client_window)
+        .fold(Vec::new(), |mut windows, window| {
+            if !windows.iter().any(|existing: &GitClientWindowSessionDto| {
+                same_repository(
+                    &existing.repository_root,
+                    Path::new(&window.repository_root),
+                )
+            }) {
+                windows.push(window);
+            }
+            windows
+        });
+
+    if tabs.is_empty() && git_client_windows.is_empty() {
         return None;
     }
 
-    let active_tab = usize::try_from(state.active_tab)
-        .unwrap_or(usize::MAX)
-        .min(tabs.len() - 1) as u32;
+    let active_tab = if tabs.is_empty() {
+        0
+    } else {
+        usize::try_from(state.active_tab)
+            .unwrap_or(usize::MAX)
+            .min(tabs.len() - 1) as u32
+    };
     Some(SessionStateDto {
         schema_version: SESSION_SCHEMA_VERSION,
         active_tab,
         tabs,
+        git_client_windows,
     })
+}
+
+fn normalize_git_client_window(
+    state: &GitClientWindowSessionDto,
+) -> Option<GitClientWindowSessionDto> {
+    let repository_root = state.repository_root.trim();
+    if repository_root.is_empty() {
+        return None;
+    }
+    let repository_root = PathBuf::from(repository_root);
+    let repository_root = dunce::canonicalize(&repository_root)
+        .unwrap_or(repository_root)
+        .to_string_lossy()
+        .into_owned();
+
+    let mut changes_ratio_bp = state.changes_ratio_bp.clamp(1_400, 4_200);
+    let mut details_ratio_bp = state.details_ratio_bp.clamp(1_600, 4_600);
+    if changes_ratio_bp + details_ratio_bp > 7_400 {
+        let overflow = changes_ratio_bp + details_ratio_bp - 7_400;
+        let details_trim = overflow.min(details_ratio_bp.saturating_sub(1_600));
+        details_ratio_bp -= details_trim;
+        changes_ratio_bp -= overflow - details_trim;
+    }
+    let last_view = match state.last_view.as_str() {
+        "changes" | "log" | "details" => state.last_view.as_str(),
+        _ => "log",
+    }
+    .to_string();
+
+    Some(GitClientWindowSessionDto {
+        repository_root,
+        width: state.width.clamp(760, 3_840),
+        height: state.height.clamp(520, 2_160),
+        changes_ratio_bp,
+        details_ratio_bp,
+        console_ratio_bp: state.console_ratio_bp.clamp(1_200, 4_500),
+        console_expanded: state.console_expanded,
+        last_view,
+    })
+}
+
+fn empty_session_state() -> SessionStateDto {
+    SessionStateDto {
+        schema_version: SESSION_SCHEMA_VERSION,
+        active_tab: 0,
+        tabs: Vec::new(),
+        git_client_windows: Vec::new(),
+    }
+}
+
+fn same_repository(left: &str, right: &Path) -> bool {
+    let left = left.trim();
+    let right = right.to_string_lossy();
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right.as_ref())
+    } else {
+        left == right
+    }
 }
 
 fn load_session_at(path: &Path) -> Option<SessionStateDto> {
@@ -198,6 +321,7 @@ mod tests {
             schema_version: SESSION_SCHEMA_VERSION,
             active_tab: 99,
             tabs: vec![tab("C:/one"), tab("C:/two")],
+            git_client_windows: Vec::new(),
         };
 
         save_session_at(&path, &state).expect("save session");
@@ -216,11 +340,13 @@ mod tests {
             schema_version: SESSION_SCHEMA_VERSION,
             active_tab: 0,
             tabs: vec![tab("C:/first")],
+            git_client_windows: Vec::new(),
         };
         let second = SessionStateDto {
             schema_version: SESSION_SCHEMA_VERSION,
             active_tab: 0,
             tabs: vec![tab("C:/second")],
+            git_client_windows: Vec::new(),
         };
 
         save_session_at(&path, &first).expect("save first session");
@@ -239,6 +365,7 @@ mod tests {
             schema_version: SESSION_SCHEMA_VERSION,
             active_tab: 0,
             tabs: Vec::new(),
+            git_client_windows: Vec::new(),
         };
         assert!(save_session_at(&path, &empty).is_err());
 
@@ -246,8 +373,31 @@ mod tests {
             schema_version: SESSION_SCHEMA_VERSION + 1,
             active_tab: 0,
             tabs: vec![tab("C:/future")],
+            git_client_windows: Vec::new(),
         };
         assert!(save_session_at(&path, &future).is_err());
         let _ = fs::remove_dir_all(path.parent().expect("session parent"));
+    }
+
+    #[test]
+    fn normalizes_git_client_window_state() {
+        let state = GitClientWindowSessionDto {
+            repository_root: "  C:/repo  ".to_string(),
+            width: 10,
+            height: 9_000,
+            changes_ratio_bp: 9_000,
+            details_ratio_bp: 9_000,
+            console_ratio_bp: 10,
+            console_expanded: true,
+            last_view: "unknown".to_string(),
+        };
+        let normalized = normalize_git_client_window(&state).expect("valid state");
+        assert_eq!(normalized.width, 760);
+        assert_eq!(normalized.height, 2_160);
+        assert!(normalized.changes_ratio_bp >= 1_400);
+        assert!(normalized.details_ratio_bp >= 1_600);
+        assert!(normalized.changes_ratio_bp + normalized.details_ratio_bp <= 7_400);
+        assert_eq!(normalized.console_ratio_bp, 1_200);
+        assert_eq!(normalized.last_view, "log");
     }
 }

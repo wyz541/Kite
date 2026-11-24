@@ -11,11 +11,13 @@ use std::process::Command;
 use super::GitService;
 use super::command::GitCommandResult;
 use super::error::GitError;
+use super::events::GitOperationState;
 use crate::fs::VcsStatus;
 
 /// Text larger than this is not diffed for the preview.
 const DIFF_PREVIEW_MAX_BYTES: usize = 256 * 1024;
 const DIFF_PREVIEW_MAX_LINES: usize = 400;
+const MAX_REPOSITORY_CHANGED_FILES: usize = 2_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitCommitSummary {
@@ -50,27 +52,6 @@ impl GitChangeCounts {
             VcsStatus::Untracked => self.untracked += 1,
             VcsStatus::Conflicted => self.conflicted += 1,
             VcsStatus::Ignored | VcsStatus::External => {}
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitOperationState {
-    Rebasing,
-    Merging,
-    CherryPicking,
-    Reverting,
-    Bisecting,
-}
-
-impl GitOperationState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Rebasing => "正在变基",
-            Self::Merging => "正在合并",
-            Self::CherryPicking => "正在拣选",
-            Self::Reverting => "正在还原提交",
-            Self::Bisecting => "正在二分查找",
         }
     }
 }
@@ -113,6 +94,36 @@ pub struct GitPathSummary {
     pub is_directory: bool,
 }
 
+/// One changed path in a repository working tree. Statuses are kept separate
+/// so the Git client can show staged and unstaged work without losing one side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitChangedFile {
+    pub path: String,
+    pub staged_status: Option<VcsStatus>,
+    pub unstaged_status: Option<VcsStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitRepositorySnapshot {
+    pub repository_root: PathBuf,
+    pub branch: Option<String>,
+    pub head_short_hash: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub operation: Option<GitOperationState>,
+    pub changes: GitChangeCounts,
+    pub changed_files: Vec<GitChangedFile>,
+    pub recent_commits: Vec<GitCommitSummary>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitOperationAction {
+    Continue,
+    Skip,
+    Abort,
+}
+
 /// Reads the Git summary for `path`. Returns `Ok(None)` when the path is not
 /// inside a Git work tree or Git is not installed.
 pub fn git_path_summary(path: &Path) -> Result<Option<GitPathSummary>, String> {
@@ -134,6 +145,95 @@ pub fn git_path_summary(path: &Path) -> Result<Option<GitPathSummary>, String> {
         return Ok(None);
     };
     summary_in(path, is_directory, root, git_dir).map(Some)
+}
+
+/// Resolve the work-tree root that contains `path`. This is a single bounded
+/// `rev-parse` probe and is safe to use before opening the Git client window.
+pub fn git_repository_root(path: &Path) -> Result<Option<PathBuf>, String> {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let Ok(output) = run_git(start, &["rev-parse", "--show-toplevel"]) else {
+        return Ok(None);
+    };
+    let root = output.stdout.trim().to_string();
+    if root.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        dunce::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(root)),
+    ))
+}
+
+/// Reads the data needed by the Git client shell. The command count is bounded:
+/// one repository probe, one status query, and one recent-log query.
+pub fn git_repository_snapshot(path: &Path) -> Result<Option<GitRepositorySnapshot>, String> {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let Ok(probe) = run_git(
+        start,
+        &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
+    ) else {
+        return Ok(None);
+    };
+    let text = probe.stdout;
+    let mut lines = text.lines();
+    let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
+        return Ok(None);
+    };
+    let root = dunce::canonicalize(root.trim()).unwrap_or_else(|_| PathBuf::from(root.trim()));
+
+    let mut summary = GitPathSummary {
+        repository_root: root.clone(),
+        relative_path: ".".to_string(),
+        branch: None,
+        head_short_hash: None,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        operation: operation_state(Path::new(git_dir.trim())),
+        staged_status: None,
+        unstaged_status: None,
+        ignored: false,
+        last_commit: None,
+        lines_added: 0,
+        lines_removed: 0,
+        changes: GitChangeCounts::default(),
+        is_directory: true,
+    };
+    let mut changed_files = Vec::new();
+    if let Ok(output) = run_git(
+        &root,
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
+    ) {
+        apply_status_v2(&mut summary, output.stdout.as_bytes());
+        changed_files = parse_changed_files(output.stdout.as_bytes());
+    }
+
+    let recent_commits = recent_commits(&root, 100);
+    Ok(Some(GitRepositorySnapshot {
+        repository_root: root,
+        branch: summary.branch,
+        head_short_hash: summary.head_short_hash,
+        upstream: summary.upstream,
+        ahead: summary.ahead,
+        behind: summary.behind,
+        operation: summary.operation,
+        changes: summary.changes,
+        changed_files,
+        recent_commits,
+    }))
 }
 
 fn summary_in(
@@ -249,6 +349,160 @@ pub fn git_file_diff(path: &Path) -> Result<Vec<GitDiffLine>, String> {
         return Err("差异过大，未在预览中显示".to_string());
     }
     Ok(parse_unified_diff(&output.stdout))
+}
+
+/// Continue, skip, or abort the operation currently recorded in the Git
+/// directory. The command is chosen from the marker files rather than trusting
+/// a stale UI value.
+pub fn run_git_operation_control(
+    path: &Path,
+    action: GitOperationAction,
+) -> Result<String, String> {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let probe = run_git(
+        start,
+        &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
+    )
+    .map_err(|error| error.message)?;
+    let text = probe.stdout;
+    let mut lines = text.lines();
+    let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
+        return Err("无法确定 Git 仓库".to_string());
+    };
+    let root = dunce::canonicalize(root.trim()).unwrap_or_else(|_| PathBuf::from(root.trim()));
+    let operation = operation_state(Path::new(git_dir.trim()))
+        .ok_or_else(|| "当前没有进行中的 Git 操作".to_string())?;
+    let args = operation_control_args(operation, action)?;
+    GitService::shared()
+        .run_preview_command(&root, args)
+        .map_err(|error| error.message)?;
+    let verb = match action {
+        GitOperationAction::Continue => "继续",
+        GitOperationAction::Skip => "跳过",
+        GitOperationAction::Abort => "中止",
+    };
+    Ok(format!("已{verb}{}", operation.label()))
+}
+
+fn operation_control_args(
+    operation: GitOperationState,
+    action: GitOperationAction,
+) -> Result<&'static [&'static str], String> {
+    match (operation, action) {
+        (GitOperationState::Rebasing, GitOperationAction::Continue) => {
+            Ok(&["rebase", "--continue"])
+        }
+        (GitOperationState::Rebasing, GitOperationAction::Skip) => Ok(&["rebase", "--skip"]),
+        (GitOperationState::Rebasing, GitOperationAction::Abort) => Ok(&["rebase", "--abort"]),
+        (GitOperationState::Merging, GitOperationAction::Continue) => Ok(&["merge", "--continue"]),
+        (GitOperationState::Merging, GitOperationAction::Abort) => Ok(&["merge", "--abort"]),
+        (GitOperationState::CherryPicking, GitOperationAction::Continue) => {
+            Ok(&["cherry-pick", "--continue"])
+        }
+        (GitOperationState::CherryPicking, GitOperationAction::Skip) => {
+            Ok(&["cherry-pick", "--skip"])
+        }
+        (GitOperationState::CherryPicking, GitOperationAction::Abort) => {
+            Ok(&["cherry-pick", "--abort"])
+        }
+        (GitOperationState::Reverting, GitOperationAction::Continue) => {
+            Ok(&["revert", "--continue"])
+        }
+        (GitOperationState::Reverting, GitOperationAction::Skip) => Ok(&["revert", "--skip"]),
+        (GitOperationState::Reverting, GitOperationAction::Abort) => Ok(&["revert", "--abort"]),
+        (GitOperationState::Bisecting, GitOperationAction::Abort) => Ok(&["bisect", "reset"]),
+        (GitOperationState::Merging, GitOperationAction::Skip) => {
+            Err("合并操作不支持跳过".to_string())
+        }
+        (GitOperationState::Bisecting, _) => {
+            Err("二分查找需要明确标记 good 或 bad 提交".to_string())
+        }
+    }
+}
+
+fn parse_changed_files(output: &[u8]) -> Vec<GitChangedFile> {
+    let mut files = Vec::new();
+    let mut records = output.split(|byte| *byte == 0);
+    while let Some(record) = records.next() {
+        if files.len() >= MAX_REPOSITORY_CHANGED_FILES {
+            break;
+        }
+        let record = String::from_utf8_lossy(record);
+        if record.starts_with("# ") || record.is_empty() {
+            continue;
+        }
+        let mut fields = record.splitn(2, ' ');
+        let kind = fields.next().unwrap_or_default();
+        let rest = fields.next().unwrap_or_default();
+        let (path, staged, unstaged) = match kind {
+            "1" => {
+                let fields = rest.splitn(8, ' ').collect::<Vec<_>>();
+                let (staged, unstaged) = status_pair(fields.first().copied());
+                (fields.get(7).copied().unwrap_or_default(), staged, unstaged)
+            }
+            "2" => {
+                let fields = rest.splitn(9, ' ').collect::<Vec<_>>();
+                let (staged, unstaged) = status_pair(fields.first().copied());
+                let _ = records.next();
+                (fields.get(8).copied().unwrap_or_default(), staged, unstaged)
+            }
+            "u" => {
+                let fields = rest.splitn(10, ' ').collect::<Vec<_>>();
+                (
+                    fields.get(9).copied().unwrap_or_default(),
+                    Some(VcsStatus::Conflicted),
+                    None,
+                )
+            }
+            "?" => (rest, None, Some(VcsStatus::Untracked)),
+            "!" => (rest, None, None),
+            _ => continue,
+        };
+        if path.is_empty() {
+            continue;
+        }
+        files.push(GitChangedFile {
+            path: path.replace('\\', "/"),
+            staged_status: staged,
+            unstaged_status: unstaged,
+        });
+    }
+    files
+}
+
+fn status_pair(xy: Option<&str>) -> (Option<VcsStatus>, Option<VcsStatus>) {
+    let Some(xy) = xy else {
+        return (None, None);
+    };
+    let bytes = xy.as_bytes();
+    (
+        bytes.first().and_then(|code| status_from_xy_column(*code)),
+        bytes.get(1).and_then(|code| status_from_xy_column(*code)),
+    )
+}
+
+fn recent_commits(root: &Path, limit: usize) -> Vec<GitCommitSummary> {
+    let limit = limit.clamp(1, 500).to_string();
+    let Ok(output) = run_git(
+        root,
+        &[
+            "log",
+            "--max-count",
+            &limit,
+            "--format=%H%x00%h%x00%an%x00%at%x00%s",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    output
+        .stdout
+        .lines()
+        .filter_map(parse_commit_line)
+        .collect()
 }
 
 fn apply_status_v2(summary: &mut GitPathSummary, output: &[u8]) {
@@ -620,6 +874,147 @@ mod tests {
         assert!(file.last_commit.is_none());
         let diff = git_file_diff(&root.join("a.txt")).expect("diff");
         assert!(diff.iter().any(|line| line.kind == GitDiffLineKind::Added));
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn parses_changed_file_paths_and_statuses() {
+        let output = b"# branch.oid 0123456789abcdef\0# branch.head main\0\
+1 .M N... 100644 100644 100644 a b src/a file.rs\0\
+2 R. N... 100644 100644 100644 a b R100 new.rs\0old.rs\0\
+u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
+? notes.txt\0";
+        let files = parse_changed_files(output);
+        assert_eq!(files.len(), 4);
+        assert_eq!(files[0].path, "src/a file.rs");
+        assert_eq!(files[0].unstaged_status, Some(VcsStatus::Modified));
+        assert_eq!(files[1].path, "new.rs");
+        assert_eq!(files[1].staged_status, Some(VcsStatus::Renamed));
+        assert_eq!(files[2].path, "conflict.rs");
+        assert_eq!(files[2].staged_status, Some(VcsStatus::Conflicted));
+        assert_eq!(files[3].path, "notes.txt");
+        assert_eq!(files[3].unstaged_status, Some(VcsStatus::Untracked));
+    }
+
+    #[test]
+    fn maps_operation_controls_for_supported_states() {
+        for (operation, action, expected) in [
+            (
+                GitOperationState::Rebasing,
+                GitOperationAction::Continue,
+                &["rebase", "--continue"][..],
+            ),
+            (
+                GitOperationState::Rebasing,
+                GitOperationAction::Skip,
+                &["rebase", "--skip"][..],
+            ),
+            (
+                GitOperationState::Rebasing,
+                GitOperationAction::Abort,
+                &["rebase", "--abort"][..],
+            ),
+            (
+                GitOperationState::Merging,
+                GitOperationAction::Continue,
+                &["merge", "--continue"][..],
+            ),
+            (
+                GitOperationState::Merging,
+                GitOperationAction::Abort,
+                &["merge", "--abort"][..],
+            ),
+            (
+                GitOperationState::CherryPicking,
+                GitOperationAction::Continue,
+                &["cherry-pick", "--continue"][..],
+            ),
+            (
+                GitOperationState::CherryPicking,
+                GitOperationAction::Skip,
+                &["cherry-pick", "--skip"][..],
+            ),
+            (
+                GitOperationState::CherryPicking,
+                GitOperationAction::Abort,
+                &["cherry-pick", "--abort"][..],
+            ),
+            (
+                GitOperationState::Reverting,
+                GitOperationAction::Continue,
+                &["revert", "--continue"][..],
+            ),
+            (
+                GitOperationState::Reverting,
+                GitOperationAction::Skip,
+                &["revert", "--skip"][..],
+            ),
+            (
+                GitOperationState::Reverting,
+                GitOperationAction::Abort,
+                &["revert", "--abort"][..],
+            ),
+        ] {
+            assert_eq!(operation_control_args(operation, action).unwrap(), expected);
+        }
+        assert!(
+            operation_control_args(GitOperationState::Merging, GitOperationAction::Skip).is_err()
+        );
+    }
+
+    #[test]
+    fn reads_repository_snapshot_for_the_git_client() {
+        if !git_available() {
+            return;
+        }
+        let root = dunce::canonicalize(temp_repo("snapshot")).expect("canonical temp repo");
+        std::fs::write(root.join("tracked.txt"), "one\n").expect("write tracked");
+        git_ok(&root, &["add", "."]);
+        git_ok(&root, &["commit", "--quiet", "-m", "initial commit"]);
+        std::fs::write(root.join("tracked.txt"), "one\ntwo\n").expect("edit tracked");
+        std::fs::write(root.join("new file.txt"), "fresh\n").expect("write untracked");
+
+        assert_eq!(
+            git_repository_root(&root.join("tracked.txt")).expect("root"),
+            Some(root.clone())
+        );
+        let snapshot = git_repository_snapshot(&root.join("tracked.txt"))
+            .expect("snapshot")
+            .expect("repo");
+        assert_eq!(snapshot.repository_root, root);
+        assert_eq!(snapshot.branch.as_deref(), Some("main"));
+        assert_eq!(snapshot.changes.modified, 1);
+        assert_eq!(snapshot.changes.untracked, 1);
+        assert_eq!(snapshot.changed_files.len(), 2);
+        assert_eq!(snapshot.recent_commits.len(), 1);
+        assert_eq!(snapshot.recent_commits[0].subject, "initial commit");
+
+        let _ = std::fs::remove_dir_all(snapshot.repository_root);
+    }
+
+    #[test]
+    fn detects_rebase_merge_cherry_pick_and_revert_markers() {
+        let root = std::env::temp_dir().join(format!(
+            "kite-git-operation-markers-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("rebase-merge")).expect("create rebase marker");
+        assert_eq!(operation_state(&root), Some(GitOperationState::Rebasing));
+        std::fs::remove_dir_all(root.join("rebase-merge")).expect("remove rebase marker");
+
+        for (marker, expected) in [
+            ("MERGE_HEAD", GitOperationState::Merging),
+            ("CHERRY_PICK_HEAD", GitOperationState::CherryPicking),
+            ("REVERT_HEAD", GitOperationState::Reverting),
+            ("BISECT_LOG", GitOperationState::Bisecting),
+        ] {
+            std::fs::write(root.join(marker), "marker\n").expect("write marker");
+            assert_eq!(operation_state(&root), Some(expected));
+            std::fs::remove_file(root.join(marker)).expect("remove marker");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

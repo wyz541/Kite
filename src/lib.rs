@@ -3,13 +3,17 @@ uniffi::setup_scaffolding!();
 pub mod archive;
 pub mod content_search;
 pub mod devices;
+pub mod diff;
 pub mod favorites;
 pub mod ffi;
 #[cfg(windows)]
 pub mod file_watcher;
 pub mod fs;
 pub mod git;
+pub mod git_branches;
 pub mod git_changes;
+pub mod git_ops;
+pub mod git_rebase;
 pub mod global_name_search;
 pub mod indexed_search;
 pub mod name_index;

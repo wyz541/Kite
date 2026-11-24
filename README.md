@@ -149,9 +149,20 @@ macOS 可与 Finder 共享文件剪贴板。
 ### 开发者工作流
 
 - 显示 Git 和 SVN 文件状态。
+- 管理 Git 本地/远程分支、标签、上游、比较和 worktree。
+- 工作区有未提交更改时，Git 检出会要求取消或先 stash 再恢复。
+- 在应用内查看提交历史、提交图、引用、提交详情、变更文件和文件历史。
 - 文件夹显示子项目中优先级最高的状态。
 - 右键菜单支持 Git 和 SVN 常用操作。
-- Windows 可调用 TortoiseGit、TortoiseSVN 和系统扩展。
+- Git 提交流程支持 amend、Signed-off-by、GPG/SSH 签名、跳过 hooks、指定作者、提交模板和提交后推送。
+- 支持远程管理、Fetch、三种 Pull 策略、推送预览和推送被拒绝后的恢复。
+- 支持可取消的浅克隆、完整克隆和当前目录 Git 初始化。
+- Git 提交历史不再依赖 TortoiseGit；Windows 仍可调用 TortoiseGit、TortoiseSVN 和系统扩展。
+- 独立 Git 客户端窗口采用变更 / 差异两段布局，并提供可折叠 Git 控制台。
+- Windows 使用 `Ctrl+Shift+G`、macOS 使用 `Command+Shift+G` 打开 Git 客户端。
+- 窗口记住大小和控制台展开状态；F1 显示当前窗口的完整快捷键表。
+- 变更支持文件、hunk 与行级暂存、取消暂存和丢弃，并显示冲突及 CRLF 警告。
+- rebase、merge、cherry-pick 和 revert 状态横幅提供继续、跳过或中止；bisect 提供结束并重置。
 - Windows 搜索和文件读取在后台执行，界面不会等待磁盘响应。
 
 ### 原生平台集成
@@ -184,7 +195,14 @@ macOS 可与 Finder 共享文件剪贴板。
 | 列宽预设与布局恢复 | 已支持 | 已支持 |
 | 文件预览 | 内置预览 | 系统快速预览 |
 | 预览 Git 状态 | 已支持 | 已支持 |
+| Git 分支与标签 | 已支持 | 已支持 |
+| 提交历史与提交图 | 已支持 | 已支持 |
+| Git 客户端 | 已支持 | 已支持 |
+| Git 提交 | 已支持 | 已支持 |
 | Git 客户端变更与行级暂存 | 已支持 | 已支持 |
+| Git Stash、Reset、Revert 与 Cherry-pick | 已支持 | 已支持 |
+| Git 远程、Fetch/Pull/Push、克隆与初始化 | 已支持 | 已支持 |
+| Diff 查看器 | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |

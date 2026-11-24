@@ -24,6 +24,10 @@ pub struct CancellationToken {
 }
 
 impl CancellationToken {
+    pub fn from_shared(cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled }
+    }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
@@ -960,9 +964,9 @@ switch ($Mode) {
                 r#"#!/bin/sh
 case "$1" in
   progress)
-    printf 'Receiving objects: 50%\r'
+    printf 'Receiving objects: 50%\r' >&2
     sleep 0.04
-    printf 'Receiving objects: 100%\r'
+    printf 'Receiving objects: 100%\r' >&2
     exit 0
     ;;
   auth)

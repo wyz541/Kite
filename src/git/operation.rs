@@ -16,6 +16,7 @@ pub enum GitOperation {
     Pull,
     Push,
     Fetch,
+    Stash,
     Revert,
     Clean,
     Clone { url: String, destination: PathBuf },
@@ -36,6 +37,7 @@ impl GitOperation {
             Self::Pull => "Git 拉取",
             Self::Push => "Git 推送",
             Self::Fetch => "Git 获取",
+            Self::Stash => "Git 贮藏",
             Self::Revert => "Git 还原",
             Self::Clean => "Git 清理",
             Self::Clone { .. } => "Git 克隆",
@@ -123,6 +125,13 @@ fn operation_args(operation: &GitOperation, relative: OsString) -> Result<Vec<Os
         GitOperation::Push => return Ok(vec!["push".into(), "--progress".into()]),
         GitOperation::Fetch => {
             return Ok(vec!["fetch".into(), "--prune".into(), "--progress".into()]);
+        }
+        GitOperation::Stash => {
+            return Ok(vec![
+                "stash".into(),
+                "push".into(),
+                "--include-untracked".into(),
+            ]);
         }
         GitOperation::Revert => vec!["restore", "--source=HEAD", "--staged", "--worktree", "--"],
         GitOperation::Clean => vec!["clean", "-fd", "--"],
@@ -271,6 +280,15 @@ pub fn execute_vcs_operation(
     target: &Path,
     operation: &crate::vcs::VcsOperation,
 ) -> Result<String, GitError> {
+    execute_vcs_operation_cancellable(executor, target, operation, &CancellationToken::default())
+}
+
+pub(crate) fn execute_vcs_operation_cancellable(
+    executor: &GitExecutor,
+    target: &Path,
+    operation: &crate::vcs::VcsOperation,
+    cancellation: &CancellationToken,
+) -> Result<String, GitError> {
     use crate::vcs::VcsOperation;
 
     let operation = match operation {
@@ -280,6 +298,7 @@ pub fn execute_vcs_operation(
         VcsOperation::Pull => GitOperation::Pull,
         VcsOperation::Push => GitOperation::Push,
         VcsOperation::Fetch => GitOperation::Fetch,
+        VcsOperation::Stash => GitOperation::Stash,
         VcsOperation::Revert => GitOperation::Revert,
         VcsOperation::Clean => GitOperation::Clean,
         VcsOperation::Update
@@ -293,15 +312,8 @@ pub fn execute_vcs_operation(
         }
     };
     let events = NoopGitEventSink;
-    execute_operation(
-        executor,
-        target,
-        operation,
-        &CancellationToken::default(),
-        &events,
-        None,
-    )
-    .map(|result| result.message)
+    execute_operation(executor, target, operation, cancellation, &events, None)
+        .map(|result| result.message)
 }
 
 #[cfg(test)]

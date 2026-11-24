@@ -3,41 +3,77 @@ import SwiftUI
 
 @MainActor
 final class KiteGitClientWindowController: NSWindowController, NSWindowDelegate {
-    static let shared = KiteGitClientWindowController()
+    private static var controllers: [String: KiteGitClientWindowController] = [:]
 
-    private var hostingController: NSHostingController<AnyView>?
+    private let model: KiteModel
+    private let repositoryRoot: String
 
-    func show(model: KiteModel, repositoryPath: String) {
-        let root = AnyView(
-            KiteGitClientWindowView(model: model, repositoryPath: repositoryPath)
-        )
-        if let hostingController {
-            hostingController.rootView = root
-        } else {
-            let hosting = NSHostingController(rootView: root)
-            let gitWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1160, height: 740),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
+    private init(model: KiteModel, repositoryRoot: String) {
+        self.model = model
+        self.repositoryRoot = repositoryRoot
+        let saved = model.loadGitClientWindowState(repositoryRoot: repositoryRoot)
+        let width = max(CGFloat(saved?.width ?? 1_180), 900)
+        let height = max(CGFloat(saved?.height ?? 760), 620)
+        let hosting = NSHostingController(
+            rootView: AnyView(
+                KiteGitClientWindowView(model: model, repositoryPath: repositoryRoot)
             )
-            gitWindow.title = "Git"
-            gitWindow.titlebarAppearsTransparent = true
-            gitWindow.minSize = NSSize(width: 900, height: 580)
-            gitWindow.isReleasedWhenClosed = false
-            gitWindow.contentViewController = hosting
-            gitWindow.delegate = self
-            gitWindow.center()
-            gitWindow.setFrameAutosaveName("KiteGitClientWindow")
-            hostingController = hosting
-            window = gitWindow
+        )
+        let gitWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        gitWindow.title = "Git — \(URL(fileURLWithPath: repositoryRoot).lastPathComponent)"
+        gitWindow.titlebarAppearsTransparent = true
+        gitWindow.minSize = NSSize(width: 900, height: 620)
+        gitWindow.isReleasedWhenClosed = false
+        gitWindow.contentViewController = hosting
+        super.init(window: gitWindow)
+        gitWindow.delegate = self
+        gitWindow.center()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    static func show(model: KiteModel, repositoryPath: String) {
+        Task { @MainActor in
+            let root = await model.gitRepositoryRoot(path: repositoryPath) ?? repositoryPath
+            let canonical = URL(fileURLWithPath: root)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+            if let existing = controllers[canonical] {
+                existing.showWindow(nil)
+                existing.window?.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                return
+            }
+            let controller = KiteGitClientWindowController(model: model, repositoryRoot: canonical)
+            controllers[canonical] = controller
+            controller.showWindow(nil)
+            controller.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
-        if window?.isMiniaturized == true {
-            window?.deminiaturize(nil)
-        }
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        let size = window?.frame.size ?? NSSize(width: 1_180, height: 760)
+        let state = GitClientWindowSessionDto(
+            repositoryRoot: repositoryRoot,
+            width: UInt32(max(size.width, 900)),
+            height: UInt32(max(size.height, 620)),
+            changesRatioBp: 3_300,
+            detailsRatioBp: 2_900,
+            consoleRatioBp: 1_800,
+            consoleExpanded: true,
+            lastView: "changes"
+        )
+        model.saveGitClientWindowState(state)
+        Self.controllers.removeValue(forKey: repositoryRoot)
     }
 }
 
@@ -71,6 +107,43 @@ private enum GitDisplayRow: Identifiable {
     }
 }
 
+private enum KiteGitNoticeAction {
+    case refresh
+    case pull
+    case showChanges
+    case openConsole
+}
+
+private struct KiteGitNotice: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let isError: Bool
+    let action: KiteGitNoticeAction?
+    let actionTitle: String?
+}
+
+private struct KiteGitShortcutInfo: Identifiable {
+    let id = UUID()
+    let label: String
+    let keys: String
+}
+
+private let kiteGitClientShortcuts: [KiteGitShortcutInfo] = [
+    .init(label: "打开 Git 客户端", keys: "⇧⌘G"),
+    .init(label: "刷新仓库", keys: "⇧⌘R"),
+    .init(label: "获取", keys: "⌥⌘F"),
+    .init(label: "拉取", keys: "⌥⌘P"),
+    .init(label: "推送", keys: "⌥⌘K"),
+    .init(label: "提交", keys: "⌘K"),
+    .init(label: "贮藏", keys: "⌥⌘S"),
+    .init(label: "显示或隐藏控制台", keys: "⌘J"),
+    .init(label: "快捷键", keys: "F1"),
+    .init(label: "关闭提示或浮层", keys: "Esc"),
+]
+
+private let kiteF1Shortcut = KeyEquivalent(Character(UnicodeScalar(NSF1FunctionKey)!))
+
 private struct KiteGitClientWindowView: View {
     @ObservedObject var model: KiteModel
     @State private var repositoryPath: String
@@ -92,6 +165,15 @@ private struct KiteGitClientWindowView: View {
     @State private var pendingDiscardLines: [GitLineSelectionDto]?
     @State private var pendingDiscardPaths: [String]?
     @State private var discardDescription = "此操作无法撤销。"
+    @State private var commitMessage = ""
+    @State private var consoleExpanded = true
+    @State private var consoleLines = ["Git 客户端已就绪。"]
+    @State private var notice: KiteGitNotice?
+    @State private var showShortcuts = false
+    @State private var showCommitOptions = false
+    @State private var busyTask: String?
+    @State private var busyCancellation: VcsCancellation?
+    @State private var taskGeneration: UInt64 = 0
 
     init(model: KiteModel, repositoryPath: String) {
         self.model = model
@@ -107,18 +189,50 @@ private struct KiteGitClientWindowView: View {
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
                     .frame(height: 0.5)
-
-                HSplitView {
-                    changesPanel
-                        .frame(minWidth: 300, idealWidth: 360, maxWidth: 460)
-                    diffPanel
-                        .frame(minWidth: 520, maxWidth: .infinity)
+                if changes?.operation != nil {
+                    operationBanner
+                }
+                VStack(spacing: 0) {
+                    HSplitView {
+                        changesPanel
+                            .frame(minWidth: 300, idealWidth: 360, maxWidth: 460)
+                        diffPanel
+                            .frame(minWidth: 520, maxWidth: .infinity)
+                    }
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(height: 0.5)
+                    consolePanel
+                        .frame(height: consoleExpanded ? 150 : 32)
                 }
             }
         }
-        .frame(minWidth: 900, minHeight: 580)
+        .frame(minWidth: 900, minHeight: 620)
         .task(id: repositoryPath) {
             await loadChanges()
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if let notice {
+                noticeView(notice)
+                    .padding(.trailing, 18)
+                    .padding(.bottom, 42)
+            }
+        }
+        .sheet(isPresented: $showShortcuts) {
+            KiteGitClientShortcutSheet()
+        }
+        .sheet(isPresented: $showCommitOptions, onDismiss: {
+            Task { await loadChanges() }
+        }) {
+            KiteGitCommitSheet(model: model, path: repositoryPath)
+                .frame(minWidth: 760, minHeight: 620)
+        }
+        .onExitCommand {
+            if showShortcuts {
+                showShortcuts = false
+            } else {
+                notice = nil
+            }
         }
         .alert("丢弃所选改动？", isPresented: $showDiscardConfirmation) {
             Button("取消", role: .cancel) {
@@ -157,6 +271,27 @@ private struct KiteGitClientWindowView: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                Button("Stash / 操作") {
+                    let selectedPaths = selectedPath.map {
+                        [(repositoryPath as NSString).appendingPathComponent($0)]
+                    } ?? []
+                    KiteGitToolsWindowController.show(
+                        model: model,
+                        path: repositoryPath,
+                        selectedPaths: selectedPaths
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button("比较") {
+                    KiteDiffViewerWindowController.shared.show(
+                        path: repositoryPath,
+                        appModel: model,
+                        preset: .headToWorkingTree
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button {
                     Task { await loadChanges() }
                 } label: {
@@ -164,6 +299,7 @@ private struct KiteGitClientWindowView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(loading || operating)
+                .keyboardShortcut("r", modifiers: [.command, .shift])
 
                 Toggle("显示忽略", isOn: $showIgnored)
                     .toggleStyle(.checkbox)
@@ -174,6 +310,64 @@ private struct KiteGitClientWindowView: View {
                 Toggle("目录树", isOn: $treeMode)
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
+            }
+            HStack(spacing: 8) {
+                Button("获取") {
+                    runVcsOperation(.fetch, label: "Git 获取")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .keyboardShortcut("f", modifiers: [.command, .option])
+
+                Button("拉取") {
+                    runVcsOperation(.pull, label: "Git 拉取")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .keyboardShortcut("p", modifiers: [.command, .option])
+
+                Button("推送") {
+                    runVcsOperation(.push, label: "Git 推送")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .keyboardShortcut("k", modifiers: [.command, .option])
+
+                Button("提交") {
+                    commit()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isBusy || commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut("k", modifiers: [.command])
+
+                Button("贮藏") {
+                    runVcsOperation(.stash, label: "Git 贮藏")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .keyboardShortcut("s", modifiers: [.command, .option])
+
+                Spacer()
+
+                Button {
+                    consoleExpanded.toggle()
+                } label: {
+                    Image(systemName: "rectangle.bottomthird.inset.filled")
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("j", modifiers: [.command])
+
+                Button("快捷键") {
+                    showShortcuts = true
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .keyboardShortcut(kiteF1Shortcut, modifiers: [])
             }
             HStack(spacing: 8) {
                 if let statusMessage {
@@ -238,6 +432,45 @@ private struct KiteGitClientWindowView: View {
                     }
                 }
             }
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(height: 0.5)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("提交信息")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                TextEditor(text: $commitMessage)
+                    .font(.system(size: 11))
+                    .frame(height: 78)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                    }
+                HStack {
+                    Text("⌘K 提交")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button("高级…") {
+                        showCommitOptions = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isBusy)
+                    Button("提交") {
+                        commit()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(isBusy || commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(12)
         }
     }
 
@@ -365,6 +598,16 @@ private struct KiteGitClientWindowView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button("Diff 查看器") {
+                let fullPath = diff.path.hasPrefix("/")
+                    ? diff.path
+                    : (repositoryPath as NSString).appendingPathComponent(diff.path)
+                KiteDiffViewerWindowController.shared.show(
+                    path: fullPath,
+                    appModel: model,
+                    preset: diff.scope == .staged ? .headToIndex : .indexToWorkingTree
+                )
+            }
             if !checked.isEmpty {
                 if let selectedGroup {
                     switch selectedGroup {
@@ -665,6 +908,309 @@ private struct KiteGitClientWindowView: View {
         }
     }
 
+    private var isBusy: Bool {
+        busyTask != nil || operating || loading || loadingDiff
+    }
+
+    private var operationLabel: String {
+        changes?.operation ?? ""
+    }
+
+    private var operationTitle: String {
+        switch operationLabel {
+        case "正在变基": return "正在变基"
+        case "正在合并": return "正在合并"
+        case "正在拣选": return "正在拣选提交"
+        case "正在还原提交": return "正在还原提交"
+        case "正在二分查找": return "正在二分查找"
+        case "": return ""
+        default: return operationLabel
+        }
+    }
+
+    private var operationDetail: String {
+        switch operationLabel {
+        case "正在变基": return "解决冲突后可继续、跳过当前提交或中止变基。"
+        case "正在合并": return "解决冲突后可继续合并，或中止并回到合并前。"
+        case "正在拣选": return "解决冲突后可继续、跳过当前提交或中止拣选。"
+        case "正在还原提交": return "解决冲突后可继续、跳过当前提交或中止还原。"
+        case "正在二分查找": return "可以结束并重置当前二分查找。"
+        default: return ""
+        }
+    }
+
+    private var operationBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(operationTitle)
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text(operationDetail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if operationLabel != "正在二分查找" {
+                Button("继续") { runControl(.continueOperation, title: "继续") }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(isBusy)
+            }
+            if operationLabel != "正在合并" && operationLabel != "正在二分查找" {
+                Button("跳过") { runControl(.skip, title: "跳过") }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isBusy)
+            }
+            Button(operationLabel == "正在二分查找" ? "结束二分" : "中止") {
+                runControl(.abort, title: "中止")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(isBusy)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.orange.opacity(0.10))
+        .overlay {
+            Rectangle().strokeBorder(.orange.opacity(0.30), lineWidth: 0.5)
+        }
+    }
+
+    private var consolePanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.bottomthird.inset.filled")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                Text("Git 控制台")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(busyTask == nil ? "就绪" : "后台任务运行中")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button(consoleExpanded ? "收起" : "展开") { consoleExpanded.toggle() }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            if consoleExpanded {
+                Divider()
+                if let task = busyTask {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(task).font(.system(size: 10, weight: .medium))
+                            ProgressView().progressViewStyle(.linear).controlSize(.small)
+                        }
+                        if busyCancellation != nil {
+                            Button("取消") { cancelTask() }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.accentColor.opacity(0.055))
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(consoleLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
+        }
+    }
+
+    private func noticeView(_ notice: KiteGitNotice) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(notice.title)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(notice.isError ? Color.red : Color.primary)
+            Text(notice.message)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+            HStack {
+                if let action = notice.action, let title = notice.actionTitle {
+                    Button(title) { applyNotice(action) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+                Spacer()
+                Button("关闭") { self.notice = nil }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(width: 340, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder((notice.isError ? Color.red : Color.accentColor).opacity(0.30), lineWidth: 0.5)
+        }
+    }
+
+    private func runVcsOperation(
+        _ operation: VcsOperationDto,
+        label: String,
+        clearCommit: Bool = false
+    ) {
+        guard !isBusy else { return }
+        taskGeneration &+= 1
+        let generation = taskGeneration
+        let cancellation = VcsCancellation()
+        busyCancellation = cancellation
+        busyTask = label
+        appendConsole("\(label)…")
+        Task {
+            do {
+                let message = try await model.runVcsOperationCancellable(
+                    operation: operation,
+                    path: repositoryPath,
+                    cancellation: cancellation
+                )
+                guard generation == taskGeneration else { return }
+                busyCancellation = nil
+                busyTask = nil
+                if clearCommit { commitMessage = "" }
+                appendConsole(message)
+                statusMessage = message
+                errorMessage = nil
+                notice = KiteGitNotice(
+                    title: label,
+                    message: message,
+                    isError: false,
+                    action: .refresh,
+                    actionTitle: "刷新"
+                )
+                await loadChanges()
+            } catch {
+                guard generation == taskGeneration else { return }
+                busyCancellation = nil
+                busyTask = nil
+                appendConsole("\(label)失败：\(error.localizedDescription)")
+                errorMessage = error.localizedDescription
+                notice = noticeForError(title: label, error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func commit() {
+        let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else {
+            notice = KiteGitNotice(
+                title: "提交信息为空",
+                message: "输入提交信息后才能提交。",
+                isError: true,
+                action: nil,
+                actionTitle: nil
+            )
+            return
+        }
+        runVcsOperation(.commit(message: message), label: "Git 提交", clearCommit: true)
+    }
+
+    private func runControl(_ control: GitOperationControlDto, title: String) {
+        guard !isBusy else { return }
+        taskGeneration &+= 1
+        let generation = taskGeneration
+        busyTask = title
+        appendConsole("\(title)进行中的 Git 操作…")
+        Task {
+            do {
+                let message = try await model.runGitOperationControl(
+                    path: repositoryPath,
+                    control: control
+                )
+                guard generation == taskGeneration else { return }
+                busyTask = nil
+                appendConsole(message)
+                notice = KiteGitNotice(
+                    title: "Git 操作已继续",
+                    message: message,
+                    isError: false,
+                    action: .refresh,
+                    actionTitle: "刷新"
+                )
+                await loadChanges()
+            } catch {
+                guard generation == taskGeneration else { return }
+                busyTask = nil
+                appendConsole("\(title)失败：\(error.localizedDescription)")
+                notice = noticeForError(title: title, error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func cancelTask() {
+        let label = busyTask ?? "Git 任务"
+        busyCancellation?.cancel()
+        busyCancellation = nil
+        busyTask = nil
+        taskGeneration &+= 1
+        appendConsole("已取消：\(label)")
+        notice = KiteGitNotice(
+            title: "任务已取消",
+            message: label,
+            isError: false,
+            action: nil,
+            actionTitle: nil
+        )
+    }
+
+    private func applyNotice(_ action: KiteGitNoticeAction) {
+        notice = nil
+        switch action {
+        case .refresh:
+            Task { await loadChanges() }
+        case .pull:
+            runVcsOperation(.pull, label: "Git 拉取")
+        case .showChanges:
+            break
+        case .openConsole:
+            consoleExpanded = true
+        }
+    }
+
+    private func appendConsole(_ message: String) {
+        consoleLines.append("› \(message)")
+        if consoleLines.count > 200 {
+            consoleLines.removeFirst(consoleLines.count - 200)
+        }
+    }
+
+    private func noticeForError(title: String, error: String) -> KiteGitNotice {
+        let lower = error.lowercased()
+        let rejected = lower.contains("non-fast-forward")
+            || lower.contains("rejected")
+            || lower.contains("fetch first")
+        let conflict = lower.contains("conflict")
+            || lower.contains("unmerged")
+            || error.contains("冲突")
+        return KiteGitNotice(
+            title: rejected ? "推送被拒绝" : (conflict ? "需要解决冲突" : title),
+            message: error,
+            isError: true,
+            action: rejected ? .pull : (conflict ? .showChanges : .openConsole),
+            actionTitle: rejected ? "拉取" : (conflict ? "查看变更" : "查看控制台")
+        )
+    }
+
     private func statusColor(_ code: String) -> Color {
         switch code {
         case "C", "!", "D": return .red
@@ -939,4 +1485,45 @@ private func gitGroupCode(_ group: GitChangeGroupDto) -> String {
 }
 
 
+private struct KiteGitClientShortcutSheet: View {
+    @Environment(\.dismiss) private var dismiss
 
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Git 客户端快捷键")
+                    .font(.system(size: 16, weight: .semibold))
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            ForEach(kiteGitClientShortcuts) { shortcut in
+                HStack {
+                    Text(shortcut.label)
+                        .font(.system(size: 11.5))
+                    Spacer()
+                    Text(shortcut.keys)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            HStack {
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+    }
+}
