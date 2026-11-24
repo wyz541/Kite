@@ -748,7 +748,7 @@ impl SettingsWindow {
             );
             profile_rows.push(self.separator(cx));
         }
-        if matches!(profile_rows.last(), Some(_)) {
+        if profile_rows.last().is_some() {
             profile_rows.pop();
         }
 
@@ -862,6 +862,131 @@ impl SettingsWindow {
             );
         }
 
+        let mut diagnostic_rows = vec![
+            h_flex()
+                .id("agent-diagnostics-actions")
+                .w_full()
+                .gap_6()
+                .items_center()
+                .px_4()
+                .py_3()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_sm().font_medium().child("诊断位置"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(self.agent_diagnostics.log_path.clone()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap_2()
+                        .child(config_button)
+                        .child(log_button),
+                )
+                .into_any_element(),
+        ];
+        for profile in &self.agent_diagnostics.profiles {
+            diagnostic_rows.push(self.separator(cx));
+            diagnostic_rows.push(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .px_4()
+                    .py_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .child(profile.profile_name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(profile.status.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .truncate()
+                            .child(
+                                profile
+                                    .resolved_command
+                                    .clone()
+                                    .unwrap_or_else(|| profile.command.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} · {} · {} 项能力",
+                                profile.protocol,
+                                profile.version.as_deref().unwrap_or("版本待测试"),
+                                profile.capabilities.len()
+                            )),
+                    )
+                    .into_any_element(),
+            );
+        }
+        for entry in self
+            .agent_diagnostics
+            .recent_entries
+            .iter()
+            .rev()
+            .filter(|entry| matches!(entry.level.as_str(), "error" | "warning"))
+            .take(8)
+        {
+            diagnostic_rows.push(self.separator(cx));
+            diagnostic_rows.push(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .px_4()
+                    .py_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().danger)
+                                    .child(entry.event.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(entry.level.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(entry.message.clone()),
+                    )
+                    .into_any_element(),
+            );
+        }
+
         v_flex()
             .gap_6()
             .child(self.section(
@@ -879,37 +1004,7 @@ impl SettingsWindow {
             .when_some(test_result, |this, result| this.child(result))
             .child(self.section(
                 "诊断",
-                vec![
-                    h_flex()
-                        .id("agent-diagnostics-actions")
-                        .w_full()
-                        .gap_6()
-                        .items_center()
-                        .px_4()
-                        .py_3()
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(div().text_sm().font_medium().child("诊断位置"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .truncate()
-                                        .child(self.agent_diagnostics.log_path.clone()),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .flex_shrink_0()
-                                .gap_2()
-                                .child(config_button)
-                                .child(log_button),
-                        )
-                        .into_any_element(),
-                ],
+                diagnostic_rows,
                 Some("日志会遮盖常见 token、密码和 URL 凭据。"),
                 cx,
             ))

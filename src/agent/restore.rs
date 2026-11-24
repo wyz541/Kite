@@ -456,8 +456,10 @@ mod tests {
             std::env::temp_dir().to_string_lossy().into_owned(),
             vec!["/missing".to_string()],
         );
-        let mut store = AgentSessionStore::default();
-        store.active_conversation_id = Some(conversation.id.clone());
+        let mut store = AgentSessionStore {
+            active_conversation_id: Some(conversation.id.clone()),
+            ..AgentSessionStore::default()
+        };
         store.conversations.push(conversation);
         let repaired = normalize_store(store).expect("valid");
         let replacement = std::env::temp_dir().to_string_lossy().into_owned();

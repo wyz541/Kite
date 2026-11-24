@@ -167,13 +167,13 @@ macOS 可与 Finder 共享文件剪贴板。
 
 ### Agent 集成
 
-- 设置中的“Agent”页面可添加、复制、编辑和删除外部 Agent 配置，并选择默认 Agent。
+- 设置中的“Agent”页面可添加预设、选择默认 Agent、测试连接和删除配置。
 - 内置 Claude Code 与 Codex 的 ACP 预设；预设只填写接入元数据，不覆盖 Agent 原生认证或配置。
 - 右键菜单提供“使用 Agent”子菜单，可携带当前文件、目录或多选上下文打开 Agent 窗口。
 - Agent 窗口显示模型、工作目录、固定上下文、权限摘要和连接状态。
 - 支持 ACP / JSON-RPC over stdio、流式回答、停止、重试、复制结果和长输出保护。
-- 可选恢复 Agent、模型、工作目录、上下文、对话和窗口状态；路径失效时显示修复入口，不阻塞 Kite 启动。
-- Agent 诊断页显示版本、协议、能力、连接测试、配置路径和脱敏日志。
+- 可选恢复 Agent、工作目录、上下文、对话草稿和独立窗口大小；路径失效时给出可恢复提示，不阻塞 Kite 启动。
+- Agent 诊断区显示配置路径、日志位置、连接测试结果和脱敏后的最近错误。
 - P0 默认只读；Agent 请求写入、命令执行或其他高风险操作时由用户显式确认。
 
 ### 原生平台集成
@@ -206,6 +206,7 @@ macOS 可与 Finder 共享文件剪贴板。
 | 列宽预设与布局恢复 | 已支持 | 已支持 |
 | 文件预览 | 内置预览 | 系统快速预览 |
 | 预览 Git 状态 | 已支持 | 已支持 |
+| Agent 栏/窗口上下文准备 | 已支持 | 已支持 |
 | Git 分支与标签 | 已支持 | 已支持 |
 | 提交历史与提交图 | 已支持 | 已支持 |
 | Git 客户端 | 已支持 | 已支持 |
@@ -219,7 +220,7 @@ macOS 可与 Finder 共享文件剪贴板。
 | Agent 对话与任务控制 | 已支持 | 已支持 |
 | Agent 会话恢复 | 已支持 | 已支持 |
 | Agent 诊断与脱敏日志 | 已支持 | 已支持 |
-| Agent diff 审核与权限确认 | 已支持 | 已支持 |
+| Agent 权限确认 | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |
@@ -250,8 +251,9 @@ Kite 仍处于 `0.6.x` 活跃开发阶段。
 - 自定义布局提供列显示开关和三个列宽预设。拖动列顺序仍未实现。
 - Kite 不内置模型运行时，也不自动下载 Agent；用户需先安装并完成 Agent 原生认证。
 - Agent 命令继承的权限由外部进程和操作系统决定。Kite 不宣称能沙箱化任意 CLI 进程。
-- Agent 默认只读；只有在 diff 和明确确认后才会应用文件修改，不会自动执行 Agent 建议的 shell 命令。
+- Agent 默认只读；Kite 不会自动应用文件修改或执行 Agent 建议的 shell 命令。
 - Agent 会话保存在本机，恢复前会检查路径；缺失路径不会阻止 Kite 启动。
+- Agent diff 审核与应用仍未接入；本期继续保持只读边界。
 - 本期不做多 Agent 并行对比、云同步或团队共享 Agent 配置。
 
 ## 后续方向
@@ -351,7 +353,8 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [项目宪法与设计原则](docs/design/manifesto.md)
 - [平台边界](docs/architecture/platforms.md)
 - [右键菜单架构](docs/architecture/context-menu.md)
-- [Agent 集成架构](docs/architecture/agent-integration.md)`r`n- [Agent 表面架构](docs/architecture/agent-surface.md)
+- [Agent 集成架构](docs/architecture/agent-integration.md)
+- [Agent 表面架构](docs/architecture/agent-surface.md)
 - [压缩与解压实现](docs/architecture/context-menu.md#压缩菜单)
 - [默认文件管理器](docs/architecture/default-file-manager.md)
 - [更新器架构](docs/architecture/updater.md)

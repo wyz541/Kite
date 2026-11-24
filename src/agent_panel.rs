@@ -19,7 +19,7 @@ use kite_core::agent::{
     AgentContext, AgentContextMode, AgentConversation, AgentLaunchRequest, AgentMessage,
     AgentMessageRole, AgentPath, AgentPermissionDecision, AgentProfile, AgentRuntime,
     AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase, load_agent_profiles,
-    new_agent_conversation_id, save_agent_conversation,
+    load_agent_sessions, new_agent_conversation_id, save_agent_conversation,
 };
 
 pub(crate) struct AgentPanel {
@@ -34,8 +34,11 @@ pub(crate) struct AgentPanel {
     main_app: Option<WeakEntity<KiteApp>>,
     notice: Option<SharedString>,
     conversation_id: String,
+    history: Vec<AgentMessage>,
+    turn_id: u64,
     sent_prompt: String,
     saved_terminal_snapshot: bool,
+    window_size: (u32, u32),
     poll_task: Task<()>,
 }
 
@@ -55,7 +58,7 @@ impl AgentPanel {
         } else {
             AgentSessionPhase::Unconfigured
         };
-        Self {
+        let mut panel = Self {
             context: None,
             mode: AgentContextMode::Fixed,
             phase,
@@ -67,14 +70,139 @@ impl AgentPanel {
             main_app: None,
             notice: None,
             conversation_id: new_agent_conversation_id(),
+            history: Vec::new(),
+            turn_id: 0,
             sent_prompt: String::new(),
             saved_terminal_snapshot: false,
+            window_size: (960, 760),
             poll_task: Task::ready(()),
+        };
+        panel.restore_session(window, cx);
+        panel
+    }
+
+    fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let restore = load_agent_sessions();
+        let Some(profile_id) = self.profile.as_ref().map(|profile| profile.id.clone()) else {
+            return;
+        };
+        let Some(conversation) = restore
+            .store
+            .active_conversation_id
+            .as_ref()
+            .and_then(|id| {
+                restore
+                    .store
+                    .conversations
+                    .iter()
+                    .find(|item| &item.id == id)
+            })
+            .filter(|conversation| conversation.profile_id == profile_id)
+            .or_else(|| {
+                restore
+                    .store
+                    .conversations
+                    .iter()
+                    .find(|conversation| conversation.profile_id == profile_id)
+            })
+        else {
+            return;
+        };
+        self.window_size = (conversation.window_width, conversation.window_height);
+        self.history = conversation.messages.clone();
+        self.mode = if conversation.follow_selection {
+            AgentContextMode::FollowSelection
+        } else {
+            AgentContextMode::Fixed
+        };
+        self.conversation_id = conversation.id.clone();
+        self.prompt_input.update(cx, |input, cx| {
+            input.set_value(conversation.draft.clone(), window, cx);
+        });
+        self.set_output(
+            &conversation
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == AgentMessageRole::Assistant)
+                .map(|message| message.content.clone())
+                .unwrap_or_default(),
+            cx,
+        );
+        let missing_paths = restore.working_directory_missing || !restore.missing_paths.is_empty();
+        if conversation.context_paths.is_empty() {
+            self.context = None;
+            self.phase = if missing_paths {
+                AgentSessionPhase::Error
+            } else {
+                AgentSessionPhase::Ended
+            };
+            self.notice = Some(
+                if missing_paths {
+                    "恢复的 Agent 会话包含失效路径；可移除后重新选择"
+                } else {
+                    "已恢复上次 Agent 会话；请重新选择上下文"
+                }
+                .into(),
+            );
+            return;
+        }
+        let paths = conversation
+            .context_paths
+            .iter()
+            .map(|path| AgentPath::new(path.clone(), Path::new(path).is_dir()))
+            .collect::<Vec<_>>();
+        let primary_path = paths[0].path.clone();
+        match AgentContext::new(
+            &primary_path,
+            paths,
+            Some(PathBuf::from(&conversation.working_directory)),
+        ) {
+            Ok(context) => {
+                self.context = Some(context);
+                if missing_paths {
+                    self.phase = AgentSessionPhase::Error;
+                    self.notice = Some("恢复的 Agent 会话包含失效路径；可移除后重新选择".into());
+                } else {
+                    self.phase = AgentSessionPhase::Ended;
+                    self.notice = Some("已恢复上次 Agent 会话".into());
+                }
+            }
+            Err(error) => {
+                self.phase = AgentSessionPhase::Error;
+                self.notice = Some(error.into());
+            }
         }
     }
 
     pub(crate) fn set_main_app(&mut self, main_app: WeakEntity<KiteApp>) {
         self.main_app = Some(main_app);
+    }
+
+    pub(crate) fn window_size(&self) -> (u32, u32) {
+        self.window_size
+    }
+
+    pub(crate) fn draft_value(&self, cx: &App) -> String {
+        self.prompt_input.read(cx).value().to_string()
+    }
+
+    pub(crate) fn persist_window_state(&mut self, width: u32, height: u32, draft: String) {
+        self.window_size = (width.clamp(680, 3_840), height.clamp(560, 2_160));
+        let store = load_agent_sessions().store;
+        let Some(mut conversation) = store
+            .conversations
+            .into_iter()
+            .find(|conversation| conversation.id == self.conversation_id)
+        else {
+            self.persist_conversation(draft);
+            return;
+        };
+        conversation.window_width = self.window_size.0;
+        conversation.window_height = self.window_size.1;
+        conversation.draft = draft;
+        conversation.updated_unix_ms = now_unix_ms();
+        let _ = save_agent_conversation(conversation);
     }
 
     pub(crate) fn present(
@@ -97,6 +225,8 @@ impl AgentPanel {
         self.notice = None;
         self.snapshot = AgentRuntimeSnapshot::default();
         self.conversation_id = new_agent_conversation_id();
+        self.history.clear();
+        self.turn_id = 0;
         self.prompt_input.update(cx, |input, cx| {
             input.set_value(request.prompt, window, cx);
         });
@@ -282,11 +412,12 @@ impl AgentPanel {
             .iter()
             .map(|path| path.path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        self.turn_id = now_unix_ms();
         match AgentRuntime::start(
             profile,
             context.working_directory.to_string_lossy().into_owned(),
             context_paths,
-            Vec::new(),
+            self.history.clone(),
         ) {
             Ok(runtime) => {
                 self.sent_prompt = prompt;
@@ -362,7 +493,7 @@ impl AgentPanel {
             .update(cx, |view, cx| view.set_text(&output, cx));
     }
 
-    fn persist_conversation(&self, draft: String) {
+    fn persist_conversation(&mut self, draft: String) {
         let Some(profile) = self.profile.as_ref() else {
             return;
         };
@@ -370,10 +501,14 @@ impl AgentPanel {
             return;
         };
         let now = now_unix_ms();
-        let mut messages = Vec::new();
+        let mut messages = self.history.clone();
+        let user_message_id = format!("{}:user:{}", self.conversation_id, self.turn_id);
+        let assistant_message_id = format!("{}:assistant:{}", self.conversation_id, self.turn_id);
+        messages
+            .retain(|message| message.id != user_message_id && message.id != assistant_message_id);
         if !self.sent_prompt.trim().is_empty() {
             messages.push(AgentMessage {
-                id: format!("{}:user", self.conversation_id),
+                id: user_message_id,
                 role: AgentMessageRole::User,
                 content: self.sent_prompt.clone(),
                 unix_ms: now,
@@ -382,7 +517,7 @@ impl AgentPanel {
         }
         if !self.snapshot.output.trim().is_empty() {
             messages.push(AgentMessage {
-                id: format!("{}:assistant", self.conversation_id),
+                id: assistant_message_id,
                 role: AgentMessageRole::Assistant,
                 content: self.snapshot.output.clone(),
                 unix_ms: now,
@@ -397,6 +532,7 @@ impl AgentPanel {
             .chars()
             .take(48)
             .collect::<String>();
+        self.history = messages.clone();
         let conversation = AgentConversation {
             id: self.conversation_id.clone(),
             title,
@@ -412,8 +548,8 @@ impl AgentPanel {
             messages,
             remote_session_id: None,
             draft,
-            window_width: 960,
-            window_height: 760,
+            window_width: self.window_size.0,
+            window_height: self.window_size.1,
             updated_unix_ms: now,
         };
         let _ = save_agent_conversation(conversation);
@@ -428,10 +564,10 @@ impl AgentPanel {
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        if let Some(runtime) = self.runtime.as_ref() {
-            if let Err(error) = runtime.cancel() {
-                self.notice = Some(error.to_string().into());
-            }
+        if let Some(runtime) = self.runtime.as_ref()
+            && let Err(error) = runtime.cancel()
+        {
+            self.notice = Some(error.to_string().into());
         }
         cx.notify();
     }
@@ -442,10 +578,10 @@ impl AgentPanel {
         decision: AgentPermissionDecision,
         cx: &mut Context<Self>,
     ) {
-        if let Some(runtime) = self.runtime.as_ref() {
-            if let Err(error) = runtime.respond_permission(request_id, decision) {
-                self.notice = Some(error.to_string().into());
-            }
+        if let Some(runtime) = self.runtime.as_ref()
+            && let Err(error) = runtime.respond_permission(request_id, decision)
+        {
+            self.notice = Some(error.to_string().into());
         }
         cx.notify();
     }

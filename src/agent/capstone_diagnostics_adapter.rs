@@ -30,3 +30,28 @@ pub fn profile_diagnostic_from_connection(
         latency_ms: connection.latency_ms,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_errors_are_redacted_before_presentation() {
+        let profile = AgentProfile::default();
+        let connection = AgentConnectionInfo {
+            success: false,
+            protocol_version: 0,
+            agent_name: "Fixture".to_string(),
+            agent_version: "1.0".to_string(),
+            capabilities: Vec::new(),
+            latency_ms: 12,
+            error: Some("Authorization: Bearer secret-token".to_string()),
+        };
+
+        let diagnostic = profile_diagnostic_from_connection(&profile, None, &connection);
+
+        assert_eq!(diagnostic.status, "error");
+        assert!(!diagnostic.message.contains("secret-token"));
+        assert!(diagnostic.protocol_version.is_none());
+    }
+}

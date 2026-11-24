@@ -512,6 +512,56 @@ struct KiteSettingsView: View {
                             .controlSize(.small)
                         }
                     }
+                    if let profiles = agentDiagnostics?.profiles, !profiles.isEmpty {
+                        SettingsDivider()
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Agent 状态")
+                                .font(.system(size: 11.5, weight: .medium))
+                            ForEach(profiles, id: \.profileId) { profile in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(profile.profileName) · \(profile.status)")
+                                        .font(.system(size: 11))
+                                    Text(
+                                        "\(profile.protocol) · \(profile.version ?? "版本待测试") · \(profile.capabilities.count) 项能力"
+                                    )
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    Text(profile.resolvedCommand ?? profile.command)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                    }
+                    let recentErrors = (agentDiagnostics?.recentEntries ?? [])
+                        .filter { $0.level == "error" || $0.level == "warning" }
+                    if !recentErrors.isEmpty {
+                        SettingsDivider()
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("最近错误")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(.red)
+                            ForEach(
+                                Array(recentErrors.suffix(8).enumerated()),
+                                id: \.offset
+                            ) { _, entry in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(entry.event) · \(entry.level)")
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                        .foregroundStyle(.red)
+                                    Text(entry.message)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                    }
                     if let warning = agentStore?.warning {
                         SettingsDivider()
                         VStack(alignment: .leading, spacing: 4) {

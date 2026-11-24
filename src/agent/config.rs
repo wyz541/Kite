@@ -173,62 +173,23 @@ pub fn agent_config_path() -> PathBuf {
 }
 
 pub fn agent_presets() -> Vec<AgentPreset> {
-    vec![
-        AgentPreset {
-            id: "claude-code-acp".to_string(),
-            name: "Claude Code".to_string(),
-            description: "通过 Zed 的官方 ACP adapter 使用已登录的 Claude Code。".to_string(),
-            command: if cfg!(windows) {
-                "claude-code-acp.cmd".to_string()
-            } else {
-                "claude-code-acp".to_string()
-            },
-            args: Vec::new(),
-            install_hint: "npm install -g @zed-industries/claude-code-acp@0.16.2".to_string(),
-            documentation_url: "https://www.npmjs.com/package/@zed-industries/claude-code-acp"
-                .to_string(),
-            verified_version: "0.16.2".to_string(),
-        },
-        AgentPreset {
-            id: "codex-acp".to_string(),
-            name: "Codex".to_string(),
-            description: "通过 Zed 的官方 ACP adapter 使用已登录的 Codex。".to_string(),
-            command: if cfg!(windows) {
-                "codex-acp.cmd".to_string()
-            } else {
-                "codex-acp".to_string()
-            },
-            args: Vec::new(),
-            install_hint: "npm install -g @zed-industries/codex-acp@0.16.0".to_string(),
-            documentation_url: "https://www.npmjs.com/package/@zed-industries/codex-acp"
-                .to_string(),
-            verified_version: "0.16.0".to_string(),
-        },
-    ]
+    super::presets::preset_specs()
+        .into_iter()
+        .map(|preset| AgentPreset {
+            id: preset.id,
+            name: preset.name,
+            description: preset.description,
+            command: preset.executable,
+            args: preset.arguments,
+            install_hint: preset.install_hint,
+            documentation_url: preset.documentation_url,
+            verified_version: preset.verified_version,
+        })
+        .collect()
 }
 
 pub fn preset_profile(preset_id: &str) -> Option<AgentProfile> {
-    let preset = agent_presets()
-        .into_iter()
-        .find(|preset| preset.id == preset_id)?;
-    Some(AgentProfile {
-        id: preset.id.clone(),
-        name: preset.name,
-        preset_id: Some(preset.id),
-        transport: AgentTransport::AcpStdio,
-        command: preset.command,
-        args: preset.args,
-        env: Vec::new(),
-        model: None,
-        working_directory_policy: AgentWorkingDirectoryPolicy::SelectedItem,
-        custom_working_directory: None,
-        permission_mode: AgentPermissionMode::ReadOnly,
-        startup_timeout_ms: 20_000,
-        idle_timeout_ms: 120_000,
-        max_output_bytes: 2 * 1024 * 1024,
-        credential_ref: None,
-        enabled: true,
-    })
+    super::preset_adapter::preset_profile(preset_id, preset_id.to_string())
 }
 
 pub fn load_agent_profiles() -> AgentStoreLoad {
@@ -540,8 +501,17 @@ mod tests {
 
     #[test]
     fn preset_profiles_are_valid_and_do_not_contain_secrets() {
-        for preset in agent_presets() {
+        let specs = super::super::presets::preset_specs();
+        let presets = agent_presets();
+        assert_eq!(presets.len(), specs.len());
+        for (preset, spec) in presets.iter().zip(specs) {
+            assert_eq!(preset.id, spec.id);
+            assert_eq!(preset.name, spec.name);
+            assert_eq!(preset.command, spec.executable);
+            assert_eq!(preset.args, spec.arguments);
             let profile = preset_profile(&preset.id).expect("preset profile");
+            assert_eq!(profile.id, preset.id);
+            assert_eq!(profile.preset_id.as_deref(), Some(preset.id.as_str()));
             validate_agent_profile(&profile).expect("valid preset");
             assert!(profile.env.is_empty());
             assert!(profile.credential_ref.is_none());

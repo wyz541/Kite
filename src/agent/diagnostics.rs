@@ -1,5 +1,4 @@
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::thread;
@@ -12,11 +11,7 @@ use serde_json::{Value, json};
 use super::config::{AgentProfile, agent_config_path, load_agent_profiles};
 use super::process::{resolve_agent_command, spawn_agent_process, terminate_agent_process};
 
-const MAX_LOG_READ_BYTES: u64 = 256 * 1024;
 const MAX_LOG_ENTRIES: usize = 100;
-const MAX_LOG_FILE_BYTES: u64 = 1024 * 1024;
-
-static LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct AgentConnectionInfo {
@@ -115,42 +110,17 @@ pub fn probe_agent_connection(profile: AgentProfile) -> AgentConnectionInfo {
 }
 
 pub fn clear_agent_diagnostics() -> Result<(), String> {
-    let guard = LOG_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = guard.lock().map_err(|_| "Agent 日志锁不可用".to_string())?;
-    let path = agent_log_path();
-    if path.exists() {
-        fs::remove_file(&path).map_err(|error| format!("无法清除 Agent 日志：{error}"))?;
-    }
-    Ok(())
+    super::capstone_diagnostics::clear_agent_diagnostic_log(&agent_log_path())
 }
 
 pub fn record_agent_event(level: &str, event: &str, message: impl AsRef<str>) {
-    let guard = LOG_LOCK.get_or_init(|| Mutex::new(()));
-    let Ok(_guard) = guard.lock() else {
-        return;
-    };
-    let path = agent_log_path();
-    if let Some(parent) = path.parent()
-        && fs::create_dir_all(parent).is_err()
-    {
-        return;
-    }
-    if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_LOG_FILE_BYTES) {
-        let rotated = path.with_extension("log.1");
-        let _ = fs::remove_file(&rotated);
-        let _ = fs::rename(&path, rotated);
-    }
-    let entry = AgentDiagnosticEntry {
-        unix_ms: unix_ms(),
-        level: normalize_level(level).to_string(),
-        event: sanitize_short(event, 120),
-        message: redact_agent_text(&sanitize_short(message.as_ref(), 16_000)),
-    };
-    if let Ok(line) = serde_json::to_string(&entry)
-        && let Ok(mut output) = OpenOptions::new().create(true).append(true).open(path)
-    {
-        let _ = writeln!(output, "{line}");
-    }
+    let message = redact_agent_text(message.as_ref());
+    let _ = super::capstone_diagnostics::append_agent_diagnostic(
+        &agent_log_path(),
+        normalize_level(level),
+        &sanitize_short(event, 120),
+        message,
+    );
 }
 
 pub fn redact_agent_text(value: &str) -> String {
@@ -307,7 +277,7 @@ fn probe_profile(profile: &AgentProfile) -> Result<(u32, String, String, Vec<Str
                     record_agent_event(
                         "info",
                         "probe",
-                        &format!("{agent_name} {agent_version} protocol={protocol_version}"),
+                        format!("{agent_name} {agent_version} protocol={protocol_version}"),
                     );
                     return Ok((protocol_version, agent_name, agent_version, capabilities));
                 }
@@ -349,31 +319,15 @@ fn flatten_capabilities(value: Value, prefix: &str) -> Vec<String> {
 }
 
 fn read_recent_entries() -> Vec<AgentDiagnosticEntry> {
-    let path = agent_log_path();
-    let Ok(metadata) = fs::metadata(&path) else {
-        return Vec::new();
-    };
-    if !metadata.is_file() {
-        return Vec::new();
-    }
-    let Ok(mut file) = fs::File::open(&path) else {
-        return Vec::new();
-    };
-    if metadata.len() > MAX_LOG_READ_BYTES {
-        let _ = file.seek(SeekFrom::End(-(MAX_LOG_READ_BYTES as i64)));
-    }
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    let mut entries = String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter_map(|line| serde_json::from_str::<AgentDiagnosticEntry>(line).ok())
-        .collect::<Vec<_>>();
-    if entries.len() > MAX_LOG_ENTRIES {
-        entries = entries.split_off(entries.len() - MAX_LOG_ENTRIES);
-    }
-    entries
+    super::capstone_diagnostics::read_recent_diagnostic_entries(&agent_log_path(), MAX_LOG_ENTRIES)
+        .into_iter()
+        .map(|entry| AgentDiagnosticEntry {
+            unix_ms: entry.unix_ms,
+            level: entry.level,
+            event: entry.event,
+            message: entry.message,
+        })
+        .collect()
 }
 
 fn normalize_level(level: &str) -> &'static str {

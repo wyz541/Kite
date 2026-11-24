@@ -160,11 +160,11 @@ impl RuntimeShared {
     }
 
     fn set_state(&self, state: AgentRuntimeState) {
-        if let Ok(mut snapshot) = self.snapshot.lock() {
-            if snapshot.state != state {
-                snapshot.state = state;
-                snapshot.elapsed_ms = self.started.elapsed().as_millis() as u64;
-            }
+        if let Ok(mut snapshot) = self.snapshot.lock()
+            && snapshot.state != state
+        {
+            snapshot.state = state;
+            snapshot.elapsed_ms = self.started.elapsed().as_millis() as u64;
         }
         self.emit(AgentEventKind::Status, None, None);
     }

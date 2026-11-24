@@ -3,20 +3,32 @@
 ## 状态
 
 该记录用于 #157 的双平台产品化验收。
-Core、fixture 与性能基线已可复现；最终截图和键盘验收必须在 #150-#156 合并后的 Windows 与 macOS UI 上完成。
+`issues/157-ui` 已集成 #150-#156 的 UI 与 Core 表面。
+Core、fixture、Windows 编译与性能基线已可复现；真实 Agent、双平台截图和键盘验收仍需在 Windows 与 Apple Silicon macOS 实机完成。
+
+## 当前自动化证据
+
+- `cargo test --locked --lib --features windows-ui agent::`：27 项通过。
+- `cargo test --locked --test agent_fixture`：7 项通过，覆盖正常流、权限、取消、超时、超大输出、失败和进程树清理。
+- `cargo test --locked --test agent_fixture_protocol`：6 项通过，覆盖 ACP 帧、Markdown、权限、取消、重试和脱敏输入。
+- `cargo check --locked --features windows-ui --bin kite-explorer`：通过。
+- `bash .github/scripts/check-feature-matrix.sh`：通过。
+- Windows x64 性能基线：`docs/performance/results/v0.6.94-agent-windows-x64.json`。
+
+macOS 构建和真实 Agent 验收不能在当前 Windows 主机上替代，必须使用 Apple Silicon 实机或 macOS CI 产生证据。
 
 ## 真实 Agent 闭环
 
 | 检查 | Windows | macOS |
 |---|---|---|
-| 安装并认证 Claude Code ACP | 待 UI 合并后执行 | 待 UI 合并后执行 |
-| 安装并认证 Codex ACP | 待 UI 合并后执行 | 待 UI 合并后执行 |
-| 设置中测试连接 | 待 UI 合并后执行 | 待 UI 合并后执行 |
-| 右键文件发起 Agent | 待 UI 合并后执行 | 待 UI 合并后执行 |
-| 流式回答 | 待 UI 合并后执行 | 待 UI 合并后执行 |
-| 停止任务 | 待 UI 合并后执行 | 待 UI 合并后执行 |
-| 复制回答 | 待 UI 合并后执行 | 待 UI 合并后执行 |
-| 关闭后无残留子进程 | 待 UI 合并后执行 | 待 UI 合并后执行 |
+| 安装并认证 Claude Code ACP | 待实机执行 | 待实机执行 |
+| 安装并认证 Codex ACP | 待实机执行 | 待实机执行 |
+| 设置中测试连接 | 待实机执行 | 待实机执行 |
+| 右键文件发起 Agent | 待实机执行 | 待实机执行 |
+| 流式回答 | 待实机执行 | 待实机执行 |
+| 停止任务 | 待实机执行 | 待实机执行 |
+| 复制回答 | 待实机执行 | 待实机执行 |
+| 关闭后无残留子进程 | 待实机执行 | 待实机执行 |
 
 验收使用真实 Agent，不使用 fixture 替代产品闭环。
 fixture 只用于自动化边界测试。

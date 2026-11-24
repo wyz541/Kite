@@ -9,7 +9,7 @@
 当前 macOS 启动基线：[v0.6.61 启动与首内容](startup-macos-v0.6.61.md)。
 当前跨平台启动 CI 基线：[v0.6.61 Windows 与 macOS](startup-ci-v0.6.61.md)。
 当前 Git 提交历史基准：[100,000 提交分页与提交图](git-log-v0.6.88.md)。
-当前 Agent ACP 基准：[启动、内存、吞吐与长输出](agent-v0.6.93.md)。
+当前 Agent ACP 基准：[启动、内存、吞吐与长输出](agent-v0.6.94.md)。
 
 ## 1. 目标
 

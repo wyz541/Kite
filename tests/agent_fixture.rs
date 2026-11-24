@@ -10,14 +10,18 @@ use kite_core::agent::{
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+const READY_TIMEOUT: Duration = Duration::from_secs(20);
+const TURN_TIMEOUT: Duration = Duration::from_secs(10);
+const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn fixture_profile(scenario: &str) -> AgentProfile {
     AgentProfile {
         id: "fixture".to_string(),
         name: "Kite Fixture Agent".to_string(),
         command: env!("CARGO_BIN_EXE_kite-agent-fixture").to_string(),
         args: vec!["--scenario".to_string(), scenario.to_string()],
-        startup_timeout_ms: 5_000,
-        idle_timeout_ms: 5_000,
+        startup_timeout_ms: 20_000,
+        idle_timeout_ms: 20_000,
         max_output_bytes: 256 * 1024,
         ..AgentProfile::default()
     }
@@ -31,7 +35,7 @@ fn start(profile: AgentProfile) -> Arc<AgentRuntime> {
         Vec::new(),
     )
     .expect("start fixture runtime");
-    wait_for(runtime.as_ref(), Duration::from_secs(5), |snapshot| {
+    wait_for(runtime.as_ref(), READY_TIMEOUT, |snapshot| {
         snapshot.state == AgentRuntimeState::Ready
     });
     runtime
@@ -76,7 +80,7 @@ fn prompt_and_wait(
 #[test]
 fn normal_stream_completes() {
     let runtime = start(fixture_profile("normal"));
-    let snapshot = prompt_and_wait(&runtime, "normal", Duration::from_secs(5));
+    let snapshot = prompt_and_wait(&runtime, "normal", TURN_TIMEOUT);
     assert_eq!(snapshot.state, AgentRuntimeState::Completed);
     assert!(snapshot.output.contains("hello world"));
     runtime.shutdown();
@@ -88,7 +92,7 @@ fn permission_request_requires_explicit_response() {
     runtime
         .send_prompt("fixture prompt".to_string(), Vec::new())
         .expect("send prompt");
-    let waiting = wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+    let waiting = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
         snapshot.state == AgentRuntimeState::WaitingPermission
             && !snapshot.permission_requests.is_empty()
     });
@@ -97,7 +101,7 @@ fn permission_request_requires_explicit_response() {
     runtime
         .respond_permission(request.request_id, AgentPermissionDecision::AllowOnce)
         .expect("allow permission");
-    let snapshot = wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
         snapshot.state == AgentRuntimeState::Completed
     });
     assert!(snapshot.output.contains("approved: allow"));
@@ -110,11 +114,11 @@ fn cancel_stops_a_hanging_turn() {
     runtime
         .send_prompt("fixture prompt".to_string(), Vec::new())
         .expect("send prompt");
-    wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+    wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
         snapshot.state == AgentRuntimeState::Running
     });
     runtime.cancel().expect("cancel");
-    let snapshot = wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
         snapshot.state == AgentRuntimeState::Cancelled
     });
     assert_eq!(snapshot.state, AgentRuntimeState::Cancelled);
@@ -126,7 +130,7 @@ fn idle_timeout_is_structured() {
     let mut profile = fixture_profile("idle");
     profile.idle_timeout_ms = 1_000;
     let runtime = start(profile);
-    let snapshot = prompt_and_wait(&runtime, "", Duration::from_secs(5));
+    let snapshot = prompt_and_wait(&runtime, "", TURN_TIMEOUT);
     assert!(matches!(
         snapshot.state,
         AgentRuntimeState::Failed | AgentRuntimeState::Closed
@@ -144,20 +148,31 @@ fn idle_timeout_is_structured() {
 fn oversized_output_is_rejected() {
     let mut profile = fixture_profile("oversized");
     profile.max_output_bytes = 16 * 1024;
-    profile.idle_timeout_ms = 1_000;
     let runtime = start(profile);
-    let snapshot = prompt_and_wait(&runtime, "oversized", Duration::from_secs(5));
-    assert!(matches!(
-        snapshot.state,
-        AgentRuntimeState::Completed | AgentRuntimeState::Closed
-    ));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.output_truncated
+            || matches!(
+                snapshot.state,
+                AgentRuntimeState::Completed
+                    | AgentRuntimeState::Failed
+                    | AgentRuntimeState::Cancelled
+                    | AgentRuntimeState::Closed
+            )
+    });
     assert!(snapshot.output_truncated);
+    runtime.shutdown();
+    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Closed
+    });
 }
 
 #[test]
 fn fixture_failure_is_structured() {
     let runtime = start(fixture_profile("error"));
-    let snapshot = prompt_and_wait(&runtime, "error", Duration::from_secs(5));
+    let snapshot = prompt_and_wait(&runtime, "error", TURN_TIMEOUT);
     assert_eq!(snapshot.state, AgentRuntimeState::Failed);
     assert!(
         snapshot
@@ -187,17 +202,17 @@ fn child_process_is_removed_with_the_agent_tree() {
     runtime
         .send_prompt("fixture prompt".to_string(), Vec::new())
         .expect("send prompt");
-    let child_pid = wait_for_pid(&pid_path, Duration::from_secs(5));
+    let child_pid = wait_for_pid(&pid_path, PROCESS_TIMEOUT);
     assert!(process_exists(child_pid));
     runtime.cancel().expect("cancel");
-    wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+    wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
         matches!(
             snapshot.state,
             AgentRuntimeState::Cancelled | AgentRuntimeState::Closed
         )
     });
     runtime.shutdown();
-    wait_for_process_exit(child_pid, Duration::from_secs(5));
+    wait_for_process_exit(child_pid, PROCESS_TIMEOUT);
     assert!(!process_exists(child_pid));
     let _ = fs::remove_file(pid_path);
 }

@@ -107,8 +107,12 @@ struct KiteAgentContextPath: Identifiable, Hashable {
     private var runtime: AgentRuntime?
     private var pollTask: Task<Void, Never>?
     private var conversationId = ""
+    private var restoredMessages: [AgentMessage] = []
+    private var turnId: UInt64 = 0
     private var sentPrompt = ""
     private var savedTerminalSnapshot = false
+    private var windowWidth: UInt32 = 960
+    private var windowHeight: UInt32 = 760
 
     init() {
         conversationId = core.newAgentConversationId()
@@ -145,6 +149,10 @@ struct KiteAgentContextPath: Identifiable, Hashable {
         profile != nil && hasContext && phase != .loading && phase != .running
     }
 
+    var preferredWindowSize: NSSize {
+        NSSize(width: CGFloat(windowWidth), height: CGFloat(windowHeight))
+    }
+
     func present(
         action: KiteAgentAction,
         primary: String,
@@ -178,6 +186,8 @@ struct KiteAgentContextPath: Identifiable, Hashable {
         savedTerminalSnapshot = false
         sentPrompt = ""
         conversationId = core.newAgentConversationId()
+        restoredMessages = []
+        turnId = 0
         notice = nil
         presentationToken += 1
     }
@@ -205,6 +215,8 @@ struct KiteAgentContextPath: Identifiable, Hashable {
         savedTerminalSnapshot = false
         sentPrompt = ""
         conversationId = core.newAgentConversationId()
+        restoredMessages = []
+        turnId = 0
         notice = nil
         presentationToken += 1
     }
@@ -280,11 +292,12 @@ struct KiteAgentContextPath: Identifiable, Hashable {
             return
         }
         do {
+            turnId = UInt64(Date().timeIntervalSince1970 * 1_000)
             let runtime = try AgentRuntime.start(
                 profile: profile,
                 workingDirectory: workingDirectory,
                 contextPaths: contextPaths.map(\.path),
-                restoredMessages: []
+                restoredMessages: restoredMessages
             )
             self.runtime = runtime
             sentPrompt = trimmed
@@ -372,12 +385,15 @@ struct KiteAgentContextPath: Identifiable, Hashable {
 
     private func restoreConversation() {
         let restore = core.agentSessionState()
+        refreshProfile()
+        guard let profile else { return }
         let conversation = restore.store.conversations.first(where: {
             $0.id == restore.store.activeConversationId
-        }) ?? restore.store.conversations.first
+                && $0.profileId == profile.id
+        }) ?? restore.store.conversations.first(where: {
+            $0.profileId == profile.id
+        })
         guard let conversation else { return }
-        refreshProfile()
-        guard let profile, profile.id == conversation.profileId else { return }
         contextPaths = conversation.contextPaths.map { path in
             var isDirectory: ObjCBool = false
             FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
@@ -389,23 +405,34 @@ struct KiteAgentContextPath: Identifiable, Hashable {
         prompt = conversation.draft
         output = conversation.messages.last(where: { $0.role == .assistant })?.content ?? ""
         conversationId = conversation.id
+        restoredMessages = conversation.messages
+        turnId = 0
+        windowWidth = conversation.windowWidth
+        windowHeight = conversation.windowHeight
         if restore.workingDirectoryMissing || !restore.missingPaths.isEmpty {
             phase = .error
             errorMessage = "恢复的 Agent 上下文包含失效路径，请检查后重试"
             notice = errorMessage
         } else {
             phase = .ended
+            notice = primaryPath == nil
+                ? "已恢复上次 Agent 会话；请重新选择上下文"
+                : "已恢复上次 Agent 会话"
         }
     }
 
     private func persistConversation() {
         guard let profile, hasContext else { return }
-        var messages: [AgentMessage] = []
         let now = UInt64(Date().timeIntervalSince1970 * 1_000)
+        let userMessageId = "\(conversationId):user:\(turnId)"
+        let assistantMessageId = "\(conversationId):assistant:\(turnId)"
+        var messages = restoredMessages.filter {
+            $0.id != userMessageId && $0.id != assistantMessageId
+        }
         if !sentPrompt.isEmpty {
             messages.append(
                 AgentMessage(
-                    id: "\(conversationId):user",
+                    id: userMessageId,
                     role: .user,
                     content: sentPrompt,
                     unixMs: now,
@@ -416,7 +443,7 @@ struct KiteAgentContextPath: Identifiable, Hashable {
         if !output.isEmpty {
             messages.append(
                 AgentMessage(
-                    id: "\(conversationId):assistant",
+                    id: assistantMessageId,
                     role: .assistant,
                     content: output,
                     unixMs: now,
@@ -435,11 +462,30 @@ struct KiteAgentContextPath: Identifiable, Hashable {
             messages: messages,
             remoteSessionId: nil,
             draft: prompt,
-            windowWidth: 960,
-            windowHeight: 760,
+            windowWidth: windowWidth,
+            windowHeight: windowHeight,
             updatedUnixMs: now
         )
         _ = try? core.saveAgentConversation(conversation: conversation)
+        restoredMessages = messages
+    }
+
+    func persistWindowState(width: UInt32, height: UInt32) {
+        windowWidth = min(max(width, 680), 3_840)
+        windowHeight = min(max(height, 560), 2_160)
+        guard let profile, hasContext else { return }
+        let restore = core.agentSessionState()
+        if var conversation = restore.store.conversations.first(where: {
+            $0.id == conversationId
+        }) {
+            conversation.draft = prompt
+            conversation.windowWidth = windowWidth
+            conversation.windowHeight = windowHeight
+            conversation.updatedUnixMs = UInt64(Date().timeIntervalSince1970 * 1_000)
+            _ = try? core.saveAgentConversation(conversation: conversation)
+        } else {
+            persistConversation()
+        }
     }
     private func normalizedPaths(
         primary: String,
@@ -874,6 +920,15 @@ private struct KiteAgentPanelContent: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        if request.options.contains(where: {
+                            $0.kind.contains("always") || $0.kind.contains("task")
+                        }) {
+                            Button("本任务允许") {
+                                agent.respondPermission(request, decision: .allowTask)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
                         Button("拒绝") {
                             agent.respondPermission(request, decision: .rejectOnce)
                         }
@@ -1021,8 +1076,14 @@ final class KiteAgentWindowController: NSWindowController, NSWindowDelegate {
         if window == nil {
             let root = KiteAgentWindowView(model: model).environmentObject(agent)
             let hosting = NSHostingController(rootView: root)
+            let preferredSize = agent.preferredWindowSize
             let agentWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 520, height: 760),
+                contentRect: NSRect(
+                    x: 0,
+                    y: 0,
+                    width: preferredSize.width,
+                    height: preferredSize.height
+                ),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
@@ -1043,5 +1104,12 @@ final class KiteAgentWindowController: NSWindowController, NSWindowDelegate {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        let width = UInt32(max(CGFloat(1), window.frame.width.rounded()))
+        let height = UInt32(max(CGFloat(1), window.frame.height.rounded()))
+        agent?.persistWindowState(width: width, height: height)
     }
 }

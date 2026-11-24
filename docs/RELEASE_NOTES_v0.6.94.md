@@ -7,8 +7,7 @@
 - Add a right-side Agent panel and an independent Agent window with model, workspace, permission, connection, and context status.
 - Support ACP / JSON-RPC over stdio handshake, session creation, streamed Markdown, stop, retry, copy, long-output protection, and structured error recovery.
 - Show permission requests with explicit allow-once, allow-for-task, and reject choices. A rejection is returned to the Agent instead of leaving the task blocked.
-- Review structured file changes as a unified diff before applying or saving them. Files changed after review are not overwritten without a new confirmation.
-- Optionally restore the Agent, model, working directory, context snapshot, conversation, draft, and window state. Missing paths expose a repair path and never block Kite startup.
+- Optionally restore the Agent, model, working directory, context snapshot, conversation, draft, and independent window size. Missing paths expose a repair path and never block Kite startup.
 - Add a diagnostics view for command resolution, version, ACP protocol, capabilities, recent errors, configuration paths, and redacted logs.
 - Add cross-platform ACP fixtures and automated coverage for streaming output, permission requests, cancellation, timeout, oversized output, retry, process-tree cleanup, and credential redaction.
 
@@ -26,6 +25,7 @@
 
 ## Known limitations
 
+- Structured diff review and in-app file application are not part of this P0 release; Kite remains read-only and only copies or locates Agent results.
 - Kite does not bundle, download, or log in an Agent. Users must install and authenticate the external Agent first.
 - The built-in preset list is intentionally limited to verified ACP adapters. Other integrations remain custom profiles.
 - Multi-Agent parallel comparison, cloud sync, team-shared profiles, and automatic Agent upgrades are out of scope.
