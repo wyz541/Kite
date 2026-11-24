@@ -493,6 +493,13 @@ impl Render for KiteFileDragPreview {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ColumnSelection {
+    selected_path: Option<PathBuf>,
+    selected_paths: Vec<PathBuf>,
+    anchor_path: Option<PathBuf>,
+}
+
 #[derive(Clone)]
 struct ColumnPane {
     path: PathBuf,
@@ -508,6 +515,11 @@ struct ColumnPane {
     collapsed_groups: BTreeSet<String>,
     search_query: Option<String>,
     search_truncated: bool,
+    /// Results came from the local listing, not the recursive walk.
+    search_preview: bool,
+    /// Selection from before the search started; restored when it ends so a
+    /// query that hides the selected file does not lose it.
+    pre_search_selection: Option<ColumnSelection>,
     loading: bool,
     skipped: usize,
     git_available: bool,
@@ -538,6 +550,8 @@ impl ColumnPane {
             collapsed_groups: rule.collapsed_groups,
             search_query: None,
             search_truncated: false,
+            search_preview: false,
+            pre_search_selection: None,
             loading,
             skipped,
             git_available,
@@ -560,7 +574,10 @@ impl ColumnPane {
             .filter(|entry| self.filter.matches(entry))
             .cloned()
             .collect::<Vec<_>>();
-        sort_entries(&mut entries, self.sort);
+        // Search results arrive ranked by relevance; keep that order.
+        if self.search_entries.is_none() {
+            sort_entries(&mut entries, self.sort);
+        }
         self.entries = entries;
         self.selected_paths.retain(|selected| {
             self.entries
@@ -693,6 +710,8 @@ impl ColumnPane {
         self.search_entries = None;
         self.search_query = None;
         self.search_truncated = false;
+        self.search_preview = false;
+        self.pre_search_selection = None;
         self.skipped = skipped;
         self.loading = false;
         self.refresh_view();
@@ -717,17 +736,59 @@ impl ColumnPane {
     }
 
     fn set_search_results(&mut self, query: String, entries: Vec<FileEntry>, truncated: bool) {
+        self.remember_pre_search_selection();
         self.search_entries = Some(entries);
         self.search_query = Some(query);
         self.search_truncated = truncated;
+        self.search_preview = false;
+        self.refresh_view();
+    }
+
+    #[cfg(test)]
+    fn set_search_preview(&mut self, query: String, mut entries: Vec<FileEntry>) {
+        self.remember_pre_search_selection();
+        sort_entries(&mut entries, self.sort);
+        self.search_entries = Some(entries);
+        self.search_query = Some(query);
+        self.search_truncated = false;
+        self.search_preview = true;
         self.refresh_view();
     }
 
     fn clear_search_results(&mut self) {
+        let was_searching = self.search_entries.is_some();
         self.search_entries = None;
         self.search_query = None;
         self.search_truncated = false;
+        self.search_preview = false;
+        if let Some(saved) = self.pre_search_selection.take()
+            && was_searching
+        {
+            self.selected_path = saved.selected_path;
+            self.selected_paths = saved.selected_paths;
+            self.selection_anchor_path = saved.anchor_path;
+        }
         self.refresh_view();
+    }
+
+    /// Captures the selection the first time results replace the listing.
+    fn remember_pre_search_selection(&mut self) {
+        if self.search_entries.is_none() && self.pre_search_selection.is_none() {
+            self.pre_search_selection = Some(ColumnSelection {
+                selected_path: self.selected_path.clone(),
+                selected_paths: self.selected_paths.clone(),
+                anchor_path: self.selection_anchor_path.clone(),
+            });
+        }
+    }
+
+    #[cfg(test)]
+    fn first_search_row_index(&self) -> Option<usize> {
+        let first_match = self.entries.first()?.path.as_path();
+        self.display_rows().iter().position(|row| match row {
+            ColumnDisplayRow::Entry(entry) => same_path(&entry.path, first_match),
+            ColumnDisplayRow::Group { .. } => false,
+        })
     }
 
     fn display_rows(&self) -> Vec<ColumnDisplayRow> {
@@ -749,7 +810,10 @@ impl ColumnPane {
 
         let mut rows = Vec::new();
         for ((_, label), mut entries) in groups {
-            sort_entries(&mut entries, self.sort);
+            // Search results arrive ranked; keep that order inside each group.
+            if self.search_entries.is_none() {
+                sort_entries(&mut entries, self.sort);
+            }
             let collapsed = self.collapsed_groups.contains(&label);
             rows.push(ColumnDisplayRow::Group {
                 label: SharedString::from(label),
@@ -10385,6 +10449,52 @@ fn loaded_column_index(panes: &[ColumnPane], path: &Path) -> Option<usize> {
 
 fn column_count_after_file_selection(column: usize, current_count: usize) -> usize {
     (column + 1).min(current_count)
+}
+
+#[cfg(test)]
+fn search_selection_step(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match current {
+        Some(index) if forward => (index + 1).min(len - 1),
+        Some(index) => index.saturating_sub(1),
+        None if forward => 0,
+        None => len - 1,
+    })
+}
+
+/// Steps over display rows that hold entries, skipping group headers.
+#[cfg(test)]
+fn entry_row_step(
+    entry_rows: &[usize],
+    current_row: Option<usize>,
+    forward: bool,
+) -> Option<usize> {
+    let position =
+        current_row.and_then(|row| entry_rows.iter().position(|candidate| *candidate == row));
+    let next = search_selection_step(position, entry_rows.len(), forward)?;
+    entry_rows.get(next).copied()
+}
+
+#[cfg(test)]
+fn search_query_narrows(previous: &str, next: &str) -> bool {
+    let previous = previous.trim().to_lowercase();
+    let next = next.trim().to_lowercase();
+    !previous.is_empty() && next.contains(&previous)
+}
+
+#[cfg(test)]
+fn narrow_search_entries(entries: &[FileEntry], query: &str) -> Vec<FileEntry> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|entry| entry.name.to_lowercase().contains(&query))
+        .cloned()
+        .collect()
 }
 
 impl Focusable for KiteApp {
