@@ -5,6 +5,7 @@ use std::sync::{
 };
 use std::time::UNIX_EPOCH;
 
+use crate::agent::AgentProfileStore;
 use crate::archive::{self, ArchiveFormat, ArchivePhase, ArchiveProgress};
 use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSearchSnapshot};
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
@@ -1302,6 +1303,7 @@ impl KiteError {
 pub struct KiteCore {
     search_cancel: Mutex<Option<Arc<AtomicBool>>>,
     indexed_search_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    agent_profile_store: Arc<AgentProfileStore>,
 }
 
 #[uniffi::export]
@@ -1311,7 +1313,12 @@ impl KiteCore {
         Arc::new(Self {
             search_cancel: Mutex::new(None),
             indexed_search_cancel: Mutex::new(None),
+            agent_profile_store: AgentProfileStore::new(),
         })
+    }
+
+    pub fn agent_profile_store(&self) -> Arc<AgentProfileStore> {
+        Arc::clone(&self.agent_profile_store)
     }
 
     pub fn version(&self) -> String {
