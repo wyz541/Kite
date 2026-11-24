@@ -204,7 +204,7 @@ fn persists_only_safe_configuration_and_credential_references() {
     safe.arguments = vec!["--read-only".to_string()];
     store.create_profile(safe).expect("create safe profile");
 
-    let before_attempt = fs::read(&temp.config_path()).expect("read safe config");
+    let before_attempt = fs::read(temp.config_path()).expect("read safe config");
     let before_text = String::from_utf8(before_attempt.clone()).expect("utf8 config");
     assert!(before_text.contains("\"credential_ref\": \"keychain:kite/agent/default\""));
 
@@ -219,7 +219,7 @@ fn persists_only_safe_configuration_and_credential_references() {
     assert!(error.to_string().contains("credential_ref"));
     assert!(!error.to_string().contains("not-stored-secret"));
 
-    let after_attempt = fs::read(&temp.config_path()).expect("read unchanged config");
+    let after_attempt = fs::read(temp.config_path()).expect("read unchanged config");
     assert_eq!(before_attempt, after_attempt);
     let after_text = String::from_utf8(after_attempt).expect("utf8 config");
     assert!(!after_text.contains("not-stored-secret"));

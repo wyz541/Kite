@@ -1,7 +1,16 @@
+pub mod capstone_diagnostics;
+pub mod capstone_diagnostics_adapter;
 pub mod connection;
 mod context;
 pub mod credentials;
+mod diagnostics;
+pub mod preset_adapter;
+pub mod presets;
+mod process;
+mod restore;
+mod runtime;
 mod store;
+mod ui_compat;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -717,6 +726,31 @@ fn generate_profile_id() -> String {
         sequence
     )
 }
+
+pub use diagnostics::{
+    AgentConnectionInfo, AgentDiagnosticEntry, AgentDiagnostics, AgentProfileDiagnostic,
+    agent_log_path, clear_agent_diagnostics, diagnose_agents, probe_agent_connection,
+    record_agent_event, redact_agent_text,
+};
+pub use preset_adapter::{apply_preset_to_existing, preset_profile};
+pub use presets::{
+    AgentPreset, AgentPresetPermission, AgentPresetSpec, AgentPresetTransport, agent_presets,
+    preset_spec, preset_specs,
+};
+pub use restore::{
+    AgentContextRepair, AgentConversation, AgentMessage, AgentMessageRole, AgentSessionRestore,
+    AgentSessionStore, agent_session_path, delete_agent_conversation, load_agent_conversation,
+    load_agent_sessions, load_agent_sessions_at, new_agent_conversation_id, repair_agent_context,
+    save_agent_conversation, save_agent_sessions_at,
+};
+pub use runtime::{
+    AgentEvent, AgentEventKind, AgentPermissionDecision, AgentPermissionOption,
+    AgentPermissionRequest, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState,
+};
+pub use ui_compat::{
+    AgentStoreLoad, agent_config_path, default_agent_profile_id, load_agent_profiles,
+    save_agent_profiles,
+};
 
 #[cfg(test)]
 mod tests {

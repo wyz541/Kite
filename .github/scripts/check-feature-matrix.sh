@@ -27,6 +27,13 @@ required_features=(
   "Git Stash、Reset、Revert 与 Cherry-pick"
   "Git 远程、Fetch/Pull/Push、克隆与初始化"
   "Diff 查看器"
+  "Agent 设置与预设"
+  "Agent 右键入口"
+  "Agent 对话与任务控制"
+  "Agent 会话恢复"
+  "Agent 诊断与脱敏日志"
+  "Agent diff 审核与文件写入"
+  "Agent 权限确认"
   "Agent 配置管理"
   "Agent 连接测试与钥匙串凭据"
 )

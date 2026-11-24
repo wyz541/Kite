@@ -6726,6 +6726,10 @@ impl KiteApp {
             .cloned()
     }
 
+    pub(crate) fn show_preview_panel(&mut self, cx: &mut Context<Self>) {
+        self.set_right_pane_mode(RightPaneMode::Preview, cx);
+    }
+
     fn set_right_pane_mode(&mut self, mode: RightPaneMode, cx: &mut Context<Self>) {
         if self.right_pane_mode == mode {
             return;

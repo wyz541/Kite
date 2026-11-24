@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kite_core::agent::{
-    AgentCapabilities, AgentConnectionResult, AgentConnectionStatus, AgentEnvironmentVariable,
-    AgentProfile, AgentProfileSnapshot, AgentProfileStore, AgentTransport, PermissionPolicy,
-    WorkingDirectoryPolicy,
+    AgentCapabilities, AgentConnectionResult, AgentConnectionStatus, AgentDiagnostics,
+    AgentEnvironmentVariable, AgentProfile, AgentProfileSnapshot, AgentProfileStore,
+    AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, agent_presets,
+    clear_agent_diagnostics, diagnose_agents, preset_profile,
 };
 
 use crate::app::{KiteApp, SettingsUpdateState};
@@ -267,8 +268,10 @@ impl AgentEditorState {
     }
 
     fn snapshot(&self, cx: &App) -> String {
+        let timeout = self.timeout_input.read(cx).value();
+        let output_limit = self.output_limit_input.read(cx).value();
         format!(
-            "{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             self.transport,
             self.permission,
             self.capabilities,
@@ -283,11 +286,8 @@ impl AgentEditorState {
             self.working_directory_input.read(cx).value(),
             self.credential_env_input.read(cx).value(),
             self.credential_input.read(cx).value(),
-            format!(
-                "{}|{}",
-                self.timeout_input.read(cx).value(),
-                self.output_limit_input.read(cx).value()
-            )
+            timeout,
+            output_limit,
         )
     }
 
@@ -508,6 +508,7 @@ pub(crate) struct SettingsWindow {
     update_state: SettingsUpdateState,
     status: Option<SharedString>,
     agent_config: AgentProfileSnapshot,
+    agent_diagnostics: AgentDiagnostics,
     agent_store: Arc<AgentProfileStore>,
     agent_warning: Option<SharedString>,
     agent_message: Option<SharedString>,
@@ -545,6 +546,7 @@ impl SettingsWindow {
             status: initial_update_state.status.clone(),
             update_state: initial_update_state,
             agent_config: agent_snapshot.clone(),
+            agent_diagnostics: diagnose_agents(),
             agent_store,
             agent_warning: agent_snapshot
                 .warning
@@ -677,6 +679,7 @@ impl SettingsWindow {
             .as_ref()
             .map(|warning| SharedString::from(warning.message()));
         self.agent_config = snapshot;
+        self.agent_diagnostics = diagnose_agents();
     }
 
     fn notify_agents_changed(&self, cx: &mut Context<Self>) {
@@ -708,6 +711,30 @@ impl SettingsWindow {
                 .name_input
                 .update(cx, |input, cx| input.focus(window, cx));
         }
+        cx.notify();
+    }
+
+    fn add_agent_preset(&mut self, preset_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut profile) = preset_profile(preset_id, kite_core::agent::new_profile_id())
+        else {
+            self.agent_message = Some("未知的 Agent 预设".into());
+            cx.notify();
+            return;
+        };
+        let base_name = profile.name.clone();
+        let mut suffix = 2;
+        while self
+            .agent_config
+            .profiles
+            .iter()
+            .any(|existing| existing.name.eq_ignore_ascii_case(&profile.name))
+        {
+            profile.name = format!("{base_name} ({suffix})");
+            suffix += 1;
+        }
+        self.agent_editor = Some(AgentEditorState::new(profile, true, window, cx));
+        self.agent_pending_delete = None;
+        self.agent_message = Some("请检查预设字段并测试连接后再保存".into());
         cx.notify();
     }
 
@@ -817,6 +844,7 @@ impl SettingsWindow {
                 self.agent_config = config;
                 self.agent_warning = None;
                 self.agent_message = Some("已创建副本，请检查名称和凭据".into());
+                self.agent_diagnostics = diagnose_agents();
                 self.notify_agents_changed(cx);
                 if let Some(duplicate) = duplicate {
                     self.open_edit_agent(duplicate, window, cx);
@@ -833,6 +861,7 @@ impl SettingsWindow {
                 self.agent_config = config;
                 self.agent_warning = None;
                 self.agent_message = Some("默认 Agent 已更新".into());
+                self.agent_diagnostics = diagnose_agents();
                 self.notify_agents_changed(cx);
             }
             Err(error) => self.agent_message = Some(error.to_string().into()),
@@ -879,6 +908,7 @@ impl SettingsWindow {
                 self.agent_message = Some(format!("已删除 {}", profile.name).into());
                 self.agent_pending_delete = None;
                 self.agent_tests.remove(&profile.id);
+                self.agent_diagnostics = diagnose_agents();
                 self.notify_agents_changed(cx);
             }
             Err(error) => self.agent_message = Some(error.to_string().into()),
@@ -905,6 +935,7 @@ impl SettingsWindow {
                     this.agent_testing_id = None;
                 }
                 this.agent_tests.insert(profile_id, result);
+                this.agent_diagnostics = diagnose_agents();
                 this.agent_message = None;
                 cx.notify();
             });
@@ -945,6 +976,7 @@ impl SettingsWindow {
                     editor.testing = false;
                     editor.test_result = Some(result);
                 }
+                this.agent_diagnostics = diagnose_agents();
                 cx.notify();
             });
         });
@@ -1401,13 +1433,223 @@ impl SettingsWindow {
                 content.child(self.section("Agent 配置", vec![rows.into_any_element()], None, cx));
         }
 
-        content.child(
-            div()
-                .text_xs()
-                .line_height(relative(1.45))
-                .text_color(cx.theme().muted_foreground)
-                .child("Token 或密码只写入 Windows 凭据管理器 / macOS 钥匙串；agent.json 仅保存 keychain:// 引用。通用 CLI 的实际权限由 Agent 自身管理。"),
-        ).into_any_element()
+        content
+            .child(self.render_agent_presets(cx))
+            .child(self.render_agent_diagnostics(cx))
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(relative(1.45))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Token 或密码只写入 Windows 凭据管理器 / macOS 钥匙串；agent.json 仅保存 keychain:// 引用。通用 CLI 的实际权限由 Agent 自身管理。"),
+            )
+            .into_any_element()
+    }
+
+    fn render_agent_presets(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut rows = v_flex();
+        for (index, preset) in agent_presets().into_iter().enumerate() {
+            if index > 0 {
+                rows = rows.child(self.separator(cx));
+            }
+            let preset_id = preset.id.clone();
+            rows = rows.child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_6()
+                    .px_4()
+                    .py_3()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_sm().font_medium().child(preset.name))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(preset.description),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(preset.install_hint),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("agent-preset-{preset_id}")))
+                            .small()
+                            .outline()
+                            .label("添加预设")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.add_agent_preset(&preset_id, window, cx);
+                            })),
+                    ),
+            );
+        }
+        self.section(
+            "Agent 预设",
+            vec![rows.into_any_element()],
+            Some("预设只填写接入元数据，不覆盖 Agent 原生认证或用户配置。"),
+            cx,
+        )
+    }
+
+    fn render_agent_diagnostics(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut rows = v_flex();
+        let config_path = self.agent_diagnostics.config_path.clone();
+        let log_path = self.agent_diagnostics.log_path.clone();
+        rows = rows.child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_6()
+                .px_4()
+                .py_3()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_sm().font_medium().child("诊断位置"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(log_path.clone()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("agent-open-config-dir")
+                                .small()
+                                .outline()
+                                .label("打开配置目录")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let directory = std::path::Path::new(&config_path)
+                                        .parent()
+                                        .unwrap_or_else(|| std::path::Path::new("."));
+                                    if let Err(error) = open::that(directory) {
+                                        this.agent_message =
+                                            Some(format!("无法打开配置目录：{error}").into());
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("agent-clear-diagnostics")
+                                .small()
+                                .ghost()
+                                .label("清除日志")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    match clear_agent_diagnostics() {
+                                        Ok(()) => {
+                                            this.agent_diagnostics = diagnose_agents();
+                                            this.agent_message =
+                                                Some("Agent 诊断日志已清除".into());
+                                        }
+                                        Err(error) => {
+                                            this.agent_message =
+                                                Some(format!("无法清除诊断日志：{error}").into());
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        );
+        for profile in self.agent_diagnostics.profiles.clone() {
+            rows = rows.child(self.separator(cx)).child(
+                v_flex()
+                    .gap_1()
+                    .px_4()
+                    .py_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().text_sm().font_medium().child(profile.profile_name))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(profile.status),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(cx.theme().muted_foreground)
+                            .truncate()
+                            .child(profile.resolved_command.unwrap_or(profile.command)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} · {} · {} 项能力",
+                                profile.protocol,
+                                profile.version.as_deref().unwrap_or("版本待测试"),
+                                profile.capabilities.len()
+                            )),
+                    ),
+            );
+        }
+        for entry in self
+            .agent_diagnostics
+            .recent_entries
+            .iter()
+            .rev()
+            .filter(|entry| matches!(entry.level.as_str(), "error" | "warning"))
+            .take(8)
+        {
+            rows = rows.child(self.separator(cx)).child(
+                v_flex()
+                    .gap_1()
+                    .px_4()
+                    .py_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().danger)
+                                    .child(entry.event.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(entry.level.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(entry.message.clone()),
+                    ),
+            );
+        }
+        self.section(
+            "诊断",
+            vec![rows.into_any_element()],
+            Some("日志会遮盖常见 token、密码和 URL 内嵌凭据。"),
+            cx,
+        )
     }
 
     fn render_default_agent(&self, profile: AgentProfile, cx: &mut Context<Self>) -> AnyElement {

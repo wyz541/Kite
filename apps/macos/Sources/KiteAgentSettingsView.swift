@@ -30,6 +30,7 @@ final class KiteAgentSettingsStore: ObservableObject {
 
     func clearError() { error = nil }
     func clearStatus() { statusMessage = nil }
+    func showError(_ message: String) { error = message }
 
     func save(_ draft: AgentProfileDraft) throws {
         guard let core else { throw AgentDraftError.message("Agent Core 尚未准备好") }
@@ -357,6 +358,8 @@ struct KiteAgentSettingsView: View {
                 defaultAgentSection
                 profilesSection
             }
+            presetsSection
+            diagnosticsSection
             Text("Token 或密码只写入 macOS 钥匙串；agent.json 仅保存 keychain:// 引用。通用 CLI 的权限由 Agent 自身管理，Kite 不声称完成沙箱隔离。")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
@@ -550,7 +553,133 @@ struct KiteAgentSettingsView: View {
         .padding(.vertical, 12)
     }
 
-        @ViewBuilder
+        private var presetsSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            agentSectionTitle("Agent 预设")
+            VStack(spacing: 0) {
+                ForEach(Array(core.agentPresets().enumerated()), id: \.element.id) { index, preset in
+                    if index > 0 { Divider().padding(.leading, 16) }
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(preset.name).font(.system(size: 12.5, weight: .medium))
+                            Text(preset.description)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                            Text(preset.installHint)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: 12)
+                        Button("添加") { addPreset(preset) }
+                            .controlSize(.small)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+            }
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.primary.opacity(0.075), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            Text("预设只填写接入元数据，不覆盖 Agent 原生认证或用户配置。")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        let diagnostics = core.agentDiagnostics()
+        return VStack(alignment: .leading, spacing: 9) {
+            agentSectionTitle("诊断")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Agent 诊断日志").font(.system(size: 12.5, weight: .medium))
+                        Text(diagnostics.logPath)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 12)
+                    Button("显示") {
+                        NSWorkspace.shared.activateFileViewerSelecting([
+                            URL(fileURLWithPath: diagnostics.logPath)
+                        ])
+                    }
+                    .controlSize(.small)
+                    Button("清除") {
+                        do {
+                            try core.clearAgentDiagnostics()
+                            store.reload()
+                        } catch {
+                            store.showError(error.localizedDescription)
+                        }
+                    }
+                    .controlSize(.small)
+                }
+                ForEach(diagnostics.profiles, id: \.profileId) { profile in
+                    Divider()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(profile.profileName) · \(profile.status)")
+                            .font(.system(size: 11.5, weight: .medium))
+                        Text("\(profile.protocol) · \(profile.version ?? "版本待测试") · \(profile.capabilities.count) 项能力")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                        Text(profile.resolvedCommand ?? profile.command)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                ForEach(Array(diagnostics.recentEntries.reversed().filter {
+                    $0.level == "error" || $0.level == "warning"
+                }.prefix(8).enumerated()), id: \.offset) { _, entry in
+                    Divider()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(entry.event) · \(entry.level)")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.red)
+                        Text(entry.message)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.primary.opacity(0.075), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    private func addPreset(_ preset: AgentPreset) {
+        guard let profile = core.agentPresetProfile(presetId: preset.id) else {
+            store.showError("未知的 Agent 预设")
+            return
+        }
+        var draft = AgentProfileDraft(profile: profile, isNew: true)
+        let baseName = profile.name
+        var suffix = 2
+        while store.profiles.contains(where: {
+            $0.name.compare(draft.name, options: .caseInsensitive) == .orderedSame
+        }) {
+            draft.name = "\(baseName) (\(suffix))"
+            suffix += 1
+        }
+        editorDraft = draft
+    }
+
+    @ViewBuilder
     private func deleteButtons(for profile: AgentProfile) -> some View {
         if store.defaultProfileID == profile.id && store.profiles.count > 1 {
             ForEach(store.profiles.filter { $0.id != profile.id }, id: \.id) { candidate in

@@ -5,7 +5,11 @@ use std::sync::{
 };
 use std::time::UNIX_EPOCH;
 
-use crate::agent::AgentProfileStore;
+use crate::agent::{
+    self as agent_store, AgentConnectionInfo, AgentContextRepair, AgentConversation,
+    AgentDiagnostics, AgentPreset, AgentProfile, AgentProfileSnapshot, AgentProfileStore,
+    AgentSessionRestore, AgentSessionStore, AgentStoreLoad,
+};
 use crate::agent_review::{
     self, AgentAuditOutcome, AgentCommandSuggestion, AgentFileChange, AgentFileChangeDraft,
     AgentPermissionDecision, AgentPermissionKind, AgentPermissionRequest,
@@ -1542,16 +1546,27 @@ impl KiteCore {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
-    pub fn agent_config(&self) -> crate::agent::AgentProfileSnapshot {
+    pub fn agent_config(&self) -> AgentProfileSnapshot {
         self.agent_profile_store.snapshot()
+    }
+
+    pub fn agent_store_load(&self) -> AgentStoreLoad {
+        agent_store::load_agent_profiles()
+    }
+
+    pub fn save_agent_config(
+        &self,
+        store: AgentProfileSnapshot,
+    ) -> Result<AgentStoreLoad, KiteError> {
+        agent_store::save_agent_profiles(store).map_err(KiteError::operation)
     }
 
     pub fn save_agent_profile(
         &self,
-        profile: crate::agent::AgentProfile,
+        profile: AgentProfile,
         credential: Option<String>,
         clear_credential: bool,
-    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+    ) -> Result<AgentProfileSnapshot, KiteError> {
         self.agent_profile_store
             .save_profile_with_credential(profile, credential, clear_credential)
             .map_err(|error| KiteError::operation(error.to_string()))
@@ -1561,7 +1576,7 @@ impl KiteCore {
         &self,
         profile_id: String,
         replacement_default_id: Option<String>,
-    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+    ) -> Result<AgentProfileSnapshot, KiteError> {
         self.agent_profile_store
             .delete_profile_with_replacement(profile_id, replacement_default_id)
             .map_err(|error| KiteError::operation(error.to_string()))
@@ -1570,7 +1585,7 @@ impl KiteCore {
     pub fn set_default_agent_profile(
         &self,
         profile_id: String,
-    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+    ) -> Result<AgentProfileSnapshot, KiteError> {
         self.agent_profile_store
             .set_default_profile(profile_id)
             .map_err(|error| KiteError::operation(error.to_string()))
@@ -1579,18 +1594,71 @@ impl KiteCore {
     pub fn duplicate_agent_profile(
         &self,
         profile_id: String,
-    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+    ) -> Result<AgentProfileSnapshot, KiteError> {
         self.agent_profile_store
             .duplicate_profile(profile_id)
             .map_err(|error| KiteError::operation(error.to_string()))
     }
 
+    pub fn agent_presets(&self) -> Vec<AgentPreset> {
+        agent_store::agent_presets()
+    }
+
+    pub fn agent_preset_profile(&self, preset_id: String) -> Option<AgentProfile> {
+        agent_store::preset_profile(&preset_id, preset_id.clone())
+    }
+
+    pub fn agent_diagnostics(&self) -> AgentDiagnostics {
+        agent_store::diagnose_agents()
+    }
+
+    pub fn probe_agent_connection(&self, profile: AgentProfile) -> AgentConnectionInfo {
+        agent_store::probe_agent_connection(profile)
+    }
+
     pub fn test_agent_connection(
         &self,
-        profile: crate::agent::AgentProfile,
+        profile: AgentProfile,
         credential: Option<String>,
     ) -> crate::agent::AgentConnectionResult {
         crate::agent::test_agent_connection(profile, credential)
+    }
+
+    pub fn clear_agent_diagnostics(&self) -> Result<(), KiteError> {
+        agent_store::clear_agent_diagnostics().map_err(KiteError::operation)
+    }
+
+    pub fn agent_log_path(&self) -> String {
+        agent_store::agent_log_path().to_string_lossy().into_owned()
+    }
+
+    pub fn agent_session_state(&self) -> AgentSessionRestore {
+        agent_store::load_agent_sessions()
+    }
+
+    pub fn save_agent_conversation(
+        &self,
+        conversation: AgentConversation,
+    ) -> Result<AgentSessionStore, KiteError> {
+        agent_store::save_agent_conversation(conversation).map_err(KiteError::operation)
+    }
+
+    pub fn delete_agent_conversation(
+        &self,
+        conversation_id: String,
+    ) -> Result<AgentSessionStore, KiteError> {
+        agent_store::delete_agent_conversation(&conversation_id).map_err(KiteError::operation)
+    }
+
+    pub fn repair_agent_context(
+        &self,
+        repair: AgentContextRepair,
+    ) -> Result<AgentSessionStore, KiteError> {
+        agent_store::repair_agent_context(repair).map_err(KiteError::operation)
+    }
+
+    pub fn new_agent_conversation_id(&self) -> String {
+        agent_store::new_agent_conversation_id()
     }
 
     pub fn new_agent_profile_id(&self) -> String {

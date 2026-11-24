@@ -442,6 +442,20 @@ impl AgentProfileStore {
 }
 
 impl AgentProfileStore {
+    pub(crate) fn replace_snapshot(
+        &self,
+        snapshot: AgentProfileSnapshot,
+    ) -> Result<AgentProfileSnapshot, AgentConfigError> {
+        let _guard = lock_config_io();
+        let config = normalize_config(AgentConfigFile {
+            schema_version: snapshot.schema_version,
+            profiles: snapshot.profiles,
+            default_profile_id: snapshot.default_profile_id,
+        })?;
+        self.save_config_locked(&config)?;
+        Ok(snapshot_from_config(config, None))
+    }
+
     fn load_config_locked(
         &self,
     ) -> Result<(AgentConfigFile, Option<AgentConfigWarning>), AgentConfigError> {

@@ -148,16 +148,6 @@ macOS 可与 Finder 共享文件剪贴板。
 - 预览信息支持选择和复制。
 - 文本编辑器支持未保存状态保护和外部修改冲突检测。
 
-### Agent 表面
-
-- 右侧区域可在“预览”和“Agent”之间切换。
-- 文件、目录和多选路径可作为可见上下文快照打开。
-- 默认使用固定快照；显式开启后才跟随当前选择。
-- 上下文路径支持移除、在分栏中定位和追加。
-- Agent 可从右侧栏弹出为独立窗口，并共享同一上下文状态。
-- 窄窗口使用覆盖式抽屉，不压缩分栏导航。
-- 当前阶段只准备上下文和提示，不启动外部 Agent。
-
 ### 开发者工作流
 
 - 显示 Git 和 SVN 文件状态。
@@ -176,6 +166,18 @@ macOS 可与 Finder 共享文件剪贴板。
 - 变更支持文件、hunk 与行级暂存、取消暂存和丢弃，并显示冲突及 CRLF 警告。
 - rebase、merge、cherry-pick 和 revert 状态横幅提供继续、跳过或中止；bisect 提供结束并重置。
 - Windows 搜索和文件读取在后台执行，界面不会等待磁盘响应。
+
+### Agent 集成
+
+- 设置中的“Agent”页面可添加预设、选择默认 Agent、测试连接和删除配置。
+- 内置 Claude Code 与 Codex 的 ACP 预设；预设只填写接入元数据，不覆盖 Agent 原生认证或配置。
+- 右键菜单提供“使用 Agent”子菜单，可携带当前文件、目录或多选上下文打开 Agent 窗口。
+- Agent 窗口显示模型、工作目录、固定上下文、权限摘要和连接状态。
+- 支持 ACP / JSON-RPC over stdio、流式回答、停止、重试、复制结果和长输出保护。
+- Agent 返回的结构化文件修改先进入只读 diff 审核；应用前重新校验文件哈希，外部修改后必须重新确认。
+- 可选恢复 Agent、工作目录、上下文、对话草稿和独立窗口大小；路径失效时给出可恢复提示，不阻塞 Kite 启动。
+- Agent 诊断区显示配置路径、日志位置、连接测试结果和脱敏后的最近错误。
+- P0 默认只读；Agent 请求写入、命令执行或其他高风险操作时由用户显式确认。
 
 ### 原生平台集成
 
@@ -216,6 +218,13 @@ macOS 可与 Finder 共享文件剪贴板。
 | Git Stash、Reset、Revert 与 Cherry-pick | 已支持 | 已支持 |
 | Git 远程、Fetch/Pull/Push、克隆与初始化 | 已支持 | 已支持 |
 | Diff 查看器 | 已支持 | 已支持 |
+| Agent 设置与预设 | 已支持 | 已支持 |
+| Agent 右键入口 | 已支持 | 已支持 |
+| Agent 对话与任务控制 | 已支持 | 已支持 |
+| Agent 会话恢复 | 已支持 | 已支持 |
+| Agent 诊断与脱敏日志 | 已支持 | 已支持 |
+| Agent diff 审核与文件写入 | 已支持 | 已支持 |
+| Agent 权限确认 | 已支持 | 已支持 |
 | Agent 配置管理 | 已支持 | 已支持 |
 | Agent 连接测试与钥匙串凭据 | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
@@ -246,7 +255,12 @@ Kite 仍处于 `0.6.x` 活跃开发阶段。
 - macOS 便携设备必须挂载为可写卷。
 - 复制操作不支持符号链接。
 - 自定义布局提供列显示开关和三个列宽预设。拖动列顺序仍未实现。
-- Agent 表面当前只准备上下文和提示；发送、流式输出、权限确认和写入尚未接入。
+- Kite 不内置模型运行时，也不自动下载 Agent；用户需先安装并完成 Agent 原生认证。
+- Agent 命令继承的权限由外部进程和操作系统决定。Kite 不宣称能沙箱化任意 CLI 进程。
+- Agent 默认只读；Kite 不会自动应用文件修改或执行 Agent 建议的 shell 命令。
+- Agent 会话保存在本机，恢复前会检查路径；缺失路径不会阻止 Kite 启动。
+- Kite 只会应用用户在 diff 审核中明确确认的文件修改；不会自动提交 Git 或执行 Agent 建议的命令。
+- 本期不做多 Agent 并行对比、云同步或团队共享 Agent 配置。
 
 ## 后续方向
 
@@ -345,6 +359,7 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [项目宪法与设计原则](docs/design/manifesto.md)
 - [平台边界](docs/architecture/platforms.md)
 - [右键菜单架构](docs/architecture/context-menu.md)
+- [Agent 集成架构](docs/architecture/agent-integration.md)
 - [Agent 表面架构](docs/architecture/agent-surface.md)
 - [压缩与解压实现](docs/architecture/context-menu.md#压缩菜单)
 - [默认文件管理器](docs/architecture/default-file-manager.md)
