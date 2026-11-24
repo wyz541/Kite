@@ -63,5 +63,3 @@ cargo test --lib benchmark_large_history -- --ignored --nocapture
 - 这是 Core 数据路径基准，不包含 GPUI 或 SwiftUI 的合成耗时。
 - 100,000 提交夹具为线性历史，用于测量分页和首屏；合并、多父提交和多个根提交由独立图布局快照测试覆盖。
 - 页面读取使用 `git log --skip`，因此页码越深，Git 需要跳过的提交越多。连续预取可隐藏通常的滚动等待，但极深分页仍可能达到亚秒级。
-
-

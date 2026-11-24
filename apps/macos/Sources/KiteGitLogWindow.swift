@@ -1353,8 +1353,3 @@ private struct KiteGitDetailRow: View {
         }
     }
 }
-
-
-
-
-

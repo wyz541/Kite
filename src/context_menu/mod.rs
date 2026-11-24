@@ -430,7 +430,7 @@ impl ContextMenuProvider for VcsMenuProvider {
         model.submenu(
             "Git",
             IconName::GitBranch,
-            !target.loading,
+            !target.loading && target.git_available,
             git_menu_entries(!target.loading && target.git_available),
         );
         model.submenu(
