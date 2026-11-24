@@ -1482,6 +1482,7 @@ impl KiteApp {
             home,
             NavigationIntent::Initial,
             initial_file,
+            true,
             window,
             cx,
         );
@@ -1892,6 +1893,7 @@ impl KiteApp {
             KeyBinding::new("secondary-f", FocusSearch, Some("Kite")),
             KeyBinding::new("secondary-shift-f", OpenGlobalSearch, Some("Kite")),
             KeyBinding::new("secondary-shift-g", OpenGitClient, Some("Kite")),
+            KeyBinding::new("secondary-shift-a", OpenAgentReview, Some("Kite")),
             KeyBinding::new("secondary-1", ShowListView, Some("Kite")),
             KeyBinding::new("secondary-2", ShowColumnsView, Some("Kite")),
             KeyBinding::new("secondary-t", NewTab, Some("Kite")),
@@ -1937,6 +1939,7 @@ impl KiteApp {
                 MenuItem::action("全局搜索…", OpenGlobalSearch),
             ]),
             Menu::new("Git").items([MenuItem::action("打开 Git 客户端…", OpenGitClient)]),
+            Menu::new("Agent").items([MenuItem::action("审阅结构化结果…", OpenAgentReview)]),
             Menu::new("显示").items([
                 MenuItem::action("列表视图", ShowListView),
                 MenuItem::action("分栏视图", ShowColumnsView),
@@ -1964,7 +1967,7 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.request_load_with_file_selection(path, intent, None, window, cx);
+        self.request_load_with_file_selection(path, intent, None, false, window, cx);
     }
 
     fn request_load_with_file_selection(
@@ -1972,10 +1975,18 @@ impl KiteApp {
         path: PathBuf,
         intent: NavigationIntent,
         pending_file_selection: Option<PathBuf>,
+        open_pending_file: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.request_load_with_selection(path, intent, pending_file_selection, true, window, cx);
+        self.request_load_with_selection(
+            path,
+            intent,
+            pending_file_selection,
+            open_pending_file,
+            window,
+            cx,
+        );
     }
 
     fn request_load_with_selection(
@@ -2142,7 +2153,14 @@ impl KiteApp {
             return;
         };
         self.notice = None;
-        self.request_load_with_file_selection(target.directory, intent, target.file, window, cx);
+        self.request_load_with_file_selection(
+            target.directory,
+            intent,
+            target.file,
+            true,
+            window,
+            cx,
+        );
     }
 
     fn navigate_from_path_bar(
@@ -3241,6 +3259,84 @@ impl KiteApp {
         cx.notify();
     }
 
+    pub(crate) fn open_agent_review_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("选择 Agent 结构化结果".into()),
+        });
+        self.error = None;
+        self.notice = Some("请选择包含 Agent 结果的 JSON 文件…".into());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let selected = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.notice = None;
+                        this.error = Some(format!("无法打开结果文件选择器：{error}").into());
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(_) => return,
+            };
+            let Some(path) = selected else {
+                let _ = this.update_in(cx, |this, _, cx| {
+                    this.notice = None;
+                    cx.notify();
+                });
+                return;
+            };
+            let result = cx
+                .background_spawn(async move {
+                    let metadata = std::fs::metadata(&path)
+                        .map_err(|error| format!("无法读取结果文件信息：{error}"))?;
+                    if metadata.len() > kite_core::agent_review::MAX_AGENT_RESULT_JSON_BYTES as u64
+                    {
+                        return Err("Agent 结果文件超过 16 MiB".to_string());
+                    }
+                    let payload = std::fs::read_to_string(&path)
+                        .map_err(|error| format!("无法读取结果文件：{error}"))?;
+                    kite_core::agent_review::parse_review_json(&payload)
+                        .map_err(|error| error.redacted_message())
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(review) => {
+                        let main_app = cx.entity().downgrade();
+                        match crate::agent_review_window::open_agent_review_window(
+                            review,
+                            None,
+                            Some(main_app),
+                            None,
+                            cx,
+                        ) {
+                            Ok(_) => {
+                                this.notice = None;
+                                this.error = None;
+                            }
+                            Err(error) => {
+                                this.notice = None;
+                                this.error = Some(error.into());
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        this.notice = None;
+                        this.error = Some(error.into());
+                    }
+                }
+                let _ = window;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn open_workspace_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let root = self.current_dir.clone();
         let title = format!("Kite 工作区 — {}", root.display());
@@ -3259,6 +3355,14 @@ impl KiteApp {
             self.error = Some(format!("无法打开工作区编辑器：{error}").into());
         }
         cx.notify();
+    }
+
+    pub(crate) fn refresh_agent_review_changes(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(window, cx);
     }
 
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -11171,6 +11275,9 @@ impl Render for KiteApp {
             }))
             .on_action(cx.listener(|this, _: &OpenWorkspaceEditor, window, cx| {
                 this.open_workspace_editor(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenAgentReview, window, cx| {
+                this.open_agent_review_file(window, cx)
             }))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::set_default_explorer))

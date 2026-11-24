@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -6,6 +6,12 @@ use std::sync::{
 use std::time::UNIX_EPOCH;
 
 use crate::agent::AgentProfileStore;
+use crate::agent_review::{
+    self, AgentAuditOutcome, AgentCommandSuggestion, AgentFileChange, AgentFileChangeDraft,
+    AgentPermissionDecision, AgentPermissionKind, AgentPermissionRequest,
+    AgentPermissionRequestDraft, AgentReference, AgentReferenceDraft, AgentResultType, AgentReview,
+    AgentReviewDraft, AgentReviewError, AgentTransport,
+};
 use crate::archive::{self, ArchiveFormat, ArchivePhase, ArchiveProgress};
 use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSearchSnapshot};
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
@@ -209,6 +215,203 @@ pub struct TextDocumentDto {
     pub has_bom: bool,
     pub content_sha256: String,
     pub byte_len: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentTransportDto {
+    Acp,
+    Cli,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentResultTypeDto {
+    Answer,
+    FileChanges,
+    PermissionRequests,
+    CommandSuggestions,
+    Mixed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentPermissionKindDto {
+    Read,
+    Write,
+    Command,
+    Network,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentPermissionDecisionDto {
+    AllowOnce,
+    AllowTask,
+    Deny,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentAuditOutcomeDto {
+    Prepared,
+    Applied,
+    SavedAs,
+    Discarded,
+    PermissionAllowed,
+    PermissionDenied,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentReviewErrorKindDto {
+    InvalidInput,
+    InvalidPath,
+    OutsideWorkingDirectory,
+    SymlinkNotAllowed,
+    FileChangedExternally,
+    ConfirmationRequired,
+    WriteFailed,
+    ResponseTooLarge,
+    UnsupportedSchema,
+    PermissionNotAvailable,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentReferenceDraftDto {
+    pub path: String,
+    pub label: String,
+    pub line: Option<u32>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentFileChangeDraftDto {
+    pub path: String,
+    pub proposed_text: String,
+    pub expected_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentCommandSuggestionDto {
+    pub command: String,
+    pub rationale: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentPermissionRequestDraftDto {
+    pub id: Option<String>,
+    pub kind: AgentPermissionKindDto,
+    pub title: String,
+    pub detail: String,
+    pub target_paths: Vec<String>,
+    pub can_allow_task: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentReviewDraftDto {
+    pub schema_version: u32,
+    pub id: Option<String>,
+    pub agent: String,
+    pub model: Option<String>,
+    pub transport: AgentTransportDto,
+    pub working_directory: String,
+    pub context_paths: Vec<String>,
+    pub answer: String,
+    pub references: Vec<AgentReferenceDraftDto>,
+    pub file_changes: Vec<AgentFileChangeDraftDto>,
+    pub permission_requests: Vec<AgentPermissionRequestDraftDto>,
+    pub commands: Vec<AgentCommandSuggestionDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentReferenceDto {
+    pub path: String,
+    pub label: String,
+    pub line: Option<u32>,
+    pub exists: bool,
+    pub is_directory: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentFileChangeDto {
+    pub working_directory: String,
+    pub relative_path: String,
+    pub target_path: String,
+    pub proposed_text: String,
+    pub proposed_sha256: String,
+    pub target_exists: bool,
+    pub overwrite_risk: bool,
+    pub base_sha256: Option<String>,
+    pub current_sha256: Option<String>,
+    pub unified_diff: String,
+    pub diff_truncated: bool,
+    pub added_lines: u32,
+    pub removed_lines: u32,
+    pub byte_len: u64,
+    pub requires_reconfirmation: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentPermissionRequestDto {
+    pub id: String,
+    pub kind: AgentPermissionKindDto,
+    pub title: String,
+    pub detail: String,
+    pub target_paths: Vec<String>,
+    pub can_allow_task: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentReviewDto {
+    pub schema_version: u32,
+    pub id: String,
+    pub agent: String,
+    pub model: Option<String>,
+    pub transport: AgentTransportDto,
+    pub working_directory: String,
+    pub context_paths: Vec<String>,
+    pub answer: String,
+    pub references: Vec<AgentReferenceDto>,
+    pub file_changes: Vec<AgentFileChangeDto>,
+    pub permission_requests: Vec<AgentPermissionRequestDto>,
+    pub commands: Vec<AgentCommandSuggestionDto>,
+    pub result_type: AgentResultTypeDto,
+    pub boundary_notice: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentWriteOutcomeDto {
+    pub path: String,
+    pub operation: String,
+    pub created: bool,
+    pub overwritten: bool,
+    pub bytes_written: u64,
+    pub content_sha256: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentPermissionResponseDto {
+    pub request_id: String,
+    pub decision: AgentPermissionDecisionDto,
+    pub allowed: bool,
+    pub scope: String,
+    pub message: String,
+    pub response_json: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentAuditEventDto {
+    pub timestamp_unix_ms: i64,
+    pub review_id: String,
+    pub agent: String,
+    pub model: Option<String>,
+    pub transport: AgentTransportDto,
+    pub working_directory: String,
+    pub context_count: u32,
+    pub result_type: AgentResultTypeDto,
+    pub change_count: u32,
+    pub user_confirmed_write: bool,
+    pub outcome: AgentAuditOutcomeDto,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1276,12 +1479,26 @@ pub enum KiteError {
         message: String,
         partial_clone_path: Option<String>,
     },
+    #[error("{message}")]
+    AgentReview {
+        kind: AgentReviewErrorKindDto,
+        message: String,
+        retryable: bool,
+    },
 }
 
 impl KiteError {
     fn operation(message: impl Into<String>) -> Self {
         Self::OperationFailed {
             message: message.into(),
+        }
+    }
+
+    fn from_agent_review(error: AgentReviewError) -> Self {
+        Self::AgentReview {
+            kind: agent_error_kind_dto(error.kind()),
+            retryable: error.kind().retryable(),
+            message: error.redacted_message(),
         }
     }
 
@@ -1680,6 +1897,162 @@ impl KiteCore {
         state: GitClientWindowSessionDto,
     ) -> Result<(), KiteError> {
         session_store::save_git_client_window_state(&state).map_err(KiteError::operation)
+    }
+
+    pub fn agent_build_review(
+        &self,
+        draft: AgentReviewDraftDto,
+    ) -> Result<AgentReviewDto, KiteError> {
+        let draft = agent_review_draft(draft);
+        agent_review::build_review(draft)
+            .map(agent_review_dto)
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_parse_review_json(&self, payload: String) -> Result<AgentReviewDto, KiteError> {
+        agent_review::parse_review_json(&payload)
+            .map(agent_review_dto)
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_reconfirm_change(
+        &self,
+        change: AgentFileChangeDto,
+    ) -> Result<AgentFileChangeDto, KiteError> {
+        agent_review::reconfirm_file_change(&agent_file_change(change))
+            .map(agent_file_change_dto)
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_apply_change(
+        &self,
+        change: AgentFileChangeDto,
+        write_confirmed: bool,
+    ) -> Result<AgentWriteOutcomeDto, KiteError> {
+        agent_review::apply_file_change(&agent_file_change(change), write_confirmed)
+            .map(agent_write_outcome_dto)
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_apply_changes(
+        &self,
+        changes: Vec<AgentFileChangeDto>,
+        write_confirmed: bool,
+    ) -> Result<Vec<AgentWriteOutcomeDto>, KiteError> {
+        let changes = changes
+            .into_iter()
+            .map(agent_file_change)
+            .collect::<Vec<_>>();
+        agent_review::apply_review_changes(&changes, write_confirmed)
+            .map(|outcomes| outcomes.into_iter().map(agent_write_outcome_dto).collect())
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_save_change_as(
+        &self,
+        change: AgentFileChangeDto,
+        destination: String,
+        overwrite_confirmed: bool,
+    ) -> Result<AgentWriteOutcomeDto, KiteError> {
+        agent_review::save_file_change_as(
+            &agent_file_change(change),
+            &PathBuf::from(destination),
+            overwrite_confirmed,
+        )
+        .map(agent_write_outcome_dto)
+        .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_save_answer_as(
+        &self,
+        answer: String,
+        destination: String,
+        overwrite_confirmed: bool,
+    ) -> Result<AgentWriteOutcomeDto, KiteError> {
+        agent_review::save_answer_as(&answer, &PathBuf::from(destination), overwrite_confirmed)
+            .map(agent_write_outcome_dto)
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_materialize_draft(
+        &self,
+        text: String,
+        suggested_name: String,
+    ) -> Result<String, KiteError> {
+        let directory =
+            agent_review::default_draft_directory().map_err(KiteError::from_agent_review)?;
+        agent_review::materialize_text_draft(&text, &directory, &suggested_name)
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_default_draft_directory(&self) -> Result<String, KiteError> {
+        agent_review::default_draft_directory()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_respond_permission(
+        &self,
+        request: AgentPermissionRequestDto,
+        decision: AgentPermissionDecisionDto,
+        task_id: String,
+        transport: AgentTransportDto,
+    ) -> Result<AgentPermissionResponseDto, KiteError> {
+        agent_review::respond_to_permission(
+            &agent_permission_request(request),
+            agent_permission_decision(decision),
+            &task_id,
+            agent_transport(transport),
+        )
+        .map(agent_permission_response_dto)
+        .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_build_audit_event(
+        &self,
+        review: AgentReviewDto,
+        user_confirmed_write: bool,
+        outcome: AgentAuditOutcomeDto,
+    ) -> AgentAuditEventDto {
+        let review = agent_review_model(review);
+        agent_audit_event_dto(agent_review::build_audit_event(
+            &review,
+            user_confirmed_write,
+            agent_audit_outcome(outcome),
+        ))
+    }
+
+    pub fn agent_record_audit(
+        &self,
+        review: AgentReviewDto,
+        user_confirmed_write: bool,
+        outcome: AgentAuditOutcomeDto,
+        path: Option<String>,
+    ) -> Result<String, KiteError> {
+        let review = agent_review_model(review);
+        let event = agent_review::build_audit_event(
+            &review,
+            user_confirmed_write,
+            agent_audit_outcome(outcome),
+        );
+        agent_review::append_audit_event(&event, path.as_deref().map(Path::new))
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_default_audit_path(&self) -> Result<String, KiteError> {
+        agent_review::default_audit_path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(KiteError::from_agent_review)
+    }
+
+    pub fn agent_redact_diagnostic(&self, text: String) -> String {
+        agent_review::redact_sensitive_text(&text)
+    }
+
+    pub fn agent_boundary_notice(&self, transport: AgentTransportDto) -> String {
+        agent_transport(transport).boundary_notice().to_string()
     }
 
     pub fn open_text_document(&self, path: String) -> Result<TextDocumentDto, KiteError> {
@@ -4067,6 +4440,392 @@ fn device_dto(device: &PortableDevice) -> PortableDeviceDto {
         shell_path: device.shell_path.clone(),
     }
 }
+fn agent_transport(dto: AgentTransportDto) -> AgentTransport {
+    match dto {
+        AgentTransportDto::Acp => AgentTransport::Acp,
+        AgentTransportDto::Cli => AgentTransport::Cli,
+    }
+}
+
+fn agent_transport_dto(transport: AgentTransport) -> AgentTransportDto {
+    match transport {
+        AgentTransport::Acp => AgentTransportDto::Acp,
+        AgentTransport::Cli => AgentTransportDto::Cli,
+    }
+}
+
+fn agent_result_type_dto(result_type: AgentResultType) -> AgentResultTypeDto {
+    match result_type {
+        AgentResultType::Answer => AgentResultTypeDto::Answer,
+        AgentResultType::FileChanges => AgentResultTypeDto::FileChanges,
+        AgentResultType::PermissionRequests => AgentResultTypeDto::PermissionRequests,
+        AgentResultType::CommandSuggestions => AgentResultTypeDto::CommandSuggestions,
+        AgentResultType::Mixed => AgentResultTypeDto::Mixed,
+    }
+}
+
+fn agent_permission_kind(dto: AgentPermissionKindDto) -> AgentPermissionKind {
+    match dto {
+        AgentPermissionKindDto::Read => AgentPermissionKind::Read,
+        AgentPermissionKindDto::Write => AgentPermissionKind::Write,
+        AgentPermissionKindDto::Command => AgentPermissionKind::Command,
+        AgentPermissionKindDto::Network => AgentPermissionKind::Network,
+        AgentPermissionKindDto::Other => AgentPermissionKind::Other,
+    }
+}
+
+fn agent_permission_kind_dto(kind: AgentPermissionKind) -> AgentPermissionKindDto {
+    match kind {
+        AgentPermissionKind::Read => AgentPermissionKindDto::Read,
+        AgentPermissionKind::Write => AgentPermissionKindDto::Write,
+        AgentPermissionKind::Command => AgentPermissionKindDto::Command,
+        AgentPermissionKind::Network => AgentPermissionKindDto::Network,
+        AgentPermissionKind::Other => AgentPermissionKindDto::Other,
+    }
+}
+
+fn agent_permission_decision(dto: AgentPermissionDecisionDto) -> AgentPermissionDecision {
+    match dto {
+        AgentPermissionDecisionDto::AllowOnce => AgentPermissionDecision::AllowOnce,
+        AgentPermissionDecisionDto::AllowTask => AgentPermissionDecision::AllowTask,
+        AgentPermissionDecisionDto::Deny => AgentPermissionDecision::Deny,
+    }
+}
+
+fn agent_permission_decision_dto(decision: AgentPermissionDecision) -> AgentPermissionDecisionDto {
+    match decision {
+        AgentPermissionDecision::AllowOnce => AgentPermissionDecisionDto::AllowOnce,
+        AgentPermissionDecision::AllowTask => AgentPermissionDecisionDto::AllowTask,
+        AgentPermissionDecision::Deny => AgentPermissionDecisionDto::Deny,
+    }
+}
+
+fn agent_audit_outcome(dto: AgentAuditOutcomeDto) -> AgentAuditOutcome {
+    match dto {
+        AgentAuditOutcomeDto::Prepared => AgentAuditOutcome::Prepared,
+        AgentAuditOutcomeDto::Applied => AgentAuditOutcome::Applied,
+        AgentAuditOutcomeDto::SavedAs => AgentAuditOutcome::SavedAs,
+        AgentAuditOutcomeDto::Discarded => AgentAuditOutcome::Discarded,
+        AgentAuditOutcomeDto::PermissionAllowed => AgentAuditOutcome::PermissionAllowed,
+        AgentAuditOutcomeDto::PermissionDenied => AgentAuditOutcome::PermissionDenied,
+        AgentAuditOutcomeDto::Failed => AgentAuditOutcome::Failed,
+        AgentAuditOutcomeDto::Cancelled => AgentAuditOutcome::Cancelled,
+    }
+}
+
+fn agent_audit_outcome_dto(outcome: AgentAuditOutcome) -> AgentAuditOutcomeDto {
+    match outcome {
+        AgentAuditOutcome::Prepared => AgentAuditOutcomeDto::Prepared,
+        AgentAuditOutcome::Applied => AgentAuditOutcomeDto::Applied,
+        AgentAuditOutcome::SavedAs => AgentAuditOutcomeDto::SavedAs,
+        AgentAuditOutcome::Discarded => AgentAuditOutcomeDto::Discarded,
+        AgentAuditOutcome::PermissionAllowed => AgentAuditOutcomeDto::PermissionAllowed,
+        AgentAuditOutcome::PermissionDenied => AgentAuditOutcomeDto::PermissionDenied,
+        AgentAuditOutcome::Failed => AgentAuditOutcomeDto::Failed,
+        AgentAuditOutcome::Cancelled => AgentAuditOutcomeDto::Cancelled,
+    }
+}
+
+fn agent_error_kind_dto(kind: agent_review::AgentReviewErrorKind) -> AgentReviewErrorKindDto {
+    match kind {
+        agent_review::AgentReviewErrorKind::InvalidInput => AgentReviewErrorKindDto::InvalidInput,
+        agent_review::AgentReviewErrorKind::InvalidPath => AgentReviewErrorKindDto::InvalidPath,
+        agent_review::AgentReviewErrorKind::OutsideWorkingDirectory => {
+            AgentReviewErrorKindDto::OutsideWorkingDirectory
+        }
+        agent_review::AgentReviewErrorKind::SymlinkNotAllowed => {
+            AgentReviewErrorKindDto::SymlinkNotAllowed
+        }
+        agent_review::AgentReviewErrorKind::FileChangedExternally => {
+            AgentReviewErrorKindDto::FileChangedExternally
+        }
+        agent_review::AgentReviewErrorKind::ConfirmationRequired => {
+            AgentReviewErrorKindDto::ConfirmationRequired
+        }
+        agent_review::AgentReviewErrorKind::WriteFailed => AgentReviewErrorKindDto::WriteFailed,
+        agent_review::AgentReviewErrorKind::ResponseTooLarge => {
+            AgentReviewErrorKindDto::ResponseTooLarge
+        }
+        agent_review::AgentReviewErrorKind::UnsupportedSchema => {
+            AgentReviewErrorKindDto::UnsupportedSchema
+        }
+        agent_review::AgentReviewErrorKind::PermissionNotAvailable => {
+            AgentReviewErrorKindDto::PermissionNotAvailable
+        }
+        agent_review::AgentReviewErrorKind::Cancelled => AgentReviewErrorKindDto::Cancelled,
+    }
+}
+
+fn agent_review_draft(dto: AgentReviewDraftDto) -> AgentReviewDraft {
+    AgentReviewDraft {
+        schema_version: dto.schema_version,
+        id: dto.id,
+        agent: dto.agent,
+        model: dto.model,
+        transport: agent_transport(dto.transport),
+        working_directory: PathBuf::from(dto.working_directory),
+        context_paths: dto.context_paths.into_iter().map(PathBuf::from).collect(),
+        answer: dto.answer,
+        references: dto
+            .references
+            .into_iter()
+            .map(|reference| AgentReferenceDraft {
+                path: PathBuf::from(reference.path),
+                label: reference.label,
+                line: reference.line,
+            })
+            .collect(),
+        file_changes: dto
+            .file_changes
+            .into_iter()
+            .map(|change| AgentFileChangeDraft {
+                path: PathBuf::from(change.path),
+                proposed_text: change.proposed_text,
+                expected_sha256: change.expected_sha256,
+            })
+            .collect(),
+        permission_requests: dto
+            .permission_requests
+            .into_iter()
+            .map(agent_permission_request_draft)
+            .collect(),
+        commands: dto
+            .commands
+            .into_iter()
+            .map(|command| AgentCommandSuggestion {
+                command: command.command,
+                rationale: command.rationale,
+            })
+            .collect(),
+    }
+}
+
+fn agent_permission_request_draft(
+    dto: AgentPermissionRequestDraftDto,
+) -> AgentPermissionRequestDraft {
+    AgentPermissionRequestDraft {
+        id: dto.id,
+        kind: agent_permission_kind(dto.kind),
+        title: dto.title,
+        detail: dto.detail,
+        target_paths: dto.target_paths.into_iter().map(PathBuf::from).collect(),
+        can_allow_task: dto.can_allow_task,
+    }
+}
+
+fn agent_reference_dto(reference: AgentReference) -> AgentReferenceDto {
+    AgentReferenceDto {
+        path: reference.path.to_string_lossy().into_owned(),
+        label: reference.label,
+        line: reference.line,
+        exists: reference.exists,
+        is_directory: reference.is_directory,
+    }
+}
+
+fn agent_file_change_dto(change: AgentFileChange) -> AgentFileChangeDto {
+    AgentFileChangeDto {
+        working_directory: change.working_directory.to_string_lossy().into_owned(),
+        relative_path: change.relative_path,
+        target_path: change.target_path.to_string_lossy().into_owned(),
+        proposed_text: change.proposed_text,
+        proposed_sha256: change.proposed_sha256,
+        target_exists: change.target_exists,
+        overwrite_risk: change.overwrite_risk,
+        base_sha256: change.base_sha256,
+        current_sha256: change.current_sha256,
+        unified_diff: change.unified_diff,
+        diff_truncated: change.diff_truncated,
+        added_lines: change.added_lines,
+        removed_lines: change.removed_lines,
+        byte_len: change.byte_len,
+        requires_reconfirmation: change.requires_reconfirmation,
+    }
+}
+
+fn agent_file_change(change: AgentFileChangeDto) -> AgentFileChange {
+    AgentFileChange {
+        working_directory: PathBuf::from(change.working_directory),
+        relative_path: change.relative_path,
+        target_path: PathBuf::from(change.target_path),
+        proposed_text: change.proposed_text,
+        proposed_sha256: change.proposed_sha256,
+        target_exists: change.target_exists,
+        overwrite_risk: change.overwrite_risk,
+        base_sha256: change.base_sha256,
+        current_sha256: change.current_sha256,
+        unified_diff: change.unified_diff,
+        diff_truncated: change.diff_truncated,
+        added_lines: change.added_lines,
+        removed_lines: change.removed_lines,
+        byte_len: change.byte_len,
+        requires_reconfirmation: change.requires_reconfirmation,
+    }
+}
+
+fn agent_permission_request_dto(request: AgentPermissionRequest) -> AgentPermissionRequestDto {
+    AgentPermissionRequestDto {
+        id: request.id,
+        kind: agent_permission_kind_dto(request.kind),
+        title: request.title,
+        detail: request.detail,
+        target_paths: request
+            .target_paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        can_allow_task: request.can_allow_task,
+    }
+}
+
+fn agent_permission_request(request: AgentPermissionRequestDto) -> AgentPermissionRequest {
+    AgentPermissionRequest {
+        id: request.id,
+        kind: agent_permission_kind(request.kind),
+        title: request.title,
+        detail: request.detail,
+        target_paths: request
+            .target_paths
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        can_allow_task: request.can_allow_task,
+    }
+}
+
+fn agent_review_dto(review: AgentReview) -> AgentReviewDto {
+    let result_type = agent_result_type_dto(review.result_type());
+    AgentReviewDto {
+        schema_version: review.schema_version,
+        id: review.id,
+        agent: review.agent,
+        model: review.model,
+        transport: agent_transport_dto(review.transport),
+        working_directory: review.working_directory.to_string_lossy().into_owned(),
+        context_paths: review
+            .context_paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        answer: review.answer,
+        references: review
+            .references
+            .into_iter()
+            .map(agent_reference_dto)
+            .collect(),
+        file_changes: review
+            .file_changes
+            .into_iter()
+            .map(agent_file_change_dto)
+            .collect(),
+        permission_requests: review
+            .permission_requests
+            .into_iter()
+            .map(agent_permission_request_dto)
+            .collect(),
+        commands: review
+            .commands
+            .into_iter()
+            .map(|command| AgentCommandSuggestionDto {
+                command: command.command,
+                rationale: command.rationale,
+            })
+            .collect(),
+        result_type,
+        boundary_notice: review.boundary_notice,
+        created_at_unix_ms: review.created_at_unix_ms,
+    }
+}
+
+fn agent_review_model(review: AgentReviewDto) -> AgentReview {
+    AgentReview {
+        schema_version: review.schema_version,
+        id: review.id,
+        agent: review.agent,
+        model: review.model,
+        transport: agent_transport(review.transport),
+        working_directory: PathBuf::from(review.working_directory),
+        context_paths: review
+            .context_paths
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        answer: review.answer,
+        references: review
+            .references
+            .into_iter()
+            .map(|reference| AgentReference {
+                path: PathBuf::from(reference.path),
+                label: reference.label,
+                line: reference.line,
+                exists: reference.exists,
+                is_directory: reference.is_directory,
+            })
+            .collect(),
+        file_changes: review
+            .file_changes
+            .into_iter()
+            .map(agent_file_change)
+            .collect(),
+        permission_requests: review
+            .permission_requests
+            .into_iter()
+            .map(agent_permission_request)
+            .collect(),
+        commands: review
+            .commands
+            .into_iter()
+            .map(|command| AgentCommandSuggestion {
+                command: command.command,
+                rationale: command.rationale,
+            })
+            .collect(),
+        boundary_notice: review.boundary_notice,
+        created_at_unix_ms: review.created_at_unix_ms,
+    }
+}
+
+fn agent_write_outcome_dto(outcome: agent_review::AgentWriteOutcome) -> AgentWriteOutcomeDto {
+    AgentWriteOutcomeDto {
+        path: outcome.path.to_string_lossy().into_owned(),
+        operation: outcome.operation,
+        created: outcome.created,
+        overwritten: outcome.overwritten,
+        bytes_written: outcome.bytes_written,
+        content_sha256: outcome.content_sha256,
+        message: outcome.message,
+    }
+}
+
+fn agent_permission_response_dto(
+    response: agent_review::AgentPermissionResponse,
+) -> AgentPermissionResponseDto {
+    AgentPermissionResponseDto {
+        request_id: response.request_id,
+        decision: agent_permission_decision_dto(response.decision),
+        allowed: response.allowed,
+        scope: response.scope,
+        message: response.message,
+        response_json: response.response_json,
+    }
+}
+
+fn agent_audit_event_dto(event: agent_review::AgentAuditEvent) -> AgentAuditEventDto {
+    AgentAuditEventDto {
+        timestamp_unix_ms: event.timestamp_unix_ms,
+        review_id: event.review_id,
+        agent: event.agent,
+        model: event.model,
+        transport: agent_transport_dto(event.transport),
+        working_directory: event.working_directory.to_string_lossy().into_owned(),
+        context_count: event.context_count,
+        result_type: agent_result_type_dto(event.result_type),
+        change_count: event.change_count,
+        user_confirmed_write: event.user_confirmed_write,
+        outcome: agent_audit_outcome_dto(event.outcome),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4359,5 +5118,115 @@ mod tests {
         assert_eq!(dto.commits[0].graph.edges[0].to_lane, 1);
         assert_eq!(dto.commits[0].refs[0].kind, GitRefKindDto::LocalBranch);
         assert_eq!(dto.next_cursor.as_deref(), Some("cursor"));
+    }
+}
+
+#[cfg(test)]
+mod agent_review_ffi_tests {
+    use super::*;
+
+    fn fixture() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "kite-agent-review-ffi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn draft(root: &Path) -> AgentReviewDraftDto {
+        AgentReviewDraftDto {
+            schema_version: 1,
+            id: Some("ffi-review".into()),
+            agent: "Fixture".into(),
+            model: Some("test".into()),
+            transport: AgentTransportDto::Acp,
+            working_directory: root.to_string_lossy().into_owned(),
+            context_paths: Vec::new(),
+            answer: "hello".into(),
+            references: Vec::new(),
+            file_changes: vec![AgentFileChangeDraftDto {
+                path: "file.txt".into(),
+                proposed_text: "after\n".into(),
+                expected_sha256: None,
+            }],
+            permission_requests: vec![AgentPermissionRequestDraftDto {
+                id: Some("perm-1".into()),
+                kind: AgentPermissionKindDto::Write,
+                title: "Write".into(),
+                detail: "One file".into(),
+                target_paths: vec!["file.txt".into()],
+                can_allow_task: true,
+            }],
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ffi_builds_applies_and_audits_review() {
+        let root = fixture();
+        std::fs::write(root.join("file.txt"), "before\n").unwrap();
+        let core = KiteCore::new();
+        let review = core.agent_build_review(draft(&root)).unwrap();
+        assert_eq!(review.result_type, AgentResultTypeDto::Mixed);
+        assert_eq!(review.file_changes[0].added_lines, 1);
+        let outcome = core
+            .agent_apply_change(review.file_changes[0].clone(), true)
+            .unwrap();
+        assert!(outcome.overwritten);
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).unwrap(),
+            "after\n"
+        );
+        let audit_path = core
+            .agent_record_audit(
+                review,
+                true,
+                AgentAuditOutcomeDto::Applied,
+                Some(root.join("audit.jsonl").to_string_lossy().into_owned()),
+            )
+            .unwrap();
+        let audit = std::fs::read_to_string(audit_path).unwrap();
+        assert!(audit.contains("ffi-review"));
+        assert!(!audit.contains("hello"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ffi_rejects_changed_file_and_serializes_denial() {
+        let root = fixture();
+        std::fs::write(root.join("file.txt"), "before\n").unwrap();
+        let core = KiteCore::new();
+        let review = core.agent_build_review(draft(&root)).unwrap();
+        std::fs::write(root.join("file.txt"), "external\n").unwrap();
+        let error = core
+            .agent_apply_change(review.file_changes[0].clone(), true)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            KiteError::AgentReview {
+                kind: AgentReviewErrorKindDto::FileChangedExternally,
+                ..
+            }
+        ));
+        let response = core
+            .agent_respond_permission(
+                review.permission_requests[0].clone(),
+                AgentPermissionDecisionDto::Deny,
+                "task-1".into(),
+                AgentTransportDto::Acp,
+            )
+            .unwrap();
+        assert!(!response.allowed);
+        assert!(response.response_json.contains("\"deny\""));
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).unwrap(),
+            "external\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

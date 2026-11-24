@@ -51,6 +51,7 @@ actions!(
         CheckForUpdates,
         OpenSettings,
         OpenWorkspaceEditor,
+        OpenAgentReview,
         GitClientRefresh,
         GitClientFetch,
         GitClientPull,
