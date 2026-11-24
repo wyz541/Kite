@@ -8,6 +8,7 @@
 当前复现检查：[v0.6.61 双次运行](reproducibility-v0.6.61.md)。
 当前 macOS 启动基线：[v0.6.61 启动与首内容](startup-macos-v0.6.61.md)。
 当前跨平台启动 CI 基线：[v0.6.61 Windows 与 macOS](startup-ci-v0.6.61.md)。
+当前 Git 提交历史基准：[100,000 提交分页与提交图](git-log-v0.6.88.md)。
 
 ## 1. 目标
 
@@ -90,7 +91,7 @@ cargo run --locked --release --features performance --bin kite-perf -- \
 | 预览和编辑 | 1 MiB、8 MiB 文本读取；100 MiB 拒绝；100 MiB 文本前缀与大日志尾部；3200×2000 图片缩略图 | 原生布局、绘制、Markdown 交互和滚动丢帧 |
 | 文件操作 | 创建、重命名、复制、移动、大文件复制 | 回收站、剪贴板、进度和丢帧 |
 | 压缩 | ZIP 和 TAR.GZ 压缩、解压 | 原生进度和丢帧 |
-| VCS 与菜单 | Git 状态和状态应用 | SVN 环境、Windows Shell 菜单 |
+| VCS 与菜单 | Git 状态、状态应用、100,000 提交分页和提交图布局 | 原生滚动画面的合成器丢帧、SVN 环境、Windows Shell 菜单 |
 | 侧边栏与设备 | 卷枚举 | WPD、MTP、USB、网络卷 |
 | 更新 | SHA-256 校验 | GitHub API、下载、安装和重启 |
 

@@ -19,6 +19,7 @@ mod watch;
 #[cfg(test)]
 use status::GitPathStatus;
 
+pub mod log;
 pub mod preview;
 pub mod remote;
 
@@ -55,6 +56,53 @@ pub use repository::{
     repository_state,
 };
 pub use watch::{GitRepositoryEvent, GitRepositoryWatcher};
+
+#[derive(Clone, Debug)]
+pub(crate) struct GitOutput {
+    pub status: GitExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GitExitStatus {
+    success: bool,
+}
+
+impl GitExitStatus {
+    pub(crate) fn success(self) -> bool {
+        self.success
+    }
+}
+
+pub(crate) fn run_git(current_dir: &Path, args: &[&str]) -> Option<GitOutput> {
+    let result = GitService::shared()
+        .run_preview_command(current_dir, args)
+        .ok()?;
+    Some(GitOutput {
+        status: GitExitStatus {
+            success: result.exit_code == Some(0),
+        },
+        stdout: result.stdout.into_bytes(),
+        stderr: result.stderr.into_bytes(),
+    })
+}
+
+pub(crate) fn output_error(output: &GitOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        "Git 操作失败".to_string()
+    } else {
+        format!(
+            "Git 操作失败：{}",
+            stderr
+                .replace(['\r', '\n'], " ")
+                .chars()
+                .take(300)
+                .collect::<String>()
+        )
+    }
+}
 
 #[derive(Clone)]
 pub struct GitService {
@@ -278,6 +326,21 @@ impl GitService {
             state,
             thread: Mutex::new(Some(thread)),
         })
+    }
+
+    pub(crate) fn run_log_command(
+        &self,
+        current_dir: &Path,
+        args: &[&str],
+    ) -> Result<GitCommandResult, GitError> {
+        self.executor.run(
+            current_dir,
+            args.iter().map(OsString::from).collect::<Vec<_>>(),
+            GitCommandOptions::new("Git 历史"),
+            &CancellationToken::default(),
+            &NoopGitEventSink,
+            None,
+        )
     }
 
     pub(crate) fn run_preview_command(
