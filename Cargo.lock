@@ -3734,6 +3734,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "image",
+ "libc",
  "libloading",
  "markdown",
  "notify",

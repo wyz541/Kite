@@ -1,3 +1,17 @@
+mod acp;
+mod config;
+mod context;
+mod events;
+pub mod model;
+mod process;
+mod redact;
+mod session;
+mod transport;
+
+pub use context::*;
+pub use events::AgentEventSubscription;
+pub use model::*;
+pub use session::AgentSession;
 mod store;
 
 use std::collections::HashSet;
@@ -40,20 +54,17 @@ pub enum AgentTransport {
     Cli,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkingDirectoryPolicy {
+    #[default]
     SelectedItem,
     FileParent,
     RepositoryRoot,
-    Fixed { path: String },
+    Fixed {
+        path: String,
+    },
     Ask,
-}
-
-impl Default for WorkingDirectoryPolicy {
-    fn default() -> Self {
-        Self::SelectedItem
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
@@ -330,13 +341,13 @@ pub(crate) fn validate_and_normalize_profile(
         )?;
         if !environment_names.insert(variable.name.to_ascii_uppercase()) {
             return Err(invalid(
-                &format!("environment[{index}].name"),
+                format!("environment[{index}].name"),
                 "duplicates another environment variable",
             ));
         }
         if sensitive_environment_name(&variable.name) {
             return Err(invalid(
-                &format!("environment[{index}].name"),
+                format!("environment[{index}].name"),
                 "sensitive values must be supplied through credential_ref",
             ));
         }
@@ -458,7 +469,7 @@ fn validate_environment_name(index: usize, name: &str) -> Result<(), AgentConfig
     let mut characters = name.chars();
     let Some(first) = characters.next() else {
         return Err(invalid(
-            &format!("environment[{index}].name"),
+            format!("environment[{index}].name"),
             "must not be empty",
         ));
     };
@@ -466,7 +477,7 @@ fn validate_environment_name(index: usize, name: &str) -> Result<(), AgentConfig
         || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
     {
         return Err(invalid(
-            &format!("environment[{index}].name"),
+            format!("environment[{index}].name"),
             "must match [A-Za-z_][A-Za-z0-9_]*",
         ));
     }

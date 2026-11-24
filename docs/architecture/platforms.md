@@ -27,6 +27,7 @@ kite_core
   platform paths
   command model
   session store
+  agent session / ACP transport
   UniFFI interface
 
 Windows frontend
@@ -59,6 +60,7 @@ Core 负责以下能力：
 - 稳定命令标识。
 - 跨语言数据记录。
 - 会话保存和恢复。
+- 外部 Agent 会话、ACP/JSON-RPC 传输和进程树清理。
 - GitHub Release 检查和版本比较。
 - 平台更新资产选择和 SHA-256 校验。
 
@@ -160,6 +162,9 @@ Swift 使用 UniFFI 记录和对象。
 - 会话读取和保存。
 - 文本文件读取和保存。
 - 更新检查、下载进度和更新包校验。
+- Agent 会话启动、提示词、权限响应、取消和事件订阅。
+
+Agent 会话的协议、超时、错误和清理边界见 [Agent 会话与 ACP 传输](agent-session.md)。
 
 后续接口按功能域增加。
 接口不暴露 GPUI 类型。
