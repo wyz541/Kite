@@ -63,6 +63,7 @@ zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 futures-channel = "0.3"
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 libloading = "0.8.9"
 gpui-kit = { version = "0.8.0", optional = true, features = ["syntect"] }
 raw-window-handle = { version = "0.6.2", optional = true }
@@ -99,6 +100,7 @@ windows-sys = { version = "0.61", features = [
 winresource = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
 markdown = "1.0.0"
 
 [dev-dependencies]

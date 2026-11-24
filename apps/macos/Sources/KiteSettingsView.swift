@@ -29,6 +29,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
     case general
     case appearance
     case layout
+    case agent
     case fileHandling
     case updates
     case about
@@ -40,6 +41,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return "通用"
         case .appearance: return "外观"
         case .layout: return "布局"
+        case .agent: return "Agent"
         case .fileHandling: return "文件处理"
         case .updates: return "更新"
         case .about: return "关于"
@@ -51,6 +53,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return "启动和窗口恢复"
         case .appearance: return "主题和界面外观"
         case .layout: return "侧边栏、预览和栏位"
+        case .agent: return "Agent 配置、凭据与连接测试"
         case .fileHandling: return "默认文件查看器"
         case .updates: return "版本、更新与诊断"
         case .about: return "Kite 版本信息"
@@ -62,6 +65,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return "gearshape.fill"
         case .appearance: return "paintpalette.fill"
         case .layout: return "rectangle.split.3x1.fill"
+        case .agent: return "cpu"
         case .fileHandling: return "folder.fill"
         case .updates: return "arrow.triangle.2.circlepath"
         case .about: return "info.circle.fill"
@@ -73,6 +77,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return .secondary
         case .appearance: return KiteTheme.brandOrange
         case .layout: return .blue
+        case .agent: return .purple
         case .fileHandling: return .cyan
         case .updates: return .green
         case .about: return .purple
@@ -207,6 +212,8 @@ struct KiteSettingsView: View {
                     appearanceSettings
                 case .layout:
                     layoutSettings
+                case .agent:
+                    KiteAgentSettingsView(model: model)
                 case .fileHandling:
                     fileHandlingSettings
                 case .updates:
