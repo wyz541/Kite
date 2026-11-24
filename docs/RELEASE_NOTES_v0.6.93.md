@@ -1,5 +1,7 @@
 # Kite v0.6.93
 
+macOS parity: not required - this hotfix changes only Windows update installation and shared tests.
+
 ## Windows updater repair
 
 - Fix Windows auto-update from older Kite builds by extracting the downloaded `Kite-v*-windows-x64.zip` package instead of copying the ZIP file directly to `Kite.exe`.
