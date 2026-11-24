@@ -486,7 +486,9 @@ private struct KiteBrowserColumn: View {
         .animation(.snappy(duration: 0.18), value: model.activeColumnSearchPath)
         .onHover { hovered in
             if hovered {
+                let path = column.path
                 model.markColumnHovered(index: index)
+                model.noteColumnHover(path: path)
             }
         }
         .onChange(of: model.activeColumnSearchPath) { activePath in
@@ -498,11 +500,6 @@ private struct KiteBrowserColumn: View {
         .onAppear {
             DispatchQueue.main.async {
                 searchFocused = model.activeColumnSearchPath == column.path
-            }
-        }
-        .onHover { hovered in
-            if hovered {
-                model.noteColumnHover(path: column.path)
             }
         }
         .modifier(
