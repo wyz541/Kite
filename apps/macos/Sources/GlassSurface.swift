@@ -311,6 +311,7 @@ enum KiteTheme {
     static let columnWidth: CGFloat = 274
     static let detailedColumnWidth: CGFloat = 416
     static let previewWidth: CGFloat = 316
+    static let agentWidth: CGFloat = 360
     static let panelRadius: CGFloat = 24
     static let controlRadius: CGFloat = 14
     static let contentGap: CGFloat = 10

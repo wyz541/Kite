@@ -14,6 +14,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kite_core::agent::{
+    AgentConnectionInfo, AgentDiagnostics, AgentProfile, AgentProfileStore, AgentStoreLoad,
+    agent_config_path, agent_presets, diagnose_agents, load_agent_profiles, preset_profile,
+    probe_agent_connection, save_agent_profiles,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPage {
@@ -22,16 +27,18 @@ enum SettingsPage {
     Appearance,
     Layout,
     FileHandling,
+    Agent,
     Updates,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Appearance,
         Self::Layout,
         Self::FileHandling,
+        Self::Agent,
         Self::Updates,
         Self::About,
     ];
@@ -42,6 +49,7 @@ impl SettingsPage {
             Self::Appearance => "外观",
             Self::Layout => "布局",
             Self::FileHandling => "文件处理",
+            Self::Agent => "Agent",
             Self::Updates => "更新",
             Self::About => "关于",
         }
@@ -53,6 +61,7 @@ impl SettingsPage {
             Self::Appearance => "主题和界面外观",
             Self::Layout => "侧边栏、预览和详细信息",
             Self::FileHandling => "默认资源管理器",
+            Self::Agent => "连接、权限与默认 Agent",
             Self::Updates => "版本、更新与诊断",
             Self::About => "Kite 版本信息",
         }
@@ -64,6 +73,7 @@ impl SettingsPage {
             Self::Appearance => IconName::Palette,
             Self::Layout => IconName::LayoutPanelLeft,
             Self::FileHandling => IconName::Folder,
+            Self::Agent => IconName::Sparkles,
             Self::Updates => IconName::RefreshCw,
             Self::About => IconName::Info,
         }
@@ -75,6 +85,7 @@ impl SettingsPage {
             Self::Appearance => rgb(0xf47a32).into(),
             Self::Layout => rgb(0x5e9cff).into(),
             Self::FileHandling => rgb(0x45b8d8).into(),
+            Self::Agent => rgb(0xf28c4c).into(),
             Self::Updates => rgb(0x55b978).into(),
             Self::About => rgb(0xa675df).into(),
         }
@@ -87,13 +98,19 @@ pub(crate) struct SettingsWindow {
     preferences: UiPreferences,
     update_state: SettingsUpdateState,
     status: Option<SharedString>,
+    agent_store: AgentStoreLoad,
+    agent_diagnostics: AgentDiagnostics,
+    agent_testing_profile: Option<String>,
+    agent_test_result: Option<AgentConnectionInfo>,
+    _agent_test_task: Task<()>,
     _main_app_subscription: Subscription,
 }
 
 impl SettingsWindow {
-    pub(crate) fn new(
+    fn new(
         main_app: Entity<KiteApp>,
         initial_update_state: SettingsUpdateState,
+        initial_page: SettingsPage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -107,10 +124,15 @@ impl SettingsWindow {
         });
         Self {
             main_app,
-            page: SettingsPage::General,
+            page: initial_page,
             preferences,
             status: initial_update_state.status.clone(),
             update_state: initial_update_state,
+            agent_store: load_agent_profiles(),
+            agent_diagnostics: diagnose_agents(),
+            agent_testing_profile: None,
+            agent_test_result: None,
+            _agent_test_task: Task::ready(()),
             _main_app_subscription: subscription,
         }
     }
@@ -138,6 +160,7 @@ impl SettingsWindow {
             SettingsPage::Appearance => self.render_appearance(cx),
             SettingsPage::Layout => self.render_layout(cx),
             SettingsPage::FileHandling => self.render_file_handling(window, cx),
+            SettingsPage::Agent => self.render_agent(cx),
             SettingsPage::Updates => self.render_updates(window, cx),
             SettingsPage::About => self.render_about(cx),
         }
@@ -380,8 +403,8 @@ impl SettingsWindow {
                 self.separator(cx),
                 self.row(
                     "layout-preview",
-                    "显示预览",
-                    Some("显示所选文件的内容和属性。"),
+                    "显示右侧栏",
+                    Some("显示预览或 Agent 上下文表面。"),
                     Switch::new("preview-visible")
                         .checked(self.preferences.preview_visible)
                         .small()
@@ -494,6 +517,408 @@ impl SettingsWindow {
         content.into_any_element()
     }
 
+    fn save_agent_store(&mut self, store: AgentProfileStore, cx: &mut Context<Self>) {
+        match save_agent_profiles(store) {
+            Ok(loaded) => {
+                self.agent_store = loaded;
+                self.agent_diagnostics = diagnose_agents();
+                self.status = Some("Agent 配置已保存".into());
+            }
+            Err(error) => self.status = Some(error.into()),
+        }
+        cx.notify();
+    }
+
+    fn add_agent_preset(&mut self, preset_id: &str, cx: &mut Context<Self>) {
+        let Some(mut profile) = preset_profile(preset_id) else {
+            self.status = Some("未知的 Agent 预设".into());
+            cx.notify();
+            return;
+        };
+        let used_names = self
+            .agent_store
+            .store
+            .profiles
+            .iter()
+            .map(|item| item.name.to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        if used_names.contains(&profile.name.to_ascii_lowercase()) {
+            let base = profile.name.clone();
+            for index in 2..100 {
+                let candidate = format!("{base} {index}");
+                if !used_names.contains(&candidate.to_ascii_lowercase()) {
+                    profile.name = candidate;
+                    break;
+                }
+            }
+            profile.id = format!("{}-{}", profile.id, now_unix_ms());
+        }
+        let profile_id = profile.id.clone();
+        self.agent_store.store.profiles.push(profile);
+        if self.agent_store.store.default_profile_id.is_none() {
+            self.agent_store.store.default_profile_id = Some(profile_id);
+        }
+        let store = self.agent_store.store.clone();
+        self.save_agent_store(store, cx);
+    }
+
+    fn set_agent_default(&mut self, profile_id: &str, cx: &mut Context<Self>) {
+        self.agent_store.store.default_profile_id = Some(profile_id.to_string());
+        let store = self.agent_store.store.clone();
+        self.save_agent_store(store, cx);
+    }
+
+    fn delete_agent_profile(&mut self, profile_id: &str, cx: &mut Context<Self>) {
+        self.agent_store
+            .store
+            .profiles
+            .retain(|profile| profile.id != profile_id);
+        if self.agent_store.store.default_profile_id.as_deref() == Some(profile_id) {
+            self.agent_store.store.default_profile_id = self
+                .agent_store
+                .store
+                .profiles
+                .first()
+                .map(|profile| profile.id.clone());
+        }
+        let store = self.agent_store.store.clone();
+        self.save_agent_store(store, cx);
+    }
+
+    fn test_agent_profile(
+        &mut self,
+        profile: AgentProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let profile_id = profile.id.clone();
+        self.agent_testing_profile = Some(profile_id.clone());
+        self.agent_test_result = None;
+        self.status = Some(format!("正在测试 {}…", profile.name).into());
+        self._agent_test_task = cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { probe_agent_connection(profile) })
+                .await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.agent_testing_profile = None;
+                this.agent_test_result = Some(result.clone());
+                this.agent_diagnostics = diagnose_agents();
+                this.status = Some(if result.success {
+                    format!("连接成功：{} {} ", result.agent_name, result.agent_version).into()
+                } else {
+                    result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Agent 连接测试失败".to_string())
+                        .into()
+                });
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
+    fn render_agent(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut profile_rows = Vec::new();
+        let profiles = self.agent_store.store.profiles.clone();
+        let default_id = self.agent_store.store.default_profile_id.clone();
+        if profiles.is_empty() {
+            profile_rows.push(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .px_4()
+                    .py_4()
+                    .child(div().text_sm().font_medium().child("尚未配置 Agent"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("从下方预设添加，或通过配置文件接入自定义 ACP Agent。"),
+                    )
+                    .into_any_element(),
+            );
+        }
+        for profile in profiles {
+            let is_default = default_id.as_deref() == Some(profile.id.as_str());
+            let is_testing = self.agent_testing_profile.as_deref() == Some(profile.id.as_str());
+            let default_id = profile.id.clone();
+            let test_profile = profile.clone();
+            let delete_id = profile.id.clone();
+            let can_delete = !is_default && self.agent_store.store.profiles.len() > 1;
+            profile_rows.push(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .items_center()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_medium()
+                                                    .child(profile.name.clone()),
+                                            )
+                                            .when(is_default, |this| {
+                                                this.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_semibold()
+                                                        .text_color(cx.theme().primary)
+                                                        .child("默认"),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!(
+                                                "{} · {} · {}",
+                                                profile.command,
+                                                profile
+                                                    .model
+                                                    .as_deref()
+                                                    .unwrap_or("Agent 默认模型"),
+                                                profile.permission_mode.label()
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .flex_shrink_0()
+                                    .when(!is_default, |this| {
+                                        this.child(
+                                            Button::new(format!("agent-default-{default_id}"))
+                                                .ghost()
+                                                .compact()
+                                                .label("设为默认")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_agent_default(&default_id, cx)
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new(format!("agent-test-{}", profile.id))
+                                            .small()
+                                            .outline()
+                                            .label(if is_testing {
+                                                "测试中…"
+                                            } else {
+                                                "测试连接"
+                                            })
+                                            .loading(is_testing)
+                                            .disabled(self.agent_testing_profile.is_some())
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.test_agent_profile(
+                                                    test_profile.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                                    .when(can_delete, |this| {
+                                        this.child(
+                                            Button::new(format!("agent-delete-{delete_id}"))
+                                                .ghost()
+                                                .compact()
+                                                .label("删除")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.delete_agent_profile(&delete_id, cx)
+                                                })),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+            profile_rows.push(self.separator(cx));
+        }
+        if matches!(profile_rows.last(), Some(_)) {
+            profile_rows.pop();
+        }
+
+        let mut preset_buttons = h_flex().w_full().gap_2().flex_wrap();
+        for preset in agent_presets() {
+            let preset_id = preset.id.clone();
+            preset_buttons = preset_buttons.child(
+                Button::new(format!("agent-preset-{preset_id}"))
+                    .small()
+                    .outline()
+                    .icon(IconName::Plus)
+                    .label(format!("添加 {}", preset.name))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.add_agent_preset(&preset_id, cx)),
+                    ),
+            );
+        }
+
+        let test_result =
+            self.agent_test_result.as_ref().map(|result| {
+                let color = if result.success {
+                    cx.theme().success
+                } else {
+                    cx.theme().danger
+                };
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .px_4()
+                    .py_3()
+                    .child(div().text_sm().font_medium().text_color(color).child(
+                        if result.success {
+                            "连接成功"
+                        } else {
+                            "连接失败"
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if result.success {
+                                format!(
+                                    "{} {} · 协议 v{} · {} ms · {} 项能力",
+                                    result.agent_name,
+                                    result.agent_version,
+                                    result.protocol_version,
+                                    result.latency_ms,
+                                    result.capabilities.len()
+                                )
+                            } else {
+                                result
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "未知错误".to_string())
+                            }),
+                    )
+                    .into_any_element()
+            });
+
+        let config_button = Button::new("agent-open-config")
+            .small()
+            .outline()
+            .label("打开配置目录")
+            .on_click(cx.listener(|this, _, _, cx| {
+                let path = agent_config_path();
+                if let Err(error) =
+                    open::that(path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+                {
+                    this.status = Some(format!("无法打开配置目录：{error}").into());
+                    cx.notify();
+                }
+            }))
+            .into_any_element();
+        let agent_log_path = self.agent_diagnostics.log_path.clone();
+        let log_button = Button::new("agent-open-log")
+            .small()
+            .outline()
+            .label("打开诊断日志")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Err(error) = open::that(&agent_log_path) {
+                    this.status = Some(format!("无法打开 Agent 日志：{error}").into());
+                    cx.notify();
+                }
+            }))
+            .into_any_element();
+
+        let mut install_buttons = Vec::new();
+        for preset in agent_presets() {
+            install_buttons.push(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .px_4()
+                    .py_3()
+                    .child(div().text_sm().font_medium().child(preset.name))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(preset.description),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(cx.theme().muted_foreground)
+                            .child(preset.install_hint),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        v_flex()
+            .gap_6()
+            .child(self.section(
+                "已配置 Agent",
+                profile_rows,
+                Some("测试连接会启动一次 ACP 握手；认证仍由 Agent 自身管理。"),
+                cx,
+            ))
+            .child(self.section(
+                "添加预设",
+                vec![preset_buttons.into_any_element()],
+                None,
+                cx,
+            ))
+            .when_some(test_result, |this, result| this.child(result))
+            .child(self.section(
+                "诊断",
+                vec![
+                    h_flex()
+                        .id("agent-diagnostics-actions")
+                        .w_full()
+                        .gap_6()
+                        .items_center()
+                        .px_4()
+                        .py_3()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(div().text_sm().font_medium().child("诊断位置"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .truncate()
+                                        .child(self.agent_diagnostics.log_path.clone()),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_shrink_0()
+                                .gap_2()
+                                .child(config_button)
+                                .child(log_button),
+                        )
+                        .into_any_element(),
+                ],
+                Some("日志会遮盖常见 token、密码和 URL 凭据。"),
+                cx,
+            ))
+            .child(self.section("预设安装提示", install_buttons, None, cx))
+            .when_some(self.agent_store.warning.clone(), |this, warning| {
+                this.child(div().text_sm().text_color(cx.theme().danger).child(warning))
+            })
+            .into_any_element()
+    }
     fn render_updates(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let update_in_progress = self.update_state.in_progress;
         let check = Button::new("check-updates")
@@ -948,6 +1373,23 @@ pub(crate) fn open_settings_window(
     initial_update_state: SettingsUpdateState,
     cx: &mut App,
 ) -> Result<(), String> {
+    open_settings_window_at(main_app, initial_update_state, SettingsPage::General, cx)
+}
+
+pub(crate) fn open_agent_settings_window(
+    main_app: Entity<KiteApp>,
+    initial_update_state: SettingsUpdateState,
+    cx: &mut App,
+) -> Result<(), String> {
+    open_settings_window_at(main_app, initial_update_state, SettingsPage::Agent, cx)
+}
+
+fn open_settings_window_at(
+    main_app: Entity<KiteApp>,
+    initial_update_state: SettingsUpdateState,
+    initial_page: SettingsPage,
+    cx: &mut App,
+) -> Result<(), String> {
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some("Kite 设置".into()),
@@ -958,7 +1400,15 @@ pub(crate) fn open_settings_window(
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| SettingsWindow::new(main_app.clone(), initial_update_state, window, cx))
+        cx.new(|cx| {
+            SettingsWindow::new(
+                main_app.clone(),
+                initial_update_state,
+                initial_page,
+                window,
+                cx,
+            )
+        })
     })
     .map(|_| ())
     .map_err(|error| format!("无法打开设置窗口：{error}"))
@@ -974,4 +1424,10 @@ fn open_update_log() -> Result<(), String> {
     let log = updates.join("update.log");
     let target: PathBuf = if log.is_file() { log } else { updates };
     open::that(target).map_err(|error| format!("无法打开更新诊断日志：{error}"))
+}
+
+fn now_unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis())
 }

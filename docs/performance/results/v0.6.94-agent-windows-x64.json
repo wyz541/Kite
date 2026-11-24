@@ -1,0 +1,93 @@
+{
+  "architecture": "x86_64",
+  "environment": {
+    "cpu_brand": "Intel(R) Core(TM) i5-14600KF",
+    "logical_cores": 20,
+    "os_version": "Windows 11 Enterprise"
+  },
+  "generated_unix_ms": 1795518618911,
+  "metrics": {
+    "long_output_append_ms": 0.1168,
+    "output_bytes": 262144,
+    "output_chunks": 256,
+    "output_elapsed_ms": 159,
+    "peak_agent_memory_bytes": 4591616,
+    "process_cleanup_ms": 44,
+    "startup_ms": 124,
+    "throughput_mib_per_second": 1.5634654399091439
+  },
+  "notes": [
+    "Metrics are medians across independent fixture processes.",
+    "The fixture measures transport and transcript preparation, not model latency.",
+    "UI scroll frame timing is validated separately in the platform screenshot/performance pass."
+  ],
+  "platform": "windows",
+  "runs": 3,
+  "samples": [
+    {
+      "architecture": "x86_64",
+      "generated_unix_ms": 1795518616373,
+      "metrics": {
+        "long_output_append_ms": 0.1212,
+        "output_bytes": 262144,
+        "output_chunks": 256,
+        "output_elapsed_ms": 120,
+        "peak_agent_memory_bytes": 4591616,
+        "process_cleanup_ms": 47,
+        "startup_ms": 47,
+        "throughput_mib_per_second": 2.0679922772896395
+      },
+      "notes": [
+        "The fixture measures transport and transcript preparation, not model latency.",
+        "UI scroll frame timing is validated separately in the platform screenshot/performance pass."
+      ],
+      "platform": "windows",
+      "scenario": "long",
+      "schema_version": 1
+    },
+    {
+      "architecture": "x86_64",
+      "generated_unix_ms": 1795518616716,
+      "metrics": {
+        "long_output_append_ms": 0.1113,
+        "output_bytes": 262144,
+        "output_chunks": 256,
+        "output_elapsed_ms": 159,
+        "peak_agent_memory_bytes": 4591616,
+        "process_cleanup_ms": 44,
+        "startup_ms": 124,
+        "throughput_mib_per_second": 1.5634654399091439
+      },
+      "notes": [
+        "The fixture measures transport and transcript preparation, not model latency.",
+        "UI scroll frame timing is validated separately in the platform screenshot/performance pass."
+      ],
+      "platform": "windows",
+      "scenario": "long",
+      "schema_version": 1
+    },
+    {
+      "architecture": "x86_64",
+      "generated_unix_ms": 1795518617577,
+      "metrics": {
+        "long_output_append_ms": 0.1168,
+        "output_bytes": 262144,
+        "output_chunks": 256,
+        "output_elapsed_ms": 246,
+        "peak_agent_memory_bytes": 4591616,
+        "process_cleanup_ms": 12,
+        "startup_ms": 601,
+        "throughput_mib_per_second": 1.0136892653145133
+      },
+      "notes": [
+        "The fixture measures transport and transcript preparation, not model latency.",
+        "UI scroll frame timing is validated separately in the platform screenshot/performance pass."
+      ],
+      "platform": "windows",
+      "scenario": "long",
+      "schema_version": 1
+    }
+  ],
+  "scenario": "long",
+  "schema_version": 2
+}

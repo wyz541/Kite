@@ -27,16 +27,19 @@ kite_core
   platform paths
   command model
   session store
+  agent profiles and ACP session
   UniFFI interface
 
 Windows frontend
   GPUI views
   GPUI tabs
+  Agent panel and window
   Windows Shell bridge
 
 macOS frontend
   SwiftUI views
   SwiftUI tabs
+  Agent panel and window
   AppKit menu and workspace
   UniFFI Swift bindings
 ```
@@ -61,6 +64,8 @@ Core 负责以下能力：
 - 会话保存和恢复。
 - GitHub Release 检查和版本比较。
 - 平台更新资产选择和 SHA-256 校验。
+- Agent profile、上下文快照和 ACP 会话生命周期。
+- Agent 诊断脱敏和可选会话恢复。
 
 Rust Core 输出 `rlib`、`staticlib` 和 `cdylib`。
 Swift 通过 UniFFI 生成绑定。
@@ -85,6 +90,7 @@ Windows 前端负责以下能力：
 - `IContextMenu` Shell 扩展菜单。
 - WPD/MTP 设备展示。
 - WPD/MTP Shell 命名空间浏览和写入。
+- Agent 侧栏、独立窗口、右键入口和任务控制。
 
 Windows 专属代码只在 `cfg(target_os = "windows")` 下编译。
 

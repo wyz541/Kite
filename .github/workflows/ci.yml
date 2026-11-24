@@ -70,3 +70,6 @@ jobs:
 
       - name: Run core tests
         run: cargo test --locked --lib
+
+      - name: Run Agent fixture contract tests
+        run: cargo test --locked --test agent_fixture_protocol

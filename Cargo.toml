@@ -21,6 +21,14 @@ path = "src/main.rs"
 required-features = ["windows-ui"]
 
 [[bin]]
+name = "kite-agent-perf"
+path = "src/bin/kite-agent-perf.rs"
+
+[[bin]]
+name = "kite-agent-fixture"
+path = "src/bin/kite-agent-fixture.rs"
+
+[[bin]]
 name = "kite-perf"
 path = "src/bin/kite-perf.rs"
 required-features = ["performance"]

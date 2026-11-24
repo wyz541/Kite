@@ -4,6 +4,10 @@
 mod actions;
 
 #[cfg(windows)]
+mod agent_panel;
+#[cfg(windows)]
+mod agent_window;
+#[cfg(windows)]
 mod app;
 #[cfg(windows)]
 mod archive_progress_window;

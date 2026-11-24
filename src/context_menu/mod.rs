@@ -11,6 +11,7 @@ use gpui_kit::*;
 use crate::actions::{ContextMenuAction, ContextMenuCommand, VcsMenuCommand};
 use crate::archive;
 use crate::platform::HostPlatform;
+use kite_core::agent::{AgentMenuCommand, is_text_like_path};
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -72,6 +73,7 @@ pub(crate) struct ContextMenuCapabilities {
 #[derive(Clone, Debug)]
 pub(crate) struct ContextMenuTarget {
     pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub working_directory: PathBuf,
     pub title: String,
     pub is_dir: bool,
@@ -126,7 +128,8 @@ impl ContextMenuTarget {
     ) -> Self {
         Self {
             working_directory: path.clone(),
-            path,
+            path: path.clone(),
+            paths: vec![path],
             title,
             is_dir: true,
             loading: capabilities.loading,
@@ -150,7 +153,8 @@ impl ContextMenuTarget {
         capabilities: ContextMenuCapabilities,
     ) -> Self {
         Self {
-            path,
+            path: path.clone(),
+            paths: vec![path],
             working_directory,
             title,
             is_dir,
@@ -170,9 +174,17 @@ impl ContextMenuTarget {
     fn action(&self, command: ContextMenuCommand) -> ContextMenuAction {
         ContextMenuAction {
             target: self.path.clone(),
+            paths: self.paths.clone(),
             working_directory: self.working_directory.clone(),
             command,
         }
+    }
+
+    pub(crate) fn with_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        if !paths.is_empty() {
+            self.paths = paths;
+        }
+        self
     }
 }
 
@@ -269,6 +281,7 @@ trait ContextMenuProvider {
 
 struct CoreMenuProvider;
 struct ArchiveMenuProvider;
+struct AgentMenuProvider;
 struct VcsMenuProvider;
 struct SystemMenuProvider;
 struct RefreshMenuProvider;
@@ -416,6 +429,79 @@ impl ContextMenuProvider for ArchiveMenuProvider {
                 archive_menu_item("解压到…", ContextMenuCommand::ExtractTo, can_extract),
             ],
         );
+    }
+}
+
+impl ContextMenuProvider for AgentMenuProvider {
+    fn append(
+        &self,
+        target: &ContextMenuTarget,
+        _: ContextMenuPolicy,
+        model: &mut ContextMenuModel,
+    ) {
+        let agent_enabled = !target.loading && !target.is_shell_namespace;
+        let is_text_like = !target.is_dir && is_text_like_path(&target.path);
+        let mut entries = vec![agent_menu_item(
+            AgentMenuCommand::Ask,
+            IconName::MessageCircle,
+            agent_enabled,
+        )];
+        if AgentMenuCommand::ExplainFile.is_available_for(
+            target.is_dir,
+            is_text_like,
+            target.git_available,
+        ) {
+            entries.push(agent_menu_item(
+                AgentMenuCommand::ExplainFile,
+                IconName::FileText,
+                agent_enabled,
+            ));
+        }
+        if AgentMenuCommand::SummarizeFolder.is_available_for(
+            target.is_dir,
+            false,
+            target.git_available,
+        ) {
+            entries.push(agent_menu_item(
+                AgentMenuCommand::SummarizeFolder,
+                IconName::Folder,
+                agent_enabled,
+            ));
+        }
+        if AgentMenuCommand::ReviewChanges.is_available_for(
+            target.is_dir,
+            is_text_like,
+            target.git_available,
+        ) {
+            entries.push(agent_menu_item(
+                AgentMenuCommand::ReviewChanges,
+                IconName::GitBranch,
+                agent_enabled,
+            ));
+            entries.push(agent_menu_item(
+                AgentMenuCommand::GenerateCommitMessage,
+                IconName::GitCommitHorizontal,
+                agent_enabled,
+            ));
+        }
+        entries.push(ContextMenuNode::Separator);
+        entries.push(agent_menu_item(
+            AgentMenuCommand::Configure,
+            IconName::Settings,
+            !target.loading,
+        ));
+
+        model.separator();
+        model.submenu("使用 Agent", IconName::Sparkles, !target.loading, entries);
+    }
+}
+
+fn agent_menu_item(command: AgentMenuCommand, icon: IconName, enabled: bool) -> ContextMenuNode {
+    ContextMenuNode::Item {
+        label: command.label(),
+        icon,
+        command: ContextMenuCommand::Agent(command),
+        enabled,
     }
 }
 
@@ -633,10 +719,11 @@ fn menu_item(
 }
 
 fn build_model(target: &ContextMenuTarget, policy: ContextMenuPolicy) -> ContextMenuModel {
-    let providers: [&dyn ContextMenuProvider; 5] = [
+    let providers: [&dyn ContextMenuProvider; 6] = [
         &RefreshMenuProvider,
         &CoreMenuProvider,
         &ArchiveMenuProvider,
+        &AgentMenuProvider,
         &VcsMenuProvider,
         &SystemMenuProvider,
     ];
@@ -755,6 +842,7 @@ mod tests {
         ContextMenuPolicy, ContextMenuTarget, VcsMenuCommand, build_model,
     };
     use crate::platform::HostPlatform;
+    use kite_core::agent::AgentMenuCommand;
     use std::path::PathBuf;
 
     fn target() -> ContextMenuTarget {
@@ -858,6 +946,7 @@ mod tests {
         assert!(labels.contains(&"拷贝到…"));
         assert!(labels.contains(&"复制完整路径"));
         assert!(labels.contains(&"属性"));
+        assert!(labels.contains(&"使用 Agent"));
         assert!(model.entries.iter().any(|entry| matches!(
             entry,
             ContextMenuNode::Item {
@@ -867,6 +956,93 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn agent_menu_exposes_context_actions_and_configuration() {
+        let model = build_model(&target(), windows_policy());
+        let entries = submenu_entries(&model, "使用 Agent");
+        let commands = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ContextMenuNode::Item {
+                    command: ContextMenuCommand::Agent(command),
+                    enabled,
+                    ..
+                } if *enabled => Some(*command),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(commands.contains(&AgentMenuCommand::Ask));
+        assert!(commands.contains(&AgentMenuCommand::SummarizeFolder));
+        assert!(commands.contains(&AgentMenuCommand::ReviewChanges));
+        assert!(commands.contains(&AgentMenuCommand::GenerateCommitMessage));
+        assert!(commands.contains(&AgentMenuCommand::Configure));
+        assert!(!commands.contains(&AgentMenuCommand::ExplainFile));
+    }
+
+    #[test]
+    fn agent_menu_explains_text_files_only() {
+        let capabilities = ContextMenuCapabilities {
+            loading: false,
+            can_paste: true,
+            git_available: false,
+            svn_available: false,
+            supports_transfer_ops: true,
+            supports_cut: true,
+            supports_rename: true,
+            supports_delete: true,
+            supports_favorite: true,
+            is_shell_namespace: false,
+        };
+        let text_model = build_model(
+            &ContextMenuTarget::entry(
+                PathBuf::from(r"C:\repo\main.rs"),
+                "main.rs".to_string(),
+                false,
+                PathBuf::from(r"C:\repo"),
+                capabilities,
+            ),
+            windows_policy(),
+        );
+        let binary_model = build_model(
+            &ContextMenuTarget::entry(
+                PathBuf::from(r"C:\repo\Kite.exe"),
+                "Kite.exe".to_string(),
+                false,
+                PathBuf::from(r"C:\repo"),
+                capabilities,
+            ),
+            windows_policy(),
+        );
+
+        assert!(
+            submenu_entries(&text_model, "使用 Agent")
+                .iter()
+                .any(|entry| {
+                    matches!(
+                        entry,
+                        ContextMenuNode::Item {
+                            command: ContextMenuCommand::Agent(AgentMenuCommand::ExplainFile),
+                            ..
+                        }
+                    )
+                })
+        );
+        assert!(
+            !submenu_entries(&binary_model, "使用 Agent")
+                .iter()
+                .any(|entry| {
+                    matches!(
+                        entry,
+                        ContextMenuNode::Item {
+                            command: ContextMenuCommand::Agent(AgentMenuCommand::ExplainFile),
+                            ..
+                        }
+                    )
+                })
+        );
     }
 
     #[test]

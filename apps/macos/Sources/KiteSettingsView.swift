@@ -30,6 +30,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
     case appearance
     case layout
     case fileHandling
+    case agent
     case updates
     case about
 
@@ -41,6 +42,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return "外观"
         case .layout: return "布局"
         case .fileHandling: return "文件处理"
+        case .agent: return "Agent"
         case .updates: return "更新"
         case .about: return "关于"
         }
@@ -52,6 +54,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return "主题和界面外观"
         case .layout: return "侧边栏、预览和栏位"
         case .fileHandling: return "默认文件查看器"
+        case .agent: return "连接、权限与默认 Agent"
         case .updates: return "版本、更新与诊断"
         case .about: return "Kite 版本信息"
         }
@@ -63,6 +66,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return "paintpalette.fill"
         case .layout: return "rectangle.split.3x1.fill"
         case .fileHandling: return "folder.fill"
+        case .agent: return "sparkles"
         case .updates: return "arrow.triangle.2.circlepath"
         case .about: return "info.circle.fill"
         }
@@ -74,14 +78,25 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return KiteTheme.brandOrange
         case .layout: return .blue
         case .fileHandling: return .cyan
+        case .agent: return KiteTheme.brandOrange
         case .updates: return .green
         case .about: return .purple
         }
     }
 }
 
+extension Notification.Name {
+    static let kiteSelectSettingsPane = Notification.Name("KiteSelectSettingsPane")
+}
+
 enum KiteSettingsWindowController {
-    static func open() {
+    private static var pendingPane: KiteSettingsPane?
+
+    static func open(pane: KiteSettingsPane? = nil) {
+        if let pane {
+            pendingPane = pane
+            NotificationCenter.default.post(name: .kiteSelectSettingsPane, object: nil)
+        }
         NSApp.activate(ignoringOtherApps: true)
 
         if let appMenu = NSApp.mainMenu?.items.first?.submenu,
@@ -98,11 +113,21 @@ enum KiteSettingsWindowController {
         }
         _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
     }
+
+    static func consumePendingPane() -> KiteSettingsPane? {
+        defer { pendingPane = nil }
+        return pendingPane
+    }
 }
 
 struct KiteSettingsView: View {
     @ObservedObject var model: KiteModel
     @State private var selection: KiteSettingsPane = .general
+    @State private var agentStore: AgentStoreLoad?
+    @State private var agentDiagnostics: AgentDiagnostics?
+    @State private var agentTestResult: AgentConnectionInfo?
+    @State private var agentTestingId: String?
+    @State private var agentStatus: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -112,6 +137,12 @@ struct KiteSettingsView: View {
         }
         .frame(minWidth: 760, idealWidth: 760, minHeight: 560, idealHeight: 560)
         .background(.regularMaterial)
+        .onAppear {
+            applyPendingPane()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kiteSelectSettingsPane)) { _ in
+            applyPendingPane()
+        }
     }
 
     private var settingsSidebar: some View {
@@ -209,6 +240,8 @@ struct KiteSettingsView: View {
                     layoutSettings
                 case .fileHandling:
                     fileHandlingSettings
+                case .agent:
+                    agentSettings
                 case .updates:
                     updateSettings
                 case .about:
@@ -231,6 +264,12 @@ struct KiteSettingsView: View {
             Text(selection.subtitle)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func applyPendingPane() {
+        if let pane = KiteSettingsWindowController.consumePendingPane() {
+            selection = pane
         }
     }
 
@@ -306,8 +345,8 @@ struct KiteSettingsView: View {
                     }
                     SettingsDivider()
                     SettingsRow(
-                        title: "显示预览",
-                        detail: "显示所选文件的内容和属性。"
+                        title: "显示右侧栏",
+                        detail: "显示预览或 Agent 上下文表面。"
                     ) {
                         Toggle("", isOn: previewBinding)
                             .labelsHidden()
@@ -379,6 +418,261 @@ struct KiteSettingsView: View {
         }
     }
 
+    private var agentSettings: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            settingsSection("已配置 Agent") {
+                SettingsCard {
+                    let profiles = agentStore?.store.profiles ?? []
+                    if profiles.isEmpty {
+                        SettingsRow(
+                            title: "尚未配置 Agent",
+                            detail: "从预设添加，或通过配置文件接入自定义 ACP Agent。"
+                        ) {
+                            EmptyView()
+                        }
+                    } else {
+                        ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
+                            if index > 0 {
+                                SettingsDivider()
+                            }
+                            agentProfileRow(profile)
+                        }
+                    }
+                }
+            } footer: {
+                Text("测试连接会启动一次 ACP 握手。认证与模型权限仍由外部 Agent 自身管理。")
+            }
+
+            settingsSection("添加预设") {
+                SettingsCard {
+                    let presets = model.core.agentPresets()
+                    ForEach(Array(presets.enumerated()), id: \.element.id) { index, preset in
+                        if index > 0 {
+                            SettingsDivider()
+                        }
+                        SettingsRow(
+                            title: preset.name,
+                            detail: "\(preset.description) · \(preset.installHint)"
+                        ) {
+                            Button("添加") {
+                                addAgentPreset(preset.id)
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                }
+            }
+
+            if let result = agentTestResult {
+                settingsSection("连接测试") {
+                    SettingsCard {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(result.success ? "连接成功" : "连接失败")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(result.success ? .green : .red)
+                            Text(
+                                result.success
+                                    ? "\(result.agentName) \(result.agentVersion) · 协议 v\(result.protocolVersion) · \(result.latencyMs) ms"
+                                    : (result.error ?? "未知错误")
+                            )
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                    }
+                }
+            }
+
+            settingsSection("诊断") {
+                SettingsCard {
+                    SettingsRow(
+                        title: "Agent 配置",
+                        detail: agentStore?.configPath ?? "无法读取配置路径"
+                    ) {
+                        Button("在 Finder 中显示") {
+                            revealAgentPath(agentStore?.configPath)
+                        }
+                        .controlSize(.small)
+                    }
+                    SettingsDivider()
+                    SettingsRow(
+                        title: "Agent 诊断日志",
+                        detail: agentDiagnostics?.logPath ?? "尚未生成日志"
+                    ) {
+                        HStack(spacing: 7) {
+                            Button("显示") {
+                                revealAgentPath(agentDiagnostics?.logPath)
+                            }
+                            .controlSize(.small)
+                            Button("清除") {
+                                clearAgentLogs()
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    if let warning = agentStore?.warning {
+                        SettingsDivider()
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("配置警告")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(.red)
+                            Text(warning)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                    }
+                }
+            } footer: {
+                Text("日志会遮盖常见 token、密码和 URL 内嵌凭据，不记录提示词正文。")
+            }
+
+            if let status = agentStatus {
+                Text(status)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func agentProfileRow(_ profile: AgentProfile) -> some View {
+        let isDefault = agentStore?.store.defaultProfileId == profile.id
+        let isTesting = agentTestingId == profile.id
+        return SettingsRow(
+            title: profile.name + (isDefault ? " · 默认" : ""),
+            detail: "\(profile.command) · \(profile.model ?? "Agent 默认模型") · \(agentPermissionLabel(profile.permissionMode))"
+        ) {
+            HStack(spacing: 7) {
+                if !isDefault {
+                    Button("设为默认") {
+                        setAgentDefault(profile.id)
+                    }
+                    .controlSize(.small)
+                }
+                Button {
+                    testAgentProfile(profile)
+                } label: {
+                    if isTesting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("测试连接")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(agentTestingId != nil)
+                if !isDefault, (agentStore?.store.profiles.count ?? 0) > 1 {
+                    Button(role: .destructive) {
+                        deleteAgentProfile(profile.id)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .controlSize(.small)
+                    .help("删除 Agent")
+                }
+            }
+        }
+    }
+
+    private func reloadAgentSettings() {
+        agentStore = model.core.agentConfig()
+        agentDiagnostics = model.core.agentDiagnostics()
+    }
+
+    private func saveAgentStore(_ store: AgentProfileStore) {
+        do {
+            let loaded = try model.core.saveAgentConfig(store: store)
+            agentStore = loaded
+            agentDiagnostics = model.core.agentDiagnostics()
+            agentStatus = "Agent 配置已保存"
+        } catch {
+            agentStatus = error.localizedDescription
+        }
+    }
+
+    private func addAgentPreset(_ presetId: String) {
+        guard var profile = model.core.agentPresetProfile(presetId: presetId),
+              var store = agentStore?.store else { return }
+        let existingNames = Set(store.profiles.map { $0.name.lowercased() })
+        if existingNames.contains(profile.name.lowercased()) {
+            for index in 2...100 {
+                let candidate = "\(profile.name) \(index)"
+                if !existingNames.contains(candidate.lowercased()) {
+                    profile.name = candidate
+                    break
+                }
+            }
+            profile.id = "\(profile.id)-\(Int(Date().timeIntervalSince1970 * 1_000))"
+        }
+        store.profiles.append(profile)
+        if store.defaultProfileId == nil {
+            store.defaultProfileId = profile.id
+        }
+        saveAgentStore(store)
+    }
+
+    private func setAgentDefault(_ profileId: String) {
+        guard var store = agentStore?.store else { return }
+        store.defaultProfileId = profileId
+        saveAgentStore(store)
+    }
+
+    private func deleteAgentProfile(_ profileId: String) {
+        guard var store = agentStore?.store else { return }
+        store.profiles.removeAll { $0.id == profileId }
+        if store.defaultProfileId == profileId {
+            store.defaultProfileId = store.profiles.first?.id
+        }
+        saveAgentStore(store)
+    }
+
+    private func testAgentProfile(_ profile: AgentProfile) {
+        agentTestingId = profile.id
+        agentTestResult = nil
+        agentStatus = "正在测试 \(profile.name)…"
+        let core = model.core
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                core.testAgentConnection(profile: profile)
+            }.value
+            agentTestingId = nil
+            agentTestResult = result
+            agentDiagnostics = core.agentDiagnostics()
+            agentStatus = result.success
+                ? "连接成功：\(result.agentName) \(result.agentVersion)"
+                : (result.error ?? "Agent 连接测试失败")
+        }
+    }
+
+    private func clearAgentLogs() {
+        do {
+            try model.core.clearAgentDiagnostics()
+            agentDiagnostics = model.core.agentDiagnostics()
+            agentStatus = "Agent 诊断日志已清除"
+        } catch {
+            agentStatus = error.localizedDescription
+        }
+    }
+
+    private func revealAgentPath(_ path: String?) {
+        guard let path, !path.isEmpty else { return }
+        let url = URL(fileURLWithPath: path)
+        let target = FileManager.default.fileExists(atPath: path) ? url : url.deletingLastPathComponent()
+        NSWorkspace.shared.activateFileViewerSelecting([target])
+    }
+
+    private func agentPermissionLabel(_ mode: AgentPermissionMode) -> String {
+        switch mode {
+        case .readOnly: return "只读"
+        case .workspaceWrite: return "写入前确认"
+        case .agentManaged: return "由 Agent 自身管理"
+        }
+    }
     private var updateSettings: some View {
         VStack(alignment: .leading, spacing: 24) {
             settingsSection("版本") {

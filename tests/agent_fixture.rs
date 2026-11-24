@@ -1,0 +1,237 @@
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use kite_core::agent::{
+    AgentEnvVar, AgentPermissionDecision, AgentProfile, AgentRuntime, AgentRuntimeSnapshot,
+    AgentRuntimeState,
+};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+fn fixture_profile(scenario: &str) -> AgentProfile {
+    AgentProfile {
+        id: "fixture".to_string(),
+        name: "Kite Fixture Agent".to_string(),
+        command: env!("CARGO_BIN_EXE_kite-agent-fixture").to_string(),
+        args: vec!["--scenario".to_string(), scenario.to_string()],
+        startup_timeout_ms: 5_000,
+        idle_timeout_ms: 5_000,
+        max_output_bytes: 256 * 1024,
+        ..AgentProfile::default()
+    }
+}
+
+fn start(profile: AgentProfile) -> Arc<AgentRuntime> {
+    let runtime = AgentRuntime::start(
+        profile,
+        env!("CARGO_MANIFEST_DIR").to_string(),
+        vec![env!("CARGO_MANIFEST_DIR").to_string()],
+        Vec::new(),
+    )
+    .expect("start fixture runtime");
+    wait_for(runtime.as_ref(), Duration::from_secs(5), |snapshot| {
+        snapshot.state == AgentRuntimeState::Ready
+    });
+    runtime
+}
+
+fn wait_for(
+    runtime: &AgentRuntime,
+    timeout: Duration,
+    predicate: impl Fn(&AgentRuntimeSnapshot) -> bool,
+) -> AgentRuntimeSnapshot {
+    let deadline = Instant::now() + timeout;
+    let mut last = runtime.snapshot();
+    while Instant::now() < deadline {
+        last = runtime.snapshot();
+        if predicate(&last) {
+            return last;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for Agent state; last snapshot: {last:?}");
+}
+
+fn prompt_and_wait(
+    runtime: &AgentRuntime,
+    _scenario: &str,
+    timeout: Duration,
+) -> AgentRuntimeSnapshot {
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    wait_for(runtime, timeout, |snapshot| {
+        matches!(
+            snapshot.state,
+            AgentRuntimeState::Completed
+                | AgentRuntimeState::Failed
+                | AgentRuntimeState::Cancelled
+                | AgentRuntimeState::Closed
+        )
+    })
+}
+
+#[test]
+fn normal_stream_completes() {
+    let runtime = start(fixture_profile("normal"));
+    let snapshot = prompt_and_wait(&runtime, "normal", Duration::from_secs(5));
+    assert_eq!(snapshot.state, AgentRuntimeState::Completed);
+    assert!(snapshot.output.contains("hello world"));
+    runtime.shutdown();
+}
+
+#[test]
+fn permission_request_requires_explicit_response() {
+    let runtime = start(fixture_profile("permission"));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let waiting = wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && !snapshot.permission_requests.is_empty()
+    });
+    let request = waiting.permission_requests[0].clone();
+    assert_eq!(request.request_id, "900");
+    runtime
+        .respond_permission(request.request_id, AgentPermissionDecision::AllowOnce)
+        .expect("allow permission");
+    let snapshot = wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+        snapshot.state == AgentRuntimeState::Completed
+    });
+    assert!(snapshot.output.contains("approved: allow"));
+    runtime.shutdown();
+}
+
+#[test]
+fn cancel_stops_a_hanging_turn() {
+    let runtime = start(fixture_profile("cancel"));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+        snapshot.state == AgentRuntimeState::Running
+    });
+    runtime.cancel().expect("cancel");
+    let snapshot = wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+        snapshot.state == AgentRuntimeState::Cancelled
+    });
+    assert_eq!(snapshot.state, AgentRuntimeState::Cancelled);
+    runtime.shutdown();
+}
+
+#[test]
+fn idle_timeout_is_structured() {
+    let mut profile = fixture_profile("idle");
+    profile.idle_timeout_ms = 1_000;
+    let runtime = start(profile);
+    let snapshot = prompt_and_wait(&runtime, "", Duration::from_secs(5));
+    assert!(matches!(
+        snapshot.state,
+        AgentRuntimeState::Failed | AgentRuntimeState::Closed
+    ));
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("超时"))
+    );
+    runtime.shutdown();
+}
+
+#[test]
+fn oversized_output_is_rejected() {
+    let mut profile = fixture_profile("oversized");
+    profile.max_output_bytes = 16 * 1024;
+    profile.idle_timeout_ms = 1_000;
+    let runtime = start(profile);
+    let snapshot = prompt_and_wait(&runtime, "oversized", Duration::from_secs(5));
+    assert!(matches!(
+        snapshot.state,
+        AgentRuntimeState::Completed | AgentRuntimeState::Closed
+    ));
+    assert!(snapshot.output_truncated);
+}
+
+#[test]
+fn fixture_failure_is_structured() {
+    let runtime = start(fixture_profile("error"));
+    let snapshot = prompt_and_wait(&runtime, "error", Duration::from_secs(5));
+    assert_eq!(snapshot.state, AgentRuntimeState::Failed);
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("fixture failure"))
+    );
+    runtime.shutdown();
+}
+
+#[test]
+fn child_process_is_removed_with_the_agent_tree() {
+    let pid_path = std::env::temp_dir().join(format!(
+        "kite-agent-child-{}-{}.pid",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut profile = fixture_profile("spawn-tree");
+    profile.env.push(AgentEnvVar {
+        name: "KITE_AGENT_FIXTURE_CHILD_PID_FILE".to_string(),
+        value: pid_path.to_string_lossy().into_owned(),
+    });
+    let runtime = start(profile);
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let child_pid = wait_for_pid(&pid_path, Duration::from_secs(5));
+    assert!(process_exists(child_pid));
+    runtime.cancel().expect("cancel");
+    wait_for(&runtime, Duration::from_secs(5), |snapshot| {
+        matches!(
+            snapshot.state,
+            AgentRuntimeState::Cancelled | AgentRuntimeState::Closed
+        )
+    });
+    runtime.shutdown();
+    wait_for_process_exit(child_pid, Duration::from_secs(5));
+    assert!(!process_exists(child_pid));
+    let _ = fs::remove_file(pid_path);
+}
+
+fn wait_for_pid(path: &PathBuf, timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(value) = fs::read_to_string(path)
+            && let Ok(pid) = value.trim().parse()
+        {
+            return pid;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for fixture child pid");
+}
+
+fn process_exists(pid: u32) -> bool {
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).is_some()
+}
+
+fn wait_for_process_exit(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_exists(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}

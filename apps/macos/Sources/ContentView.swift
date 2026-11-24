@@ -4,9 +4,11 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var model: KiteModel
     @ObservedObject private var gitService = KiteGitService.shared
+    @StateObject private var agent = KiteAgentPanelModel()
 
     @AppStorage("kite.macos.sidebar-visible") private var showsSidebar = true
     @AppStorage("kite.macos.preview-visible") private var showsPreview = true
+    @State private var rightPaneMode: KiteRightPaneMode = .preview
     @State private var isEditingAddress = false
     @FocusState private var addressFocused: Bool
 
@@ -25,7 +27,11 @@ struct ContentView: View {
                     }
 
                     VStack(spacing: KiteTheme.contentGap) {
-                        KiteColumnBrowser(model: model, showsPreview: $showsPreview)
+                        KiteColumnBrowser(
+                            model: model,
+                            showsPreview: $showsPreview,
+                            rightPaneMode: $rightPaneMode
+                        )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         statusBar
                     }
@@ -49,7 +55,12 @@ struct ContentView: View {
         .onChange(of: model.focusedAddressRequest) { _ in
             beginAddressEditing()
         }
+        .onChange(of: agent.presentationToken) { _ in
+            showsPreview = true
+            rightPaneMode = .agent
+        }
         .animation(.snappy(duration: 0.22), value: showsSidebar)
+        .environmentObject(agent)
     }
 
     private var tabBarHeader: some View {
@@ -146,10 +157,28 @@ struct ContentView: View {
 
                 KiteToolbarIconButton(
                     systemName: "rectangle.righthalf.inset.filled",
-                    title: showsPreview ? "隐藏预览" : "显示预览",
-                    isActive: showsPreview
+                    title: showsPreview && rightPaneMode == .preview ? "隐藏预览" : "显示预览",
+                    isActive: showsPreview && rightPaneMode == .preview
                 ) {
-                    showsPreview.toggle()
+                    if showsPreview && rightPaneMode == .preview {
+                        showsPreview = false
+                    } else {
+                        showsPreview = true
+                        rightPaneMode = .preview
+                    }
+                }
+
+                KiteToolbarIconButton(
+                    systemName: "sparkles",
+                    title: showsPreview && rightPaneMode == .agent ? "隐藏 Agent" : "显示 Agent",
+                    isActive: showsPreview && rightPaneMode == .agent
+                ) {
+                    if showsPreview && rightPaneMode == .agent {
+                        showsPreview = false
+                    } else {
+                        showsPreview = true
+                        rightPaneMode = .agent
+                    }
                 }
             }
             .padding(.horizontal, 6)

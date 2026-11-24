@@ -5,6 +5,11 @@ use std::sync::{
 };
 use std::time::UNIX_EPOCH;
 
+use crate::agent::{
+    self as agent_store, AgentConnectionInfo, AgentContextRepair, AgentConversation,
+    AgentDiagnostics, AgentPreset, AgentProfile, AgentProfileStore, AgentSessionRestore,
+    AgentSessionStore, AgentStoreLoad,
+};
 use crate::archive::{self, ArchiveFormat, ArchivePhase, ArchiveProgress};
 use crate::content_search::{self, ContentFileMatch, ContentLineMatch, ContentSearchSnapshot};
 use crate::devices::{self, PortableDevice, StorageVolume, VolumeKind};
@@ -1316,6 +1321,67 @@ impl KiteCore {
 
     pub fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    pub fn agent_config(&self) -> AgentStoreLoad {
+        agent_store::load_agent_profiles()
+    }
+
+    pub fn save_agent_config(&self, store: AgentProfileStore) -> Result<AgentStoreLoad, KiteError> {
+        agent_store::save_agent_profiles(store).map_err(KiteError::operation)
+    }
+
+    pub fn agent_presets(&self) -> Vec<AgentPreset> {
+        agent_store::agent_presets()
+    }
+
+    pub fn agent_preset_profile(&self, preset_id: String) -> Option<AgentProfile> {
+        agent_store::preset_profile(&preset_id)
+    }
+
+    pub fn agent_diagnostics(&self) -> AgentDiagnostics {
+        agent_store::diagnose_agents()
+    }
+
+    pub fn test_agent_connection(&self, profile: AgentProfile) -> AgentConnectionInfo {
+        agent_store::probe_agent_connection(profile)
+    }
+
+    pub fn clear_agent_diagnostics(&self) -> Result<(), KiteError> {
+        agent_store::clear_agent_diagnostics().map_err(KiteError::operation)
+    }
+
+    pub fn agent_log_path(&self) -> String {
+        agent_store::agent_log_path().to_string_lossy().into_owned()
+    }
+
+    pub fn agent_session_state(&self) -> AgentSessionRestore {
+        agent_store::load_agent_sessions()
+    }
+
+    pub fn save_agent_conversation(
+        &self,
+        conversation: AgentConversation,
+    ) -> Result<AgentSessionStore, KiteError> {
+        agent_store::save_agent_conversation(conversation).map_err(KiteError::operation)
+    }
+
+    pub fn delete_agent_conversation(
+        &self,
+        conversation_id: String,
+    ) -> Result<AgentSessionStore, KiteError> {
+        agent_store::delete_agent_conversation(&conversation_id).map_err(KiteError::operation)
+    }
+
+    pub fn repair_agent_context(
+        &self,
+        repair: AgentContextRepair,
+    ) -> Result<AgentSessionStore, KiteError> {
+        agent_store::repair_agent_context(repair).map_err(KiteError::operation)
+    }
+
+    pub fn new_agent_conversation_id(&self) -> String {
+        agent_store::new_agent_conversation_id()
     }
 
     pub fn check_for_update(&self) -> Result<UpdateInfoDto, KiteError> {

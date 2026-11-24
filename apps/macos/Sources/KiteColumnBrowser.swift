@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 struct KiteColumnBrowser: View {
     @ObservedObject var model: KiteModel
     @Binding var showsPreview: Bool
+    @Binding var rightPaneMode: KiteRightPaneMode
+    @EnvironmentObject private var agent: KiteAgentPanelModel
     @AppStorage("kite.macos.column-details-visible") private var showsColumnDetails = false
     @AppStorage("kite.macos.column-date-visible") private var showsDateColumn = true
     @AppStorage("kite.macos.column-kind-visible") private var showsKindColumn = true
@@ -13,135 +15,196 @@ struct KiteColumnBrowser: View {
     @State private var detailedColumnWidth = KiteTheme.detailedColumnWidth
 
     var body: some View {
-        HStack(spacing: showsColumnDetails ? 8 : 10) {
-            GeometryReader { viewport in
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal) {
-                        HStack(alignment: .top, spacing: 8) {
-                            ForEach(Array(model.columns.enumerated()), id: \.element.id) { index, column in
-                                let isActive = index == model.columns.count - 1
-                                KiteBrowserColumn(
-                                    model: model,
-                                    column: column,
-                                    index: index,
-                                    isActive: isActive,
-                                    showsDetails: showsColumnDetails && isActive,
-                                    showsDateColumn: $showsDateColumn,
-                                    showsKindColumn: $showsKindColumn,
-                                    showsSizeColumn: $showsSizeColumn,
-                                    preferredColumnWidth: $preferredColumnWidth,
-                                    columnWidth: showsColumnDetails && isActive
-                                        ? detailedColumnWidth
-                                        : KiteTheme.columnWidth,
-                                    onToggleDetails: {
-                                        withAnimation(.snappy(duration: 0.22)) {
-                                            showsColumnDetails.toggle()
-                                        }
-                                    },
-                                    onShowDetails: {
-                                        withAnimation(.snappy(duration: 0.22)) {
-                                            showsColumnDetails = true
-                                        }
+        GeometryReader { viewport in
+            let overlaysRightPane = showsPreview && viewport.size.width < 860
+            ZStack(alignment: .trailing) {
+                HStack(spacing: showsColumnDetails ? 8 : 10) {
+                    GeometryReader { columnViewport in
+                        ScrollViewReader { proxy in
+                            ScrollView(.horizontal) {
+                                HStack(alignment: .top, spacing: 8) {
+                                    ForEach(Array(model.columns.enumerated()), id: \.element.id) { index, column in
+                                        let isActive = index == model.columns.count - 1
+                                        KiteBrowserColumn(
+                                            model: model,
+                                            column: column,
+                                            index: index,
+                                            isActive: isActive,
+                                            showsDetails: showsColumnDetails && isActive,
+                                            showsDateColumn: $showsDateColumn,
+                                            showsKindColumn: $showsKindColumn,
+                                            showsSizeColumn: $showsSizeColumn,
+                                            preferredColumnWidth: $preferredColumnWidth,
+                                            columnWidth: showsColumnDetails && isActive
+                                                ? detailedColumnWidth
+                                                : KiteTheme.columnWidth,
+                                            onToggleDetails: {
+                                                withAnimation(.snappy(duration: 0.22)) {
+                                                    showsColumnDetails.toggle()
+                                                }
+                                            },
+                                            onShowDetails: {
+                                                withAnimation(.snappy(duration: 0.22)) {
+                                                    showsColumnDetails = true
+                                                }
+                                            }
+                                        )
                                     }
+                                }
+                                .padding(.vertical, 1)
+                                // Keep short column sets at the leading edge instead of the trailing anchor.
+                                .frame(minWidth: columnViewport.size.width, alignment: .leading)
+                                .background(KiteShiftWheelHorizontalScroller())
+                            }
+                            .scrollIndicators(.hidden)
+                            .kiteDefaultTrailingAnchor()
+                            .onAppear {
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: columnViewport.size.width,
+                                    animated: false
+                                )
+                                model.syncColumnDirectoryWatchers()
+                                PerformanceTrace.markOnce("macos.first_content")
+                            }
+                            .onChange(of: model.columns.map(\.id)) { _ in
+                                model.syncColumnDirectoryWatchers()
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: columnViewport.size.width,
+                                    animated: true
+                                )
+                            }
+                            .onChange(of: showsPreview) { _ in
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: columnViewport.size.width,
+                                    animated: false
+                                )
+                            }
+                            .onChange(of: rightPaneMode) { _ in
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: columnViewport.size.width,
+                                    animated: false
+                                )
+                            }
+                            .onChange(of: model.selectedColumnEntry?.path) { _ in
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: columnViewport.size.width,
+                                    animated: true
+                                )
+                            }
+                            .onChange(of: model.selectedColumnEntries.map(\.path)) { _ in
+                                agent.updateFollowedSelection(
+                                    entries: model.selectedColumnEntries,
+                                    currentDirectory: model.currentPath
+                                )
+                            }
+                            .onChange(of: agent.contextMode) { _ in
+                                agent.updateFollowedSelection(
+                                    entries: model.selectedColumnEntries,
+                                    currentDirectory: model.currentPath
+                                )
+                            }
+                            .onChange(of: showsColumnDetails) { _ in
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: columnViewport.size.width,
+                                    animated: true
+                                )
+                            }
+                            .onChange(of: detailedColumnWidth) { _ in
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: columnViewport.size.width,
+                                    animated: true
+                                )
+                            }
+                            .onChange(of: showsDateColumn) { _ in
+                                scrollToActiveColumn(proxy, viewportWidth: columnViewport.size.width, animated: true)
+                            }
+                            .onChange(of: showsKindColumn) { _ in
+                                scrollToActiveColumn(proxy, viewportWidth: columnViewport.size.width, animated: true)
+                            }
+                            .onChange(of: showsSizeColumn) { _ in
+                                scrollToActiveColumn(proxy, viewportWidth: columnViewport.size.width, animated: true)
+                            }
+                            .onChange(of: columnViewport.size.width) { width in
+                                scrollToActiveColumn(
+                                    proxy,
+                                    viewportWidth: width,
+                                    animated: false
                                 )
                             }
                         }
-                        .padding(.vertical, 1)
-                        // Keep short column sets at the leading edge instead of the trailing anchor.
-                        .frame(minWidth: viewport.size.width, alignment: .leading)
-                        .background(KiteShiftWheelHorizontalScroller())
                     }
-                    .scrollIndicators(.hidden)
-                    .kiteDefaultTrailingAnchor()
-                    .onAppear {
-                        scrollToActiveColumn(
-                            proxy,
-                            viewportWidth: viewport.size.width,
-                            animated: false
-                        )
-                        model.syncColumnDirectoryWatchers()
-                        PerformanceTrace.markOnce("macos.first_content")
-                    }
-                    .onChange(of: model.columns.map(\.id)) { _ in
-                        model.syncColumnDirectoryWatchers()
-                        scrollToActiveColumn(
-                            proxy,
-                            viewportWidth: viewport.size.width,
-                            animated: true
-                        )
-                    }
-                    .onChange(of: showsPreview) { _ in
-                        scrollToActiveColumn(
-                            proxy,
-                            viewportWidth: viewport.size.width,
-                            animated: false
-                        )
-                    }
-                    .onChange(of: model.selectedColumnEntry?.path) { _ in
-                        scrollToActiveColumn(
-                            proxy,
-                            viewportWidth: viewport.size.width,
-                            animated: true
-                        )
-                    }
-                    .onChange(of: showsColumnDetails) { _ in
-                        scrollToActiveColumn(
-                            proxy,
-                            viewportWidth: viewport.size.width,
-                            animated: true
-                        )
-                    }
-                    .onChange(of: detailedColumnWidth) { _ in
-                        scrollToActiveColumn(
-                            proxy,
-                            viewportWidth: viewport.size.width,
-                            animated: true
-                        )
-                    }
-                    .onChange(of: showsDateColumn) { _ in
-                        scrollToActiveColumn(proxy, viewportWidth: viewport.size.width, animated: true)
-                    }
-                    .onChange(of: showsKindColumn) { _ in
-                        scrollToActiveColumn(proxy, viewportWidth: viewport.size.width, animated: true)
-                    }
-                    .onChange(of: showsSizeColumn) { _ in
-                        scrollToActiveColumn(proxy, viewportWidth: viewport.size.width, animated: true)
-                    }
-                    .onChange(of: viewport.size.width) { width in
-                        scrollToActiveColumn(
-                            proxy,
-                            viewportWidth: width,
-                            animated: false
-                        )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+
+                    if showsPreview && !overlaysRightPane {
+                        rightPaneView
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(1)
+                            .clipped()
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
 
-            if showsPreview {
-                previewPane
-                    .fixedSize(horizontal: true, vertical: false)
-                    .layoutPriority(1)
-                    .clipped()
+                if overlaysRightPane {
+                    Color.black.opacity(0.10)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+
+                    rightPaneView
+                        .frame(width: min(rightPaneWidth, max(300, viewport.size.width * 0.88)))
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
         }
         .animation(.snappy(duration: 0.22), value: showsColumnDetails)
         .animation(.snappy(duration: 0.22), value: detailedColumnWidth)
+        .animation(.snappy(duration: 0.22), value: showsPreview)
+        .animation(.snappy(duration: 0.22), value: rightPaneMode)
         .task(id: detailsMeasurementKey) {
             await measureDetailedColumnWidth()
         }
     }
 
+    private var rightPaneWidth: CGFloat {
+        rightPaneMode == .agent ? KiteTheme.agentWidth : KiteTheme.previewWidth
+    }
+
     @ViewBuilder
-    private var previewPane: some View {
-        if let selectedEntry = model.selectedColumnEntry {
-            KitePreviewPane(model: model, entry: selectedEntry) {
+    private var rightPaneView: some View {
+        switch rightPaneMode {
+        case .agent:
+            KiteAgentPane(model: model) {
+                rightPaneMode = .preview
+            } onClose: {
                 showsPreview = false
             }
-        } else {
-            KitePreviewEmptyPane {
-                showsPreview = false
+        case .preview:
+            if let selectedEntry = model.selectedColumnEntry {
+                KitePreviewPane(
+                    model: model,
+                    entry: selectedEntry,
+                    onShowAgent: {
+                        rightPaneMode = .agent
+                    },
+                    onClose: {
+                        showsPreview = false
+                    }
+                )
+            } else {
+                KitePreviewEmptyPane(
+                    onShowAgent: {
+                        rightPaneMode = .agent
+                    },
+                    onClose: {
+                        showsPreview = false
+                    }
+                )
             }
         }
     }
@@ -1784,6 +1847,7 @@ struct KiteGlobalSearchResults: View {
 
 private struct KiteEntryMenu: View {
     @ObservedObject var model: KiteModel
+    @EnvironmentObject private var agent: KiteAgentPanelModel
     let entry: BrowserEntry
 
     var body: some View {
@@ -1791,6 +1855,39 @@ private struct KiteEntryMenu: View {
             model.refresh()
         } label: {
             Label("刷新", systemImage: "arrow.clockwise")
+        }
+
+        Divider()
+
+        Menu {
+            Button("询问 Agent…") {
+                beginAgentAction(.ask)
+            }
+            if KitePlatform.isEditableTextFile(entry.path) {
+                Button("解释此文件…") {
+                    beginAgentAction(.explainFile)
+                }
+            }
+            if entry.isDirectory {
+                Button("总结此文件夹…") {
+                    beginAgentAction(.summarizeFolder)
+                }
+            }
+            if model.isGitAvailable(forEntryPath: entry.path) {
+                Divider()
+                Button("审查选中变更…") {
+                    beginAgentAction(.reviewChanges)
+                }
+                Button("生成提交说明…") {
+                    beginAgentAction(.generateCommitMessage)
+                }
+            }
+            Divider()
+            Button("配置 Agent…") {
+                KiteSettingsWindowController.open(pane: .agent)
+            }
+        } label: {
+            Label("使用 Agent", systemImage: "sparkles")
         }
 
         Divider()
@@ -2022,10 +2119,20 @@ private struct KiteEntryMenu: View {
     private var canCompressSelection: Bool {
         singleOperationPath.map(KitePlatform.canCompress) ?? false
     }
+
+    private func beginAgentAction(_ action: KiteAgentAction) {
+        agent.present(
+            action: action,
+            primary: entry.path,
+            entries: operationEntries,
+            workingDirectory: pasteDirectory
+        )
+    }
 }
 
 private struct KiteDirectoryMenu: View {
     @ObservedObject var model: KiteModel
+    @EnvironmentObject private var agent: KiteAgentPanelModel
     let column: BrowserColumn
 
     var body: some View {
@@ -2033,6 +2140,32 @@ private struct KiteDirectoryMenu: View {
             model.refresh()
         } label: {
             Label("刷新", systemImage: "arrow.clockwise")
+        }
+
+        Divider()
+
+        Menu {
+            Button("询问 Agent…") {
+                agent.presentDirectory(column.path, action: .ask)
+            }
+            Button("总结此文件夹…") {
+                agent.presentDirectory(column.path, action: .summarizeFolder)
+            }
+            if column.gitAvailable {
+                Divider()
+                Button("审查选中变更…") {
+                    agent.presentDirectory(column.path, action: .reviewChanges)
+                }
+                Button("生成提交说明…") {
+                    agent.presentDirectory(column.path, action: .generateCommitMessage)
+                }
+            }
+            Divider()
+            Button("配置 Agent…") {
+                KiteSettingsWindowController.open(pane: .agent)
+            }
+        } label: {
+            Label("使用 Agent", systemImage: "sparkles")
         }
 
         Divider()

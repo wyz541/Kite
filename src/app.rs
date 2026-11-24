@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::actions::*;
+use crate::agent_panel::AgentPanel;
 use crate::archive::{self, ArchiveFormat};
 use crate::archive_progress_window;
 use crate::context_menu::{
@@ -62,6 +63,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
+use kite_core::agent::{AgentLaunchRequest, AgentMenuCommand, AgentPath};
 use kite_core::diff::DiffEndpoint;
 use kite_core::file_watcher::{DirectoryWatcher, trace_directory_refresh};
 use kite_core::git::{
@@ -80,6 +82,8 @@ const COLUMN_STRIP_PADDING: f32 = 4.;
 const COLUMN_HEADER_HEIGHT: f32 = 32.;
 const COLUMN_SEARCH_HEIGHT: f32 = 40.;
 const PREVIEW_WIDTH: f32 = 300.;
+const AGENT_PANE_WIDTH: f32 = 360.;
+const RIGHT_PANE_OVERLAY_BREAKPOINT: f32 = 980.;
 const PREVIEW_LOAD_DEBOUNCE: Duration = Duration::from_millis(45);
 const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 12;
 const COLUMN_PREVIEW_IMAGE_MAX_WIDTH: u32 = 640;
@@ -102,6 +106,13 @@ enum NavigationIntent {
     Push,
     ReplaceIndex(usize),
     Refresh,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RightPaneMode {
+    #[default]
+    Preview,
+    Agent,
 }
 
 struct PathSegment {
@@ -1072,6 +1083,7 @@ pub struct KiteApp {
     address_editing: bool,
     search_visible: bool,
     show_preview: bool,
+    right_pane_mode: RightPaneMode,
     show_column_details: bool,
     show_date_column: bool,
     show_kind_column: bool,
@@ -1084,6 +1096,7 @@ pub struct KiteApp {
     column_scroll_pending: bool,
     column_preview: Option<ColumnPreviewState>,
     pending_file_selection: Option<PathBuf>,
+    pending_file_selection_opens: bool,
     preview_generation: u64,
     preview_image_cache: PreviewImageCache,
     _preview_task: Task<()>,
@@ -1103,6 +1116,8 @@ pub struct KiteApp {
     active_git_operation: Option<ActiveGitOperation>,
     clone_cleanup_prompt: Option<CloneCleanupPrompt>,
     git_recovery_prompt: Option<GitRecoveryPrompt>,
+    agent_panel: Entity<AgentPanel>,
+    agent_window: Option<AnyWindowHandle>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1235,6 +1250,7 @@ impl KiteApp {
             .row_selectable(true)
             .sortable(true)
         });
+        let agent_panel = cx.new(|cx| AgentPanel::new(window, cx));
 
         let address_subscription = cx.subscribe_in(
             &address_input,
@@ -1346,6 +1362,7 @@ impl KiteApp {
             address_editing: false,
             search_visible: false,
             show_preview: ui_preferences.preview_visible,
+            right_pane_mode: RightPaneMode::Preview,
             show_column_details: ui_preferences.column_details_visible,
             show_date_column: ui_preferences.date_column_visible,
             show_kind_column: ui_preferences.kind_column_visible,
@@ -1358,6 +1375,7 @@ impl KiteApp {
             column_scroll_pending: false,
             column_preview: None,
             pending_file_selection: initial_file.clone(),
+            pending_file_selection_opens: true,
             preview_generation: 0,
             preview_image_cache: PreviewImageCache::new(),
             _preview_task: Task::ready(()),
@@ -1377,6 +1395,8 @@ impl KiteApp {
             active_git_operation: None,
             clone_cleanup_prompt: None,
             git_recovery_prompt: None,
+            agent_panel,
+            agent_window: None,
             _subscriptions: vec![
                 address_subscription,
                 search_subscription,
@@ -1384,6 +1404,9 @@ impl KiteApp {
                 table_subscription,
             ],
         };
+        let main_app = cx.weak_entity();
+        app.agent_panel
+            .update(cx, |panel, _cx| panel.set_main_app(main_app));
         app.start_device_watcher(cx);
         app.start_directory_watcher(cx);
         app.start_git_auto_fetch(
@@ -1413,11 +1436,144 @@ impl KiteApp {
     pub(crate) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
         self.show_preview = !self.show_preview;
         if self.show_preview {
+            self.right_pane_mode = RightPaneMode::Preview;
             if let Some(entry) = self.selected_last_column_file() {
                 self.start_column_preview(entry, cx);
             }
         } else {
             self.clear_column_preview();
+        }
+        cx.notify();
+    }
+
+    fn open_agent_context(
+        &mut self,
+        command: AgentMenuCommand,
+        action: &ContextMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if command == AgentMenuCommand::Configure {
+            self.open_agent_settings(window, cx);
+            return;
+        }
+        if !action.target.exists() {
+            self.notice = None;
+            self.error = Some("Agent 上下文目标已失效，请刷新后重试".into());
+            cx.notify();
+            return;
+        }
+        let paths = if action.paths.is_empty() {
+            vec![action.target.clone()]
+        } else {
+            action.paths.clone()
+        };
+        let agent_paths = paths
+            .into_iter()
+            .map(|path| {
+                let is_dir = std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+                AgentPath::new(path, is_dir)
+            })
+            .collect::<Vec<_>>();
+        match AgentLaunchRequest::new(
+            command,
+            action.target.clone(),
+            agent_paths,
+            Some(action.working_directory.clone()),
+        ) {
+            Ok(request) => {
+                self.show_preview = true;
+                self.right_pane_mode = RightPaneMode::Agent;
+                self.clear_column_preview();
+                self.agent_panel
+                    .update(cx, |panel, cx| panel.present(request, window, cx));
+                self.error = None;
+                self.notice = Some("Agent 上下文已准备，尚未发送".into());
+                cx.notify();
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn sync_agent_follow_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.agent_panel.read(cx).follows_selection() {
+            return;
+        }
+        let paths = self
+            .selected_entries(cx)
+            .into_iter()
+            .map(|entry| {
+                let is_dir = entry.is_dir();
+                AgentPath::new(entry.path, is_dir)
+            })
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return;
+        }
+        let current_directory = self.current_dir.clone();
+        self.agent_panel.update(cx, |panel, cx| {
+            panel.replace_followed_selection(paths, Some(current_directory), cx);
+        });
+    }
+
+    pub(crate) fn reveal_agent_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(parent) = path.parent().map(Path::to_path_buf) {
+            self.request_load_with_selection(
+                parent,
+                NavigationIntent::Push,
+                Some(path),
+                false,
+                window,
+                cx,
+            );
+        } else if path.is_dir() {
+            self.navigate_to(path, NavigationIntent::Push, window, cx);
+        }
+    }
+
+    pub(crate) fn open_agent_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let initial_update_state = self.settings_update_state();
+        match settings_window::open_agent_settings_window(cx.entity(), initial_update_state, cx) {
+            Ok(()) => {
+                self.error = None;
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn open_agent_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self.agent_window.as_ref() {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+        }
+        self.agent_window = None;
+        match crate::agent_window::open_agent_window(self.agent_panel.clone(), cx) {
+            Ok(handle) => {
+                self.agent_window = Some(handle);
+                self.notice = Some("Agent 已在独立窗口中打开，状态与右侧栏共享".into());
+                self.error = None;
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
         }
         cx.notify();
     }
@@ -1756,8 +1912,21 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.request_load_with_selection(path, intent, pending_file_selection, true, window, cx);
+    }
+
+    fn request_load_with_selection(
+        &mut self,
+        path: PathBuf,
+        intent: NavigationIntent,
+        pending_file_selection: Option<PathBuf>,
+        open_pending_file: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_column_search(window, cx);
         self.pending_file_selection = pending_file_selection;
+        self.pending_file_selection_opens = open_pending_file;
         self.clear_column_preview();
         self.cancel_search();
         self.invalidate_vcs();
@@ -1792,6 +1961,7 @@ impl KiteApp {
                 }
                 this.loading = false;
                 let pending_file_selection = this.pending_file_selection.take();
+                let open_pending_file = this.pending_file_selection_opens;
                 this.table.update(cx, |state, cx| {
                     state.delegate_mut().set_loading(false);
                     cx.notify();
@@ -1834,6 +2004,7 @@ impl KiteApp {
                         }
                         if let Some(path) = pending_file_selection.as_deref()
                             && this.select_loaded_file(path, cx)
+                            && open_pending_file
                         {
                             this.open_path(path.to_path_buf(), window, cx);
                         }
@@ -2943,7 +3114,22 @@ impl KiteApp {
                     app.update(cx, |_, cx| cx.notify());
                 });
             }
-            TableEvent::SelectRow(_) | TableEvent::ClearSelection => cx.notify(),
+            TableEvent::SelectRow(_) => {
+                if self.show_preview && self.right_pane_mode == RightPaneMode::Preview {
+                    if let Some(entry) = self.selected_entry(cx).filter(|entry| !entry.is_dir()) {
+                        self.start_column_preview(entry, cx);
+                    }
+                }
+                self.sync_agent_follow_selection(cx);
+                cx.notify();
+            }
+            TableEvent::ClearSelection => {
+                if self.right_pane_mode == RightPaneMode::Preview {
+                    self.clear_column_preview();
+                }
+                self.sync_agent_follow_selection(cx);
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -3104,6 +3290,7 @@ impl KiteApp {
             }
             self.clear_column_preview();
             self.column_scroll_pending = true;
+            self.sync_agent_follow_selection(cx);
             cx.notify();
             return;
         }
@@ -3123,6 +3310,9 @@ impl KiteApp {
     ) {
         match action.command {
             ContextMenuCommand::Open => self.open_path(action.target.clone(), window, cx),
+            ContextMenuCommand::Agent(command) => {
+                self.open_agent_context(command, action, window, cx)
+            }
             ContextMenuCommand::Copy => {
                 self.set_clipboard_path(action.target.clone(), ClipboardMode::Copy, cx)
             }
@@ -3874,7 +4064,7 @@ impl KiteApp {
                     matches!(
                         row,
                         ColumnDisplayRow::Entry(entry)
-                            if !entry.is_dir() && same_path(&entry.path, path)
+                            if same_path(&entry.path, path)
                     )
                 })
             else {
@@ -3890,7 +4080,7 @@ impl KiteApp {
             .delegate()
             .entries()
             .iter()
-            .position(|entry| !entry.is_dir() && same_path(&entry.path, path))
+            .position(|entry| same_path(&entry.path, path))
         else {
             return false;
         };
@@ -3938,6 +4128,7 @@ impl KiteApp {
         if selected_count != 1 {
             self.clear_column_preview();
             self.path_bar_scroll_pending = true;
+            self.sync_agent_follow_selection(cx);
             cx.notify();
             return;
         }
@@ -3957,7 +4148,7 @@ impl KiteApp {
                     column,
                     self.column_panes.len(),
                 ));
-            if self.show_preview {
+            if self.show_preview && self.right_pane_mode == RightPaneMode::Preview {
                 self.start_column_preview(entry, cx);
             } else {
                 self.clear_column_preview();
@@ -3967,6 +4158,7 @@ impl KiteApp {
             self.clear_column_preview();
         }
         self.path_bar_scroll_pending = true;
+        self.sync_agent_follow_selection(cx);
         cx.notify();
     }
 
@@ -5720,21 +5912,25 @@ impl KiteApp {
         let context = self.focus_handle.clone();
         let open_action = ContextMenuAction {
             target: path.clone(),
+            paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::Open,
         };
         let copy_path_action = ContextMenuAction {
             target: path.clone(),
+            paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::CopyPath,
         };
         let properties_action = ContextMenuAction {
             target: path.clone(),
+            paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::ShowProperties,
         };
         let remove_action = favorite.then(|| ContextMenuAction {
             target: path.clone(),
+            paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::RemoveFavorite,
         });
@@ -5950,10 +6146,12 @@ impl KiteApp {
         let path = PathBuf::from(&device.shell_path);
         let open_action = ContextMenuAction {
             target: path.clone(),
+            paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::Open,
         };
         let properties_action = ContextMenuAction {
+            paths: vec![path.clone()],
             target: path,
             working_directory: PathBuf::from(&device.shell_path),
             command: ContextMenuCommand::ShowProperties,
@@ -6283,11 +6481,6 @@ impl KiteApp {
         for index in 0..self.column_panes.len() {
             strip = strip.child(self.render_column(index, window, cx));
         }
-        if self.show_preview
-            && let Some(entry) = self.selected_last_column_file()
-        {
-            strip = strip.child(self.render_column_preview(&entry, cx));
-        }
         let horizontal_wheel_handle = scroll_handle.clone();
         div()
             .relative()
@@ -6316,6 +6509,188 @@ impl KiteApp {
             .find(|entry| same_path(&entry.path, selected))
             .filter(|entry| !entry.is_dir())
             .cloned()
+    }
+
+    pub(crate) fn show_preview_panel(&mut self, cx: &mut Context<Self>) {
+        self.set_right_pane_mode(RightPaneMode::Preview, cx);
+    }
+
+    fn set_right_pane_mode(&mut self, mode: RightPaneMode, cx: &mut Context<Self>) {
+        if self.right_pane_mode == mode {
+            return;
+        }
+        self.right_pane_mode = mode;
+        match mode {
+            RightPaneMode::Preview => {
+                if let Some(entry) = self.selected_entry(cx).filter(|entry| !entry.is_dir()) {
+                    self.start_column_preview(entry, cx);
+                } else {
+                    self.clear_column_preview();
+                }
+            }
+            RightPaneMode::Agent => self.clear_column_preview(),
+        }
+        cx.notify();
+    }
+
+    fn close_right_pane(&mut self, cx: &mut Context<Self>) {
+        self.show_preview = false;
+        self.clear_column_preview();
+        cx.notify();
+    }
+
+    fn right_pane_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .gap_1()
+            .child(
+                Button::new("right-pane-preview-tab")
+                    .ghost()
+                    .compact()
+                    .label("预览")
+                    .selected(self.right_pane_mode == RightPaneMode::Preview)
+                    .accessibility_label("显示预览")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.set_right_pane_mode(RightPaneMode::Preview, cx)
+                    })),
+            )
+            .child(
+                Button::new("right-pane-agent-tab")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Sparkles)
+                    .label("Agent")
+                    .selected(self.right_pane_mode == RightPaneMode::Agent)
+                    .accessibility_label("显示 Agent")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.set_right_pane_mode(RightPaneMode::Agent, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_agent_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let border = cx.theme().border;
+        v_flex()
+            .id("agent-pane")
+            .w(px(AGENT_PANE_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(cx.theme().title_bar)
+            .border_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .h(px(COLUMN_HEADER_HEIGHT))
+                    .w_full()
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(self.right_pane_tabs(cx))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("agent-popout")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Maximize2)
+                            .tooltip("在独立窗口中打开")
+                            .accessibility_label("在独立窗口中打开 Agent")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_agent_window(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("agent-pane-close")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::X)
+                            .tooltip("关闭 Agent")
+                            .accessibility_label("关闭 Agent")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_right_pane(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .p(px(COMPACT_ISLAND_PADDING))
+                    .child(self.agent_panel.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn render_empty_preview(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let border = cx.theme().border;
+        v_flex()
+            .id("preview-empty-pane")
+            .w(px(PREVIEW_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(cx.theme().title_bar)
+            .border_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .h(px(COLUMN_HEADER_HEIGHT))
+                    .w_full()
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(self.right_pane_tabs(cx))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("preview-empty-close")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::X)
+                            .tooltip("关闭预览")
+                            .accessibility_label("关闭预览")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_right_pane(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .px_6()
+                    .child(
+                        Icon::new(IconName::FileSearch)
+                            .size_8()
+                            .text_color(cx.theme().muted_foreground.opacity(0.7)),
+                    )
+                    .child(div().text_sm().font_medium().child("选择一个项目"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_center()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("在最后一栏选择文件后，这里会显示预览。"),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        match self.right_pane_mode {
+            RightPaneMode::Agent => self.render_agent_pane(cx),
+            RightPaneMode::Preview => {
+                if let Some(entry) = self.selected_entry(cx).filter(|entry| !entry.is_dir()) {
+                    self.render_column_preview(&entry, cx)
+                } else {
+                    self.render_empty_preview(cx)
+                }
+            }
+        }
     }
 
     fn render_column_preview(&mut self, entry: &FileEntry, cx: &mut Context<Self>) -> AnyElement {
@@ -6633,13 +7008,7 @@ impl KiteApp {
                     .items_center()
                     .border_b_1()
                     .border_color(border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_medium()
-                            .text_color(muted)
-                            .child("预览"),
-                    )
+                    .child(self.right_pane_tabs(cx))
                     .child(div().flex_1())
                     .child(
                         Button::new(format!("preview-enlarge-{}", entry.path.display()))
@@ -6681,6 +7050,7 @@ impl KiteApp {
                                         *icon,
                                         Box::new(ContextMenuAction {
                                             target: preview_more_target.clone(),
+                                            paths: vec![preview_more_target.clone()],
                                             working_directory: preview_more_working_directory
                                                 .clone(),
                                             command: *command,
@@ -6691,6 +7061,15 @@ impl KiteApp {
                                 }
                                 menu
                             }),
+                    )
+                    .child(
+                        Button::new("preview-close")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::X)
+                            .tooltip("关闭预览")
+                            .accessibility_label("关闭预览")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_right_pane(cx))),
                     ),
             )
             .child(
@@ -7540,6 +7919,12 @@ impl KiteApp {
         let can_paste = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let git_available = pane.git_available;
         let svn_available = pane.svn_available;
+        let selected_paths = pane
+            .entries
+            .iter()
+            .filter(|entry| pane.is_selected(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
         let accent = cx.theme().accent;
         let accent_foreground = cx.theme().accent_foreground;
         let hover = cx.theme().muted;
@@ -7596,6 +7981,11 @@ impl KiteApp {
             let row_action_context = action_context.clone();
             let row_git_available = git_available || entry.git_status.is_some();
             let row_svn_available = svn_available || entry.svn_status.is_some();
+            let menu_paths = if selected && selected_paths.len() > 1 {
+                selected_paths.clone()
+            } else {
+                vec![menu_entry.path.clone()]
+            };
             let icon_status = worse_status(entry.git_status, entry.svn_status);
             let icon_status_is_svn = match (entry.git_status, entry.svn_status) {
                 (Some(git), Some(svn)) => svn.rank() > git.rank(),
@@ -7756,7 +8146,8 @@ impl KiteApp {
                         menu_entry.is_dir(),
                         row_column_path.clone(),
                         capabilities,
-                    );
+                    )
+                    .with_paths(menu_paths.clone());
                     render_context_menu(menu, &target, row_action_context.clone(), window, cx)
                 })
                 .into_any_element();
@@ -10564,6 +10955,39 @@ impl Render for KiteApp {
                 )
                 .into_any_element()
         };
+        let overlay_right_pane = window.viewport_size().width < px(RIGHT_PANE_OVERLAY_BREAKPOINT);
+        let right_pane_width = match self.right_pane_mode {
+            RightPaneMode::Preview => PREVIEW_WIDTH,
+            RightPaneMode::Agent => AGENT_PANE_WIDTH,
+        };
+        let content_view = if self.show_preview {
+            let right_pane = self.render_right_pane(cx);
+            if overlay_right_pane {
+                div()
+                    .relative()
+                    .size_full()
+                    .child(div().size_full().child(main_view))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(right_pane_width))
+                            .child(right_pane),
+                    )
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .size_full()
+                    .gap(px(ISLAND_GAP))
+                    .child(div().flex_1().min_w_0().h_full().child(main_view))
+                    .child(right_pane)
+                    .into_any_element()
+            }
+        } else {
+            div().size_full().child(main_view).into_any_element()
+        };
         v_flex()
             .id("kite-root")
             .key_context("Kite")
@@ -10714,7 +11138,7 @@ impl Render for KiteApp {
                             .when_some(git_operation_banner, |this, banner| this.child(banner))
                             .when_some(clone_cleanup_banner, |this, banner| this.child(banner))
                             .when_some(git_recovery_banner, |this, banner| this.child(banner))
-                            .child(div().flex_1().min_h_0().w_full().child(main_view)),
+                            .child(div().flex_1().min_h_0().w_full().child(content_view)),
                     ),
             )
             .child(

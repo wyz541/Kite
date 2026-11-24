@@ -1,0 +1,1073 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::app::KiteApp;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::clipboard::Clipboard;
+use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use kite_core::agent::{
+    AgentContext, AgentContextMode, AgentConversation, AgentLaunchRequest, AgentMessage,
+    AgentMessageRole, AgentPath, AgentPermissionDecision, AgentProfile, AgentRuntime,
+    AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase, load_agent_profiles,
+    new_agent_conversation_id, save_agent_conversation,
+};
+
+pub(crate) struct AgentPanel {
+    context: Option<AgentContext>,
+    mode: AgentContextMode,
+    phase: AgentSessionPhase,
+    profile: Option<AgentProfile>,
+    runtime: Option<Arc<AgentRuntime>>,
+    snapshot: AgentRuntimeSnapshot,
+    prompt_input: Entity<TextareaState>,
+    output_view: Entity<TextViewState>,
+    main_app: Option<WeakEntity<KiteApp>>,
+    notice: Option<SharedString>,
+    conversation_id: String,
+    sent_prompt: String,
+    saved_terminal_snapshot: bool,
+    poll_task: Task<()>,
+}
+
+impl AgentPanel {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let prompt_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("向 Agent 提问。发送前可检查工作目录、上下文和权限。")
+                .auto_grow(2, 6)
+                .submit_on_enter(false)
+                .clean_on_escape()
+        });
+        let output_view = cx.new(|cx| TextViewState::markdown("", cx));
+        let profile = default_agent_profile();
+        let phase = if profile.is_some() {
+            AgentSessionPhase::Ended
+        } else {
+            AgentSessionPhase::Unconfigured
+        };
+        Self {
+            context: None,
+            mode: AgentContextMode::Fixed,
+            phase,
+            profile,
+            runtime: None,
+            snapshot: AgentRuntimeSnapshot::default(),
+            prompt_input,
+            output_view,
+            main_app: None,
+            notice: None,
+            conversation_id: new_agent_conversation_id(),
+            sent_prompt: String::new(),
+            saved_terminal_snapshot: false,
+            poll_task: Task::ready(()),
+        }
+    }
+
+    pub(crate) fn set_main_app(&mut self, main_app: WeakEntity<KiteApp>) {
+        self.main_app = Some(main_app);
+    }
+
+    pub(crate) fn present(
+        &mut self,
+        request: AgentLaunchRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_runtime();
+        self.profile = default_agent_profile();
+        self.phase = if self.profile.is_some() {
+            AgentSessionPhase::Ended
+        } else {
+            AgentSessionPhase::Unconfigured
+        };
+        self.mode = AgentContextMode::Fixed;
+        self.context = Some(request.context);
+        self.sent_prompt.clear();
+        self.saved_terminal_snapshot = false;
+        self.notice = None;
+        self.snapshot = AgentRuntimeSnapshot::default();
+        self.conversation_id = new_agent_conversation_id();
+        self.prompt_input.update(cx, |input, cx| {
+            input.set_value(request.prompt, window, cx);
+        });
+        self.set_output("", cx);
+        cx.notify();
+    }
+
+    pub(crate) fn follows_selection(&self) -> bool {
+        self.mode == AgentContextMode::FollowSelection
+    }
+
+    pub(crate) fn replace_followed_selection(
+        &mut self,
+        paths: Vec<AgentPath>,
+        current_directory: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.follows_selection() || paths.is_empty() {
+            return;
+        }
+        let primary = paths[0].clone();
+        let working_directory = if primary.is_dir {
+            primary.path.clone()
+        } else {
+            current_directory
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| kite_core::agent::default_working_directory(&primary.path))
+        };
+        match AgentContext::new(&primary.path, paths, Some(working_directory)) {
+            Ok(context) => {
+                self.context = Some(context);
+                self.notice = Some("Agent 上下文已跟随当前选择".into());
+            }
+            Err(error) => {
+                self.context = None;
+                self.phase = AgentSessionPhase::Error;
+                self.notice = Some(error.to_string().into());
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn add_paths(&mut self, paths: Vec<AgentPath>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        if let Some(context) = self.context.as_mut() {
+            let added = context.append(paths);
+            self.notice = Some(if added == 0 {
+                "所选路径已在上下文中".into()
+            } else {
+                format!("已添加 {added} 个上下文路径").into()
+            });
+        } else {
+            let primary = paths[0].clone();
+            let working_directory = if primary.is_dir {
+                primary.path.clone()
+            } else {
+                kite_core::agent::default_working_directory(&primary.path)
+            };
+            match AgentContext::new(&primary.path, paths, Some(working_directory)) {
+                Ok(context) => {
+                    self.context = Some(context);
+                    self.notice = Some("已添加上下文路径".into());
+                }
+                Err(error) => {
+                    self.phase = AgentSessionPhase::Error;
+                    self.notice = Some(error.to_string().into());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn remove_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        if context.remove(path) && context.paths.is_empty() {
+            self.context = None;
+            self.phase = AgentSessionPhase::Empty;
+        }
+        self.notice = Some("已从 Agent 上下文移除".into());
+        cx.notify();
+    }
+
+    fn append_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some("添加到 Agent 上下文".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let selected = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.phase = AgentSessionPhase::Error;
+                        this.notice = Some(format!("无法选择上下文路径：{error}").into());
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(_) => return,
+            };
+            let paths = selected
+                .into_iter()
+                .map(|path| AgentPath::new(path.clone(), path.is_dir()))
+                .collect::<Vec<_>>();
+            let _ = this.update_in(cx, |this, _, cx| this.add_paths(paths, cx));
+        })
+        .detach();
+    }
+
+    fn reveal_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) else {
+            return;
+        };
+        main_app.update(cx, |app, cx| app.reveal_agent_path(path, window, cx));
+    }
+
+    fn toggle_follow_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = match self.mode {
+            AgentContextMode::Fixed => AgentContextMode::FollowSelection,
+            AgentContextMode::FollowSelection => AgentContextMode::Fixed,
+        };
+        if self.mode == AgentContextMode::FollowSelection
+            && let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade())
+        {
+            main_app.update(cx, |app, cx| app.sync_agent_follow_selection(cx));
+        }
+        cx.notify();
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) {
+            main_app.update(cx, |app, cx| app.open_agent_settings(window, cx));
+        }
+    }
+
+    fn show_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) {
+            main_app.update(cx, |app, cx| app.show_preview_panel(cx));
+        }
+    }
+
+    fn send_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.runtime.as_ref().is_some_and(|runtime| {
+            !runtime.is_closed()
+                && !matches!(
+                    runtime.snapshot().state,
+                    AgentRuntimeState::Completed
+                        | AgentRuntimeState::Failed
+                        | AgentRuntimeState::Cancelled
+                        | AgentRuntimeState::Closed
+                )
+        }) {
+            self.notice = Some("Agent 正在运行，请先停止或等待完成".into());
+            cx.notify();
+            return;
+        }
+        let Some(profile) = self.profile.clone() else {
+            self.phase = AgentSessionPhase::Unconfigured;
+            self.notice = Some("请先在设置中配置 Agent".into());
+            cx.notify();
+            return;
+        };
+        let Some(context) = self.context.clone() else {
+            self.notice = Some("请先选择文件或文件夹作为上下文".into());
+            cx.notify();
+            return;
+        };
+        let prompt = self.prompt_input.read(cx).value().trim().to_string();
+        if prompt.is_empty() {
+            self.notice = Some("提示不能为空".into());
+            cx.notify();
+            return;
+        }
+        let context_paths = context
+            .paths
+            .iter()
+            .map(|path| path.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        match AgentRuntime::start(
+            profile,
+            context.working_directory.to_string_lossy().into_owned(),
+            context_paths,
+            Vec::new(),
+        ) {
+            Ok(runtime) => {
+                self.sent_prompt = prompt;
+                self.saved_terminal_snapshot = false;
+                self.snapshot = runtime.snapshot();
+                self.runtime = Some(runtime.clone());
+                self.phase = AgentSessionPhase::Loading;
+                self.notice = Some("Agent 已启动".into());
+                self.poll_runtime(runtime, cx);
+            }
+            Err(error) => {
+                self.phase = AgentSessionPhase::Error;
+                self.notice = Some(error.to_string().into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn poll_runtime(&mut self, runtime: Arc<AgentRuntime>, cx: &mut Context<Self>) {
+        self.poll_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(80))
+                    .await;
+                let snapshot = runtime.snapshot();
+                let terminal = matches!(
+                    snapshot.state,
+                    AgentRuntimeState::Completed
+                        | AgentRuntimeState::Failed
+                        | AgentRuntimeState::Cancelled
+                        | AgentRuntimeState::Closed
+                );
+                let output = snapshot.output.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_snapshot(snapshot, cx);
+                    if terminal && !this.saved_terminal_snapshot {
+                        this.saved_terminal_snapshot = true;
+                        let draft = this.prompt_input.read(cx).value().to_string();
+                        this.persist_conversation(draft);
+                    }
+                    let _ = &output;
+                    cx.notify();
+                });
+                if terminal {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn apply_snapshot(&mut self, snapshot: AgentRuntimeSnapshot, cx: &mut Context<Self>) {
+        self.phase = match snapshot.state {
+            AgentRuntimeState::Starting | AgentRuntimeState::Initializing => {
+                AgentSessionPhase::Loading
+            }
+            AgentRuntimeState::Ready
+            | AgentRuntimeState::Running
+            | AgentRuntimeState::WaitingPermission
+            | AgentRuntimeState::Cancelling => AgentSessionPhase::Running,
+            AgentRuntimeState::Completed
+            | AgentRuntimeState::Cancelled
+            | AgentRuntimeState::Closed => AgentSessionPhase::Ended,
+            AgentRuntimeState::Failed => AgentSessionPhase::Error,
+        };
+        let output = snapshot.output.clone();
+        self.snapshot = snapshot;
+        self.set_output(&output, cx);
+    }
+
+    fn set_output(&mut self, output: &str, cx: &mut Context<Self>) {
+        let output = output.to_string();
+        self.output_view
+            .update(cx, |view, cx| view.set_text(&output, cx));
+    }
+
+    fn persist_conversation(&self, draft: String) {
+        let Some(profile) = self.profile.as_ref() else {
+            return;
+        };
+        let Some(context) = self.context.as_ref() else {
+            return;
+        };
+        let now = now_unix_ms();
+        let mut messages = Vec::new();
+        if !self.sent_prompt.trim().is_empty() {
+            messages.push(AgentMessage {
+                id: format!("{}:user", self.conversation_id),
+                role: AgentMessageRole::User,
+                content: self.sent_prompt.clone(),
+                unix_ms: now,
+                truncated: false,
+            });
+        }
+        if !self.snapshot.output.trim().is_empty() {
+            messages.push(AgentMessage {
+                id: format!("{}:assistant", self.conversation_id),
+                role: AgentMessageRole::Assistant,
+                content: self.snapshot.output.clone(),
+                unix_ms: now,
+                truncated: self.snapshot.output_truncated,
+            });
+        }
+        let title = self
+            .sent_prompt
+            .lines()
+            .next()
+            .unwrap_or("新的 Agent 对话")
+            .chars()
+            .take(48)
+            .collect::<String>();
+        let conversation = AgentConversation {
+            id: self.conversation_id.clone(),
+            title,
+            profile_id: profile.id.clone(),
+            model: profile.model.clone(),
+            working_directory: context.working_directory.to_string_lossy().into_owned(),
+            context_paths: context
+                .paths
+                .iter()
+                .map(|path| path.path.to_string_lossy().into_owned())
+                .collect(),
+            follow_selection: self.follows_selection(),
+            messages,
+            remote_session_id: None,
+            draft,
+            window_width: 960,
+            window_height: 760,
+            updated_unix_ms: now,
+        };
+        let _ = save_agent_conversation(conversation);
+    }
+
+    fn stop_runtime(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            let _ = runtime.cancel();
+            runtime.shutdown();
+        }
+        self.phase = AgentSessionPhase::Ended;
+    }
+
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(runtime) = self.runtime.as_ref() {
+            if let Err(error) = runtime.cancel() {
+                self.notice = Some(error.to_string().into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn respond_permission(
+        &mut self,
+        request_id: String,
+        decision: AgentPermissionDecision,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(runtime) = self.runtime.as_ref() {
+            if let Err(error) = runtime.respond_permission(request_id, decision) {
+                self.notice = Some(error.to_string().into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn render_status(&self, cx: &App) -> AnyElement {
+        let (status_color, connection_label) = match self.phase {
+            AgentSessionPhase::Empty | AgentSessionPhase::Unconfigured => {
+                (cx.theme().muted_foreground, "未连接")
+            }
+            AgentSessionPhase::Loading => (cx.theme().primary, "正在连接"),
+            AgentSessionPhase::Running => (cx.theme().success, "运行中"),
+            AgentSessionPhase::Error => (cx.theme().danger, "失败"),
+            AgentSessionPhase::Ended => (cx.theme().muted_foreground, "就绪"),
+        };
+        let profile_name = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "未配置 Agent".to_string());
+        let model = self
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.model.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let permission = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.permission_mode.label().to_string())
+            .unwrap_or_else(|| "只读".to_string());
+        let working_directory = self
+            .context
+            .as_ref()
+            .map(|context| context.working_directory.display().to_string())
+            .unwrap_or_else(|| "—".to_string());
+        v_flex()
+            .id("agent-status")
+            .w_full()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().title_bar.opacity(0.86))
+            .p_3()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .size(px(30.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(cx.theme().primary.opacity(0.14))
+                            .child(
+                                Icon::new(IconName::Sparkles)
+                                    .size_4()
+                                    .text_color(cx.theme().primary),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(div().text_sm().font_semibold().child(profile_name))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{model} · {permission}")),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(div().size(px(7.)).rounded_full().bg(status_color))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(status_color)
+                                    .child(connection_label),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("工作目录"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .truncate()
+                            .child(working_directory),
+                    ),
+            )
+            .when_some(self.snapshot.error.clone(), |this, error| {
+                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+            })
+            .when_some(self.notice.clone(), |this, notice| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(notice),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+impl AgentPanel {
+    fn open_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) {
+            main_app.update(cx, |app, cx| app.open_agent_window(window, cx));
+        }
+    }
+
+    fn render_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .id("agent-panel-header")
+            .w_full()
+            .h(px(32.))
+            .px_2()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Icon::new(IconName::Sparkles)
+                    .size_3p5()
+                    .text_color(cx.theme().primary),
+            )
+            .child(div().text_xs().font_medium().child("Agent"))
+            .child(div().flex_1())
+            .child(
+                Button::new("agent-show-preview")
+                    .ghost()
+                    .compact()
+                    .label("预览")
+                    .tooltip("切换回文件预览")
+                    .on_click(cx.listener(|this, _, _, cx| this.show_preview(cx))),
+            )
+            .child(
+                Button::new("agent-popout")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Maximize2)
+                    .tooltip("在独立窗口中打开 Agent")
+                    .accessibility_label("在独立窗口中打开 Agent")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_window(window, cx))),
+            )
+            .into_any_element()
+    }
+
+    fn render_context_section(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(context) = self.context.as_ref() else {
+            return div().into_any_element();
+        };
+        let mut chips = Vec::new();
+        for path in &context.paths {
+            let path_for_reveal = path.path.clone();
+            let path_for_remove = path.path.clone();
+            let is_primary = path.path == context.primary_path;
+            let label = if is_primary {
+                format!("主目标 · {}", path.display_name())
+            } else {
+                path.display_name()
+            };
+            chips.push(
+                h_flex()
+                    .max_w(px(250.))
+                    .h(px(28.))
+                    .gap_1()
+                    .pl_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if is_primary {
+                        cx.theme().primary.opacity(0.38)
+                    } else {
+                        cx.theme().border
+                    })
+                    .bg(if is_primary {
+                        cx.theme().primary.opacity(0.10)
+                    } else {
+                        cx.theme().muted.opacity(0.45)
+                    })
+                    .child(
+                        Icon::new(if path.is_dir {
+                            IconName::Folder
+                        } else {
+                            IconName::FileText
+                        })
+                        .size_3p5()
+                        .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Button::new(format!("agent-context-{}", path.path.display()))
+                            .ghost()
+                            .compact()
+                            .label(label)
+                            .tooltip(path.path.display().to_string())
+                            .accessibility_label(format!("定位 {}", path.path.display()))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.reveal_path(path_for_reveal.clone(), window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("agent-context-remove-{}", path.path.display()))
+                            .ghost()
+                            .compact()
+                            .icon(IconName::X)
+                            .tooltip("从上下文移除")
+                            .accessibility_label(format!("从上下文移除 {}", path.path.display()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_path(&path_for_remove, cx);
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        v_flex()
+            .id("agent-context")
+            .w_full()
+            .gap_2()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().font_semibold().child("上下文"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{} 个", context.paths.len())),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("agent-append-context")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Plus)
+                            .label("添加")
+                            .tooltip("添加上下文路径")
+                            .accessibility_label("添加上下文路径")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.append_context(window, cx)),
+                            ),
+                    ),
+            )
+            .child(h_flex().w_full().gap_1p5().flex_wrap().children(chips))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Switch::new("agent-follow-selection")
+                            .checked(self.follows_selection())
+                            .small()
+                            .accessibility_label("跟随当前选择")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_follow_selection(window, cx)
+                            })),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_xs().font_medium().child(self.mode.label()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(if self.follows_selection() {
+                                        "切换目录或选择时更新这份上下文；发送前仍可检查。"
+                                    } else {
+                                        "这份快照不会因切换目录而改变。"
+                                    }),
+                            ),
+                    ),
+            )
+            .when(window.viewport_size().width < px(900.), |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("窄窗口中 Agent 以覆盖式抽屉显示，分栏仍可继续浏览。"),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_output(&self, cx: &App) -> AnyElement {
+        let output_empty = self.snapshot.output.trim().is_empty();
+        v_flex()
+            .id("agent-output")
+            .w_full()
+            .gap_2()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_xs().font_semibold().child("回答"))
+                    .child(div().flex_1())
+                    .when(!output_empty, |this| {
+                        this.child(
+                            Clipboard::new("agent-copy-output")
+                                .value(self.snapshot.output.clone())
+                                .tooltip("复制 Agent 回答")
+                                .accessibility_label("复制 Agent 回答"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("agent-output-scroll")
+                    .w_full()
+                    .min_h(px(160.))
+                    .max_h(px(360.))
+                    .overflow_y_scroll()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().muted.opacity(0.18))
+                    .p_3()
+                    .when(output_empty, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if self.phase == AgentSessionPhase::Running {
+                                    "Agent 正在处理…"
+                                } else {
+                                    "发送后会在这里显示流式回答。"
+                                }),
+                        )
+                    })
+                    .when(!output_empty, |this| {
+                        this.child(
+                            TextView::new(&self.output_view)
+                                .w_full()
+                                .text_sm()
+                                .selectable(true)
+                                .scrollable(false),
+                        )
+                    }),
+            )
+            .when(self.snapshot.output_truncated, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child("输出超过上限，当前内容已截断。"),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_permissions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let requests = self.snapshot.permission_requests.clone();
+        if requests.is_empty() {
+            return div().into_any_element();
+        }
+        let mut cards = Vec::new();
+        for request in requests {
+            let request_id = request.request_id.clone();
+            let allow_id = request_id.clone();
+            let reject_id = request_id.clone();
+            let cancel_id = request_id.clone();
+            let can_allow_task = request
+                .options
+                .iter()
+                .any(|option| option.kind.contains("always") || option.kind.contains("task"));
+            cards.push(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().warning.opacity(0.42))
+                    .bg(cx.theme().warning.opacity(0.08))
+                    .p_3()
+                    .child(div().text_sm().font_medium().child(request.title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(request.description),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                Button::new(format!("agent-permission-allow-{}", allow_id))
+                                    .small()
+                                    .primary()
+                                    .label("仅本次允许")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            allow_id.clone(),
+                                            AgentPermissionDecision::AllowOnce,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                            .when(can_allow_task, |this| {
+                                this.child(
+                                    Button::new(format!("agent-permission-task-{}", request_id))
+                                        .small()
+                                        .outline()
+                                        .label("本任务允许")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.respond_permission(
+                                                request_id.clone(),
+                                                AgentPermissionDecision::AllowTask,
+                                                cx,
+                                            )
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new(format!("agent-permission-reject-{}", reject_id))
+                                    .small()
+                                    .outline()
+                                    .label("拒绝")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            reject_id.clone(),
+                                            AgentPermissionDecision::RejectOnce,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("agent-permission-cancel-{}", cancel_id))
+                                    .ghost()
+                                    .compact()
+                                    .label("取消任务")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            cancel_id.clone(),
+                                            AgentPermissionDecision::Cancel,
+                                            cx,
+                                        )
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        v_flex().w_full().gap_2().children(cards).into_any_element()
+    }
+
+    fn render_prompt(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let active =
+            self.phase == AgentSessionPhase::Loading || self.phase == AgentSessionPhase::Running;
+        let configured = self.profile.is_some();
+        v_flex()
+            .id("agent-prompt")
+            .w_full()
+            .gap_2()
+            .child(div().text_xs().font_semibold().child("发送准备"))
+            .child(
+                Textarea::new(&self.prompt_input)
+                    .h(px(92.))
+                    .w_full()
+                    .appearance(true)
+                    .bordered(true),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("agent-open-settings")
+                            .small()
+                            .outline()
+                            .icon(IconName::Settings)
+                            .label("Agent 设置")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
+                    )
+                    .when(active, |this| {
+                        this.child(
+                            Button::new("agent-stop")
+                                .small()
+                                .outline()
+                                .label("停止")
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("agent-send")
+                            .small()
+                            .primary()
+                            .label("发送")
+                            .disabled(!configured || self.context.is_none() || active)
+                            .on_click(cx.listener(|this, _, _, cx| this.send_prompt(cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .px_6()
+            .child(
+                div()
+                    .size(px(52.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(cx.theme().primary.opacity(0.10))
+                    .child(
+                        Icon::new(IconName::Sparkles)
+                            .size_6()
+                            .text_color(cx.theme().primary),
+                    ),
+            )
+            .child(div().text_sm().font_semibold().child("从文件或文件夹开始"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .text_center()
+                    .child(
+                        "在任意项目上右键并选择“使用 Agent”。Kite 会先展示上下文，不会自动发送。",
+                    ),
+            )
+            .child(
+                Button::new("agent-empty-settings")
+                    .small()
+                    .outline()
+                    .icon(IconName::Settings)
+                    .label("打开 Agent 设置")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for AgentPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let header = self.render_header(cx);
+        let content = if self.context.is_none() {
+            self.render_empty(cx)
+        } else {
+            let status = self.render_status(cx);
+            let context = self.render_context_section(window, cx);
+            let output = self.render_output(cx);
+            let permissions = self.render_permissions(cx);
+            let prompt = self.render_prompt(cx);
+            v_flex()
+                .id("agent-panel-content")
+                .w_full()
+                .gap_3()
+                .child(status)
+                .child(context)
+                .child(output)
+                .child(permissions)
+                .child(prompt)
+                .into_any_element()
+        };
+        v_flex()
+            .id("agent-panel")
+            .size_full()
+            .overflow_hidden()
+            .rounded_lg()
+            .bg(cx.theme().title_bar)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scrollbar()
+                    .p(px(6.))
+                    .child(content),
+            )
+    }
+}
+
+fn default_agent_profile() -> Option<AgentProfile> {
+    let loaded = load_agent_profiles();
+    loaded
+        .store
+        .default_profile_id
+        .as_ref()
+        .and_then(|id| {
+            loaded
+                .store
+                .profiles
+                .iter()
+                .find(|profile| &profile.id == id)
+        })
+        .cloned()
+        .or_else(|| loaded.store.profiles.first().cloned())
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
