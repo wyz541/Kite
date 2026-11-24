@@ -1546,7 +1546,11 @@ impl KiteCore {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
-    pub fn agent_config(&self) -> AgentStoreLoad {
+    pub fn agent_config(&self) -> AgentProfileSnapshot {
+        self.agent_profile_store.snapshot()
+    }
+
+    pub fn agent_store_load(&self) -> AgentStoreLoad {
         agent_store::load_agent_profiles()
     }
 
@@ -1555,6 +1559,45 @@ impl KiteCore {
         store: AgentProfileSnapshot,
     ) -> Result<AgentStoreLoad, KiteError> {
         agent_store::save_agent_profiles(store).map_err(KiteError::operation)
+    }
+
+    pub fn save_agent_profile(
+        &self,
+        profile: AgentProfile,
+        credential: Option<String>,
+        clear_credential: bool,
+    ) -> Result<AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .save_profile_with_credential(profile, credential, clear_credential)
+            .map_err(|error| KiteError::operation(error.to_string()))
+    }
+
+    pub fn delete_agent_profile(
+        &self,
+        profile_id: String,
+        replacement_default_id: Option<String>,
+    ) -> Result<AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .delete_profile_with_replacement(profile_id, replacement_default_id)
+            .map_err(|error| KiteError::operation(error.to_string()))
+    }
+
+    pub fn set_default_agent_profile(
+        &self,
+        profile_id: String,
+    ) -> Result<AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .set_default_profile(profile_id)
+            .map_err(|error| KiteError::operation(error.to_string()))
+    }
+
+    pub fn duplicate_agent_profile(
+        &self,
+        profile_id: String,
+    ) -> Result<AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .duplicate_profile(profile_id)
+            .map_err(|error| KiteError::operation(error.to_string()))
     }
 
     pub fn agent_presets(&self) -> Vec<AgentPreset> {
@@ -1569,8 +1612,16 @@ impl KiteCore {
         agent_store::diagnose_agents()
     }
 
-    pub fn test_agent_connection(&self, profile: AgentProfile) -> AgentConnectionInfo {
+    pub fn probe_agent_connection(&self, profile: AgentProfile) -> AgentConnectionInfo {
         agent_store::probe_agent_connection(profile)
+    }
+
+    pub fn test_agent_connection(
+        &self,
+        profile: AgentProfile,
+        credential: Option<String>,
+    ) -> crate::agent::AgentConnectionResult {
+        crate::agent::test_agent_connection(profile, credential)
     }
 
     pub fn clear_agent_diagnostics(&self) -> Result<(), KiteError> {
@@ -1608,6 +1659,10 @@ impl KiteCore {
 
     pub fn new_agent_conversation_id(&self) -> String {
         agent_store::new_agent_conversation_id()
+    }
+
+    pub fn new_agent_profile_id(&self) -> String {
+        crate::agent::new_profile_id()
     }
 
     pub fn check_for_update(&self) -> Result<UpdateInfoDto, KiteError> {

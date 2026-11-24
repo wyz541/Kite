@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use super::{
     AGENT_PROFILE_SCHEMA_VERSION, AgentConfigError, AgentConfigWarning, AgentProfile,
-    AgentProfileSnapshot, MAX_AGENT_PROFILE_FILE_BYTES, MAX_AGENT_PROFILES, prepare_loaded_profile,
-    prepare_new_profile,
+    AgentProfileSnapshot, MAX_AGENT_PROFILE_FILE_BYTES, MAX_AGENT_PROFILES, credentials,
+    prepare_loaded_profile, prepare_new_profile,
 };
 
 const AGENT_CONFIG_ENV: &str = "KITE_AGENT_PROFILE_PATH";
@@ -201,6 +201,236 @@ impl AgentProfileStore {
         Ok(snapshot_from_config(config, None))
     }
 
+    pub fn save_profile_with_credential(
+        &self,
+        profile: AgentProfile,
+        credential: Option<String>,
+        clear_credential: bool,
+    ) -> Result<AgentProfileSnapshot, AgentConfigError> {
+        let _guard = lock_config_io();
+        let (mut config, _) = self.load_config_locked()?;
+        let existing_index = config
+            .profiles
+            .iter()
+            .position(|existing| !profile.id.trim().is_empty() && existing.id == profile.id.trim());
+        let mut profile = profile;
+        profile.id = profile.id.trim().to_string();
+        if profile.id.is_empty() {
+            profile.id = super::generate_profile_id();
+        }
+        let previous_credential_ref = existing_index
+            .and_then(|index| config.profiles.get(index))
+            .and_then(|existing| existing.credential_ref.clone());
+        let previous_secret = previous_credential_ref
+            .as_ref()
+            .and_then(|_| credentials::load_secret(&profile.id).ok().flatten());
+        let new_credential = credential.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        });
+        let installed_secret = if let Some(secret) = new_credential.as_deref() {
+            profile.credential_ref = Some(
+                credentials::save_secret(&profile.id, secret)
+                    .map_err(|message| AgentConfigError::Io { message })?,
+            );
+            profile.credential_env_var = profile
+                .credential_env_var
+                .or_else(|| Some("KITE_AGENT_TOKEN".to_string()));
+            true
+        } else if clear_credential {
+            profile.credential_ref = None;
+            false
+        } else {
+            profile.credential_ref = previous_credential_ref;
+            false
+        };
+
+        let prepared = match existing_index {
+            Some(index) => {
+                let prepared = match prepare_loaded_profile(profile, false) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        if installed_secret {
+                            restore_secret(&config.profiles[index].id, previous_secret.as_deref());
+                        }
+                        return Err(error);
+                    }
+                };
+                if config
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .any(|(candidate_index, existing)| {
+                        candidate_index != index
+                            && existing.name.to_lowercase() == prepared.name.to_lowercase()
+                    })
+                {
+                    if installed_secret {
+                        restore_secret(&prepared.id, previous_secret.as_deref());
+                    }
+                    return Err(AgentConfigError::DuplicateProfileName {
+                        name: prepared.name,
+                    });
+                }
+                config.profiles[index] = prepared.clone();
+                prepared
+            }
+            None => {
+                if config.profiles.len() >= MAX_AGENT_PROFILES {
+                    if installed_secret {
+                        let _ = credentials::remove_secret(&profile.id);
+                    }
+                    return Err(AgentConfigError::ProfileLimitReached {
+                        limit: MAX_AGENT_PROFILES as u32,
+                    });
+                }
+                let profile_id = profile.id.clone();
+                let prepared = match prepare_new_profile(profile) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        if installed_secret {
+                            let _ = credentials::remove_secret(&profile_id);
+                        }
+                        return Err(error);
+                    }
+                };
+                if config
+                    .profiles
+                    .iter()
+                    .any(|existing| existing.id == prepared.id)
+                {
+                    if installed_secret {
+                        let _ = credentials::remove_secret(&prepared.id);
+                    }
+                    return Err(AgentConfigError::DuplicateProfileId {
+                        profile_id: prepared.id,
+                    });
+                }
+                if config
+                    .profiles
+                    .iter()
+                    .any(|existing| existing.name.to_lowercase() == prepared.name.to_lowercase())
+                {
+                    if installed_secret {
+                        let _ = credentials::remove_secret(&prepared.id);
+                    }
+                    return Err(AgentConfigError::DuplicateProfileName {
+                        name: prepared.name,
+                    });
+                }
+                config.profiles.push(prepared.clone());
+                prepared
+            }
+        };
+
+        let config = match normalize_config(config) {
+            Ok(config) => config,
+            Err(error) => {
+                if installed_secret {
+                    restore_secret(&prepared.id, previous_secret.as_deref());
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.save_config_locked(&config) {
+            if installed_secret {
+                restore_secret(&prepared.id, previous_secret.as_deref());
+            }
+            return Err(error);
+        }
+        if clear_credential && new_credential.is_none() {
+            let _ = credentials::remove_secret(&prepared.id);
+        }
+        Ok(snapshot_from_config(config, None))
+    }
+
+    pub fn delete_profile_with_replacement(
+        &self,
+        profile_id: String,
+        replacement_default_id: Option<String>,
+    ) -> Result<AgentProfileSnapshot, AgentConfigError> {
+        let _guard = lock_config_io();
+        let (mut config, _) = self.load_config_locked()?;
+        let profile_id = profile_id.trim().to_string();
+        let Some(index) = config
+            .profiles
+            .iter()
+            .position(|profile| profile.id == profile_id)
+        else {
+            return Err(AgentConfigError::ProfileNotFound { profile_id });
+        };
+        let was_default = config.default_profile_id.as_deref() == Some(profile_id.as_str());
+        if was_default && config.profiles.len() > 1 {
+            let replacement = replacement_default_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AgentConfigError::InvalidProfile {
+                    field: "default_profile_id".to_string(),
+                    message:
+                        "a replacement default is required before deleting the default profile"
+                            .to_string(),
+                })?;
+            if replacement == profile_id
+                || !config
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.id == replacement)
+            {
+                return Err(AgentConfigError::InvalidProfile {
+                    field: "default_profile_id".to_string(),
+                    message: "replacement default profile is invalid".to_string(),
+                });
+            }
+            config.default_profile_id = Some(replacement);
+        }
+        let removed = config.profiles.remove(index);
+        let config = normalize_config(config)?;
+        self.save_config_locked(&config)?;
+        if removed.credential_ref.is_some() {
+            let _ = credentials::remove_secret(&removed.id);
+        }
+        Ok(snapshot_from_config(config, None))
+    }
+
+    pub fn duplicate_profile(
+        &self,
+        profile_id: String,
+    ) -> Result<AgentProfileSnapshot, AgentConfigError> {
+        let _guard = lock_config_io();
+        let (mut config, _) = self.load_config_locked()?;
+        if config.profiles.len() >= MAX_AGENT_PROFILES {
+            return Err(AgentConfigError::ProfileLimitReached {
+                limit: MAX_AGENT_PROFILES as u32,
+            });
+        }
+        let source = config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id.trim())
+            .cloned()
+            .ok_or_else(|| AgentConfigError::ProfileNotFound {
+                profile_id: profile_id.clone(),
+            })?;
+        let mut duplicate = source.clone();
+        duplicate.id = super::generate_profile_id();
+        duplicate.credential_ref = None;
+        let mut suffix = 2_u32;
+        duplicate.name = format!("{} 副本", source.name);
+        while config
+            .profiles
+            .iter()
+            .any(|profile| profile.name.eq_ignore_ascii_case(&duplicate.name))
+        {
+            duplicate.name = format!("{} 副本 {suffix}", source.name);
+            suffix += 1;
+        }
+        let duplicate = prepare_new_profile(duplicate)?;
+        config.profiles.push(duplicate);
+        let config = normalize_config(config)?;
+        self.save_config_locked(&config)?;
+        Ok(snapshot_from_config(config, None))
+    }
+
     /// Explicitly replaces an unreadable or future-schema config with an empty
     /// supported config. Call this only after the user confirms recovery.
     pub fn reset(&self) -> Result<AgentProfileSnapshot, AgentConfigError> {
@@ -259,6 +489,14 @@ fn default_agent_profile_path() -> Option<PathBuf> {
     dirs::config_dir()
         .or_else(dirs::data_local_dir)
         .map(|path| path.join("Kite").join("agent.json"))
+}
+
+fn restore_secret(profile_id: &str, previous_secret: Option<&str>) {
+    if let Some(secret) = previous_secret {
+        let _ = credentials::save_secret(profile_id, secret);
+    } else {
+        let _ = credentials::remove_secret(profile_id);
+    }
 }
 
 fn lock_config_io() -> MutexGuard<'static, ()> {

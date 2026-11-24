@@ -16,13 +16,11 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kite_core::agent::{
-    AgentConversation, AgentMessage, AgentMessageRole, AgentPermissionDecision, AgentProfile,
-    AgentProfileStore, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState, load_agent_sessions,
-    new_agent_conversation_id, save_agent_conversation,
-};
-use kite_core::agent_context::{
-    AgentContext, AgentContextMode, AgentLaunchRequest, AgentPath, AgentSessionPhase,
-    default_working_directory,
+    AgentContext, AgentContextMode, AgentConversation, AgentLaunchRequest, AgentMessage,
+    AgentMessageRole, AgentPath, AgentPermissionDecision, AgentProfile, AgentProfileSnapshot,
+    AgentProfileStore, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase,
+    default_working_directory, load_agent_sessions, new_agent_conversation_id,
+    save_agent_conversation,
 };
 
 pub(crate) struct AgentPanel {
@@ -46,7 +44,11 @@ pub(crate) struct AgentPanel {
 }
 
 impl AgentPanel {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        agent_profiles: AgentProfileSnapshot,
+    ) -> Self {
         let prompt_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("向 Agent 提问。发送前可检查工作目录、上下文和权限。")
@@ -55,7 +57,10 @@ impl AgentPanel {
                 .clean_on_escape()
         });
         let output_view = cx.new(|cx| TextViewState::markdown("", cx));
-        let profile = default_agent_profile();
+        let profile = agent_profiles
+            .default_profile()
+            .cloned()
+            .or_else(default_agent_profile);
         let phase = if profile.is_some() {
             AgentSessionPhase::Ended
         } else {
@@ -180,6 +185,28 @@ impl AgentPanel {
 
     pub(crate) fn set_main_app(&mut self, main_app: WeakEntity<KiteApp>) {
         self.main_app = Some(main_app);
+    }
+
+    pub(crate) fn apply_agent_profiles(
+        &mut self,
+        agent_profiles: AgentProfileSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile = agent_profiles
+            .default_profile()
+            .cloned()
+            .or_else(default_agent_profile);
+        if !matches!(
+            self.phase,
+            AgentSessionPhase::Loading | AgentSessionPhase::Running
+        ) {
+            self.phase = if self.profile.is_some() {
+                AgentSessionPhase::Ended
+            } else {
+                AgentSessionPhase::Unconfigured
+            };
+        }
+        cx.notify();
     }
 
     pub(crate) fn window_size(&self) -> (u32, u32) {

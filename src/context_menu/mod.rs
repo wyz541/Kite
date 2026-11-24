@@ -11,7 +11,7 @@ use gpui_kit::*;
 use crate::actions::{ContextMenuAction, ContextMenuCommand, VcsMenuCommand};
 use crate::archive;
 use crate::platform::HostPlatform;
-use kite_core::agent_context::{AgentMenuCommand, is_text_like_path};
+use kite_core::agent::{AgentMenuCommand, is_text_like_path};
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -87,6 +87,7 @@ pub(crate) struct ContextMenuTarget {
     pub supports_delete: bool,
     pub supports_favorite: bool,
     pub is_shell_namespace: bool,
+    pub agent_available: bool,
 }
 
 impl ContextMenuCapabilities {
@@ -142,6 +143,7 @@ impl ContextMenuTarget {
             supports_delete: capabilities.supports_delete,
             supports_favorite: capabilities.supports_favorite,
             is_shell_namespace: capabilities.is_shell_namespace,
+            agent_available: false,
         }
     }
 
@@ -168,6 +170,7 @@ impl ContextMenuTarget {
             supports_delete: capabilities.supports_delete,
             supports_favorite: capabilities.supports_favorite,
             is_shell_namespace: capabilities.is_shell_namespace,
+            agent_available: false,
         }
     }
 
@@ -178,6 +181,11 @@ impl ContextMenuTarget {
             working_directory: self.working_directory.clone(),
             command,
         }
+    }
+
+    pub(crate) fn with_agent_available(mut self, available: bool) -> Self {
+        self.agent_available = available;
+        self
     }
 
     pub(crate) fn with_paths(mut self, paths: Vec<PathBuf>) -> Self {
@@ -439,7 +447,7 @@ impl ContextMenuProvider for AgentMenuProvider {
         _: ContextMenuPolicy,
         model: &mut ContextMenuModel,
     ) {
-        let agent_enabled = !target.loading && !target.is_shell_namespace;
+        let agent_enabled = target.agent_available && !target.loading && !target.is_shell_namespace;
         let is_text_like = !target.is_dir && is_text_like_path(&target.path);
         let mut entries = vec![agent_menu_item(
             AgentMenuCommand::Ask,
@@ -842,7 +850,7 @@ mod tests {
         ContextMenuPolicy, ContextMenuTarget, VcsMenuCommand, build_model,
     };
     use crate::platform::HostPlatform;
-    use kite_core::agent_context::AgentMenuCommand;
+    use kite_core::agent::AgentMenuCommand;
     use std::path::PathBuf;
 
     fn target() -> ContextMenuTarget {
@@ -862,6 +870,7 @@ mod tests {
                 is_shell_namespace: false,
             },
         )
+        .with_agent_available(true)
     }
 
     fn archive_target() -> ContextMenuTarget {
@@ -980,6 +989,28 @@ mod tests {
         assert!(commands.contains(&AgentMenuCommand::GenerateCommitMessage));
         assert!(commands.contains(&AgentMenuCommand::Configure));
         assert!(!commands.contains(&AgentMenuCommand::ExplainFile));
+    }
+
+    #[test]
+    fn agent_actions_follow_profile_availability() {
+        let model = build_model(&target().with_agent_available(false), windows_policy());
+        let entries = submenu_entries(&model, "使用 Agent");
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            ContextMenuNode::Item {
+                command: ContextMenuCommand::Agent(AgentMenuCommand::Ask),
+                enabled: false,
+                ..
+            }
+        )));
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            ContextMenuNode::Item {
+                command: ContextMenuCommand::Agent(AgentMenuCommand::Configure),
+                enabled: true,
+                ..
+            }
+        )));
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub fn preset_profile(preset_id: &str, profile_id: String) -> Option<AgentProfil
         timeout_seconds: 120,
         output_limit_bytes: 2 * 1024 * 1024,
         credential_ref: None,
+        credential_env_var: None,
         capabilities: Default::default(),
     })
 }

@@ -150,6 +150,23 @@ final class KiteAgentPanelModel: ObservableObject {
         profile != nil && hasContext && phase != .loading && phase != .running
     }
 
+    var hasConfiguredAgent: Bool {
+        profile != nil
+    }
+
+    func refreshAgentProfiles(core: KiteCore) {
+        let snapshot = core.agentConfig()
+        if let id = snapshot.defaultProfileId,
+           let profile = snapshot.profiles.first(where: { $0.id == id }) {
+            self.profile = profile
+        } else {
+            profile = snapshot.profiles.first
+        }
+        if phase == .unconfigured || phase == .ended {
+            phase = profile == nil ? .unconfigured : .ended
+        }
+    }
+
     var preferredWindowSize: NSSize {
         NSSize(width: CGFloat(windowWidth), height: CGFloat(windowHeight))
     }
@@ -375,13 +392,7 @@ final class KiteAgentPanelModel: ObservableObject {
     }
 
     private func refreshProfile() {
-        let loaded = core.agentConfig()
-        if let id = loaded.store.defaultProfileId,
-           let profile = loaded.store.profiles.first(where: { $0.id == id }) {
-            self.profile = profile
-        } else {
-            profile = loaded.store.profiles.first
-        }
+        refreshAgentProfiles(core: core)
     }
 
     private func restoreConversation() {
@@ -423,7 +434,7 @@ final class KiteAgentPanelModel: ObservableObject {
     }
 
     private func persistConversation() {
-        guard hasContext, profile != nil else { return }
+        guard let profile, hasContext else { return }
         let now = UInt64(Date().timeIntervalSince1970 * 1_000)
         let userMessageId = "\(conversationId):user:\(turnId)"
         let assistantMessageId = "\(conversationId):assistant:\(turnId)"
@@ -474,7 +485,7 @@ final class KiteAgentPanelModel: ObservableObject {
     func persistWindowState(width: UInt32, height: UInt32) {
         windowWidth = min(max(width, 680), 3_840)
         windowHeight = min(max(height, 560), 2_160)
-        guard let profile, hasContext else { return }
+        guard profile != nil, hasContext else { return }
         let restore = core.agentSessionState()
         if var conversation = restore.store.conversations.first(where: {
             $0.id == conversationId

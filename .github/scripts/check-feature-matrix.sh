@@ -34,6 +34,8 @@ required_features=(
   "Agent 诊断与脱敏日志"
   "Agent diff 审核与文件写入"
   "Agent 权限确认"
+  "Agent 配置管理"
+  "Agent 连接测试与钥匙串凭据"
 )
 
 failed=false
