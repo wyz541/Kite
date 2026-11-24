@@ -5,6 +5,7 @@ import SwiftUI
 struct KitePreviewPane: View {
     @ObservedObject var model: KiteModel
     let entry: BrowserEntry
+    let onShowAgent: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -34,6 +35,7 @@ struct KitePreviewPane: View {
             onCopy: {
                 KitePlatform.copyText(previewInfoText)
             },
+            onShowAgent: onShowAgent,
             onClose: onClose
         )
     }
@@ -188,11 +190,12 @@ struct KitePreviewPane: View {
 }
 
 struct KitePreviewEmptyPane: View {
+    let onShowAgent: () -> Void
     let onClose: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
-            KitePreviewHeader(onClose: onClose)
+            KitePreviewHeader(onShowAgent: onShowAgent, onClose: onClose)
 
             Spacer(minLength: 0)
 
@@ -229,6 +232,7 @@ struct KitePreviewEmptyPane: View {
 
 private struct KitePreviewHeader: View {
     var onCopy: (() -> Void)?
+    let onShowAgent: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -237,9 +241,11 @@ private struct KitePreviewHeader: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            Text("预览")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+            KiteRightPaneTabs(
+                mode: .preview,
+                onPreview: {},
+                onAgent: onShowAgent
+            )
 
             Spacer()
 

@@ -29,8 +29,8 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
     case general
     case appearance
     case layout
-    case agent
     case fileHandling
+    case agent
     case updates
     case about
 
@@ -41,8 +41,8 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return "通用"
         case .appearance: return "外观"
         case .layout: return "布局"
-        case .agent: return "Agent"
         case .fileHandling: return "文件处理"
+        case .agent: return "Agent"
         case .updates: return "更新"
         case .about: return "关于"
         }
@@ -53,8 +53,8 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return "启动和窗口恢复"
         case .appearance: return "主题和界面外观"
         case .layout: return "侧边栏、预览和栏位"
-        case .agent: return "Agent 配置、凭据与连接测试"
         case .fileHandling: return "默认文件查看器"
+        case .agent: return "连接、权限与默认 Agent"
         case .updates: return "版本、更新与诊断"
         case .about: return "Kite 版本信息"
         }
@@ -65,8 +65,8 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return "gearshape.fill"
         case .appearance: return "paintpalette.fill"
         case .layout: return "rectangle.split.3x1.fill"
-        case .agent: return "cpu"
         case .fileHandling: return "folder.fill"
+        case .agent: return "sparkles"
         case .updates: return "arrow.triangle.2.circlepath"
         case .about: return "info.circle.fill"
         }
@@ -77,16 +77,26 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .general: return .secondary
         case .appearance: return KiteTheme.brandOrange
         case .layout: return .blue
-        case .agent: return .purple
         case .fileHandling: return .cyan
+        case .agent: return KiteTheme.brandOrange
         case .updates: return .green
         case .about: return .purple
         }
     }
 }
 
+extension Notification.Name {
+    static let kiteSelectSettingsPane = Notification.Name("KiteSelectSettingsPane")
+}
+
 enum KiteSettingsWindowController {
-    static func open() {
+    private static var pendingPane: KiteSettingsPane?
+
+    static func open(pane: KiteSettingsPane? = nil) {
+        if let pane {
+            pendingPane = pane
+            NotificationCenter.default.post(name: .kiteSelectSettingsPane, object: nil)
+        }
         NSApp.activate(ignoringOtherApps: true)
 
         if let appMenu = NSApp.mainMenu?.items.first?.submenu,
@@ -103,6 +113,11 @@ enum KiteSettingsWindowController {
         }
         _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
     }
+
+    static func consumePendingPane() -> KiteSettingsPane? {
+        defer { pendingPane = nil }
+        return pendingPane
+    }
 }
 
 struct KiteSettingsView: View {
@@ -117,6 +132,12 @@ struct KiteSettingsView: View {
         }
         .frame(minWidth: 760, idealWidth: 760, minHeight: 560, idealHeight: 560)
         .background(.regularMaterial)
+        .onAppear {
+            applyPendingPane()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kiteSelectSettingsPane)) { _ in
+            applyPendingPane()
+        }
     }
 
     private var settingsSidebar: some View {
@@ -212,10 +233,10 @@ struct KiteSettingsView: View {
                     appearanceSettings
                 case .layout:
                     layoutSettings
-                case .agent:
-                    KiteAgentSettingsView(model: model)
                 case .fileHandling:
                     fileHandlingSettings
+                case .agent:
+                    KiteAgentSettingsView(model: model)
                 case .updates:
                     updateSettings
                 case .about:
@@ -238,6 +259,12 @@ struct KiteSettingsView: View {
             Text(selection.subtitle)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func applyPendingPane() {
+        if let pane = KiteSettingsWindowController.consumePendingPane() {
+            selection = pane
         }
     }
 
@@ -313,8 +340,8 @@ struct KiteSettingsView: View {
                     }
                     SettingsDivider()
                     SettingsRow(
-                        title: "显示预览",
-                        detail: "显示所选文件的内容和属性。"
+                        title: "显示右侧栏",
+                        detail: "显示预览或 Agent 上下文表面。"
                     ) {
                         Toggle("", isOn: previewBinding)
                             .labelsHidden()

@@ -28,8 +28,8 @@ enum SettingsPage {
     General,
     Appearance,
     Layout,
-    Agent,
     FileHandling,
+    Agent,
     Updates,
     About,
 }
@@ -39,8 +39,8 @@ impl SettingsPage {
         Self::General,
         Self::Appearance,
         Self::Layout,
-        Self::Agent,
         Self::FileHandling,
+        Self::Agent,
         Self::Updates,
         Self::About,
     ];
@@ -50,8 +50,8 @@ impl SettingsPage {
             Self::General => "通用",
             Self::Appearance => "外观",
             Self::Layout => "布局",
-            Self::Agent => "Agent",
             Self::FileHandling => "文件处理",
+            Self::Agent => "Agent",
             Self::Updates => "更新",
             Self::About => "关于",
         }
@@ -62,8 +62,8 @@ impl SettingsPage {
             Self::General => "启动和窗口恢复",
             Self::Appearance => "主题和界面外观",
             Self::Layout => "侧边栏、预览和详细信息",
-            Self::Agent => "Agent 配置、凭据与连接测试",
             Self::FileHandling => "默认资源管理器",
+            Self::Agent => "连接、权限与默认 Agent",
             Self::Updates => "版本、更新与诊断",
             Self::About => "Kite 版本信息",
         }
@@ -74,8 +74,8 @@ impl SettingsPage {
             Self::General => IconName::Settings,
             Self::Appearance => IconName::Palette,
             Self::Layout => IconName::LayoutPanelLeft,
-            Self::Agent => IconName::Bot,
             Self::FileHandling => IconName::Folder,
+            Self::Agent => IconName::Sparkles,
             Self::Updates => IconName::RefreshCw,
             Self::About => IconName::Info,
         }
@@ -86,8 +86,8 @@ impl SettingsPage {
             Self::General => rgb(0x8e9aab).into(),
             Self::Appearance => rgb(0xf47a32).into(),
             Self::Layout => rgb(0x5e9cff).into(),
-            Self::Agent => rgb(0x9b7bff).into(),
             Self::FileHandling => rgb(0x45b8d8).into(),
+            Self::Agent => rgb(0xf28c4c).into(),
             Self::Updates => rgb(0x55b978).into(),
             Self::About => rgb(0xa675df).into(),
         }
@@ -431,9 +431,10 @@ pub(crate) struct SettingsWindow {
 }
 
 impl SettingsWindow {
-    pub(crate) fn new(
+    fn new(
         main_app: Entity<KiteApp>,
         initial_update_state: SettingsUpdateState,
+        initial_page: SettingsPage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -448,7 +449,7 @@ impl SettingsWindow {
         });
         let this = Self {
             main_app,
-            page: SettingsPage::General,
+            page: initial_page,
             preferences,
             status: initial_update_state.status.clone(),
             update_state: initial_update_state,
@@ -848,8 +849,8 @@ impl SettingsWindow {
             SettingsPage::General => self.render_general(cx),
             SettingsPage::Appearance => self.render_appearance(cx),
             SettingsPage::Layout => self.render_layout(cx),
-            SettingsPage::Agent => self.render_agent(cx),
             SettingsPage::FileHandling => self.render_file_handling(window, cx),
+            SettingsPage::Agent => self.render_agent(cx),
             SettingsPage::Updates => self.render_updates(window, cx),
             SettingsPage::About => self.render_about(cx),
         }
@@ -1091,8 +1092,8 @@ impl SettingsWindow {
                 self.separator(cx),
                 self.row(
                     "layout-preview",
-                    "显示预览",
-                    Some("显示所选文件的内容和属性。"),
+                    "显示右侧栏",
+                    Some("显示预览或 Agent 上下文表面。"),
                     Switch::new("preview-visible")
                         .checked(self.preferences.preview_visible)
                         .small()
@@ -2777,6 +2778,23 @@ pub(crate) fn open_settings_window(
     initial_update_state: SettingsUpdateState,
     cx: &mut App,
 ) -> Result<(), String> {
+    open_settings_window_at(main_app, initial_update_state, SettingsPage::General, cx)
+}
+
+pub(crate) fn open_agent_settings_window(
+    main_app: Entity<KiteApp>,
+    initial_update_state: SettingsUpdateState,
+    cx: &mut App,
+) -> Result<(), String> {
+    open_settings_window_at(main_app, initial_update_state, SettingsPage::Agent, cx)
+}
+
+fn open_settings_window_at(
+    main_app: Entity<KiteApp>,
+    initial_update_state: SettingsUpdateState,
+    initial_page: SettingsPage,
+    cx: &mut App,
+) -> Result<(), String> {
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some("Kite 设置".into()),
@@ -2787,7 +2805,15 @@ pub(crate) fn open_settings_window(
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| SettingsWindow::new(main_app.clone(), initial_update_state, window, cx))
+        cx.new(|cx| {
+            SettingsWindow::new(
+                main_app.clone(),
+                initial_update_state,
+                initial_page,
+                window,
+                cx,
+            )
+        })
     })
     .map(|_| ())
     .map_err(|error| format!("无法打开设置窗口：{error}"))

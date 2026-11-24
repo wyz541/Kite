@@ -3104,6 +3104,27 @@ final class KiteModel: ObservableObject {
         }
     }
 
+    func revealInBrowser(path: String) {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            errorMessage = "项目已不存在：\(path)"
+            return
+        }
+        if isDirectory.boolValue && URL(fileURLWithPath: path).path == "/" {
+            loadRoot(path)
+            return
+        }
+
+        let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        loadRoot(parent)
+        guard let tabIndex = activeTabIndex,
+              let columnIndex = tabs[tabIndex].columns.indices.last else {
+            return
+        }
+        tabs[tabIndex].columns[columnIndex].select(path: path, mode: .replace)
+        errorMessage = nil
+    }
+
     func saveSession() {
         guard !tabs.isEmpty else { return }
         let savedTabs = tabs.map { tab in
