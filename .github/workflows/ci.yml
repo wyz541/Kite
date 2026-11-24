@@ -16,6 +16,7 @@ on:
       - docs/**
       - .gitignore
       - .github/workflows/ci.yml
+      - .github/workflows/agent-ffi-smoke.yml
       - .github/scripts/**
   pull_request:
     branches:
@@ -32,6 +33,7 @@ on:
       - docs/**
       - .gitignore
       - .github/workflows/ci.yml
+      - .github/workflows/agent-ffi-smoke.yml
       - .github/scripts/**
   workflow_dispatch:
 
