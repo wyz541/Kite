@@ -32,12 +32,27 @@ HTML = r'''<!doctype html>
     const browser = new URLSearchParams(location.search).get('browser') || 'unknown';
     let uploading = false;
 
-    async function uploadFiles(eventName, files) {
+    function describeItems(dataTransfer) {
+      if (!dataTransfer) return [];
+      return Array.from(dataTransfer.items).map(item => ({
+        kind: item.kind,
+        type: item.type,
+        hasFile: item.kind === 'file' ? Boolean(item.getAsFile()) : false,
+      }));
+    }
+
+    function describeTypes(dataTransfer) {
+      return dataTransfer ? Array.from(dataTransfer.types) : [];
+    }
+
+    async function uploadFiles(eventName, files, items = [], types = []) {
       if (uploading) return;
       if (files.length === 0) {
         status.textContent = 'Drop contained no files';
         await logDragEvent('upload-error', null, {
           message: 'Drop contained no files',
+          items,
+          types,
         });
         return;
       }
@@ -47,6 +62,8 @@ HTML = r'''<!doctype html>
         const body = new FormData();
         body.append('browser', browser);
         body.append('event', eventName);
+        body.append('items', JSON.stringify(items));
+        body.append('drop_types', JSON.stringify(types));
         for (const file of files) body.append('files', file, file.name);
         const response = await fetch('/upload', { method: 'POST', body });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -70,7 +87,8 @@ HTML = r'''<!doctype html>
           body: JSON.stringify({
             browser,
             type,
-            types: event.dataTransfer ? Array.from(event.dataTransfer.types) : [],
+            types: describeTypes(event.dataTransfer),
+            items: describeItems(event.dataTransfer),
             files: event.dataTransfer ? event.dataTransfer.files.length : 0,
             ...extra,
           }),
@@ -88,8 +106,10 @@ HTML = r'''<!doctype html>
     input.addEventListener('drop', event => {
       event.preventDefault();
       const files = Array.from(event.dataTransfer.files);
+      const items = describeItems(event.dataTransfer);
+      const types = describeTypes(event.dataTransfer);
       logDragEvent('drop', event);
-      uploadFiles('drop', files);
+      uploadFiles('drop', files, items, types);
     });
     input.addEventListener('change', () => uploadFiles('change', Array.from(input.files)));
   </script>
@@ -132,6 +152,7 @@ class UploadHandler(BaseHTTPRequestHandler):
                     "type": value.get("type", "unknown"),
                     "types": value.get("types", []),
                     "file_count": value.get("files", 0),
+                    "items": value.get("items", []),
                     "message": value.get("message"),
                     "file_names": value.get("fileNames", []),
                 }
@@ -161,10 +182,17 @@ class UploadHandler(BaseHTTPRequestHandler):
                     fields[name] = payload.decode(part.get_content_charset() or "utf-8", "replace")
             if not files:
                 raise ValueError("upload contained no files")
+            try:
+                items = json.loads(fields.get("items", "[]"))
+                drop_types = json.loads(fields.get("drop_types", "[]"))
+            except json.JSONDecodeError as error:
+                raise ValueError("invalid drag metadata") from error
             record = {
                 "kind": "upload",
                 "browser": fields.get("browser", "unknown"),
                 "event": fields.get("event", "unknown"),
+                "items": items if isinstance(items, list) else [],
+                "types": drop_types if isinstance(drop_types, list) else [],
                 "files": files,
             }
             with self.server.log_path.open("a", encoding="utf-8") as log:
