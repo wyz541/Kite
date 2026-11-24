@@ -755,7 +755,7 @@ private struct KiteAgentEditorView: View {
                     AgentDivider()
                     editorField("固定工作目录", detail: "保存前会确认目录存在。") {
                         HStack(spacing: 8) {
-                            TextField("/Users/me/project", text: $draft.workingDirectory)
+                            TextField("/path/to/project", text: $draft.workingDirectory)
                                 .textFieldStyle(.roundedBorder)
                                 .accessibilityLabel("固定工作目录")
                             Button("选择…") { chooseWorkingDirectory() }
