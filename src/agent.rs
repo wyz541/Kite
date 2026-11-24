@@ -362,11 +362,9 @@ mod tests {
 
     #[test]
     fn file_context_uses_parent_as_working_directory() {
-        let file = Path::new(r"C:\repo\src\main.rs");
-        assert_eq!(
-            default_working_directory(file),
-            PathBuf::from(r"C:\repo\src")
-        );
+        let root = std::env::temp_dir().join("kite-agent-working-directory");
+        let file = root.join("src").join("main.rs");
+        assert_eq!(default_working_directory(&file), root.join("src"));
     }
 
     #[test]
