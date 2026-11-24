@@ -1,3 +1,6 @@
+pub mod connection;
+mod context;
+pub mod credentials;
 mod store;
 
 use std::collections::HashSet;
@@ -6,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+pub use connection::{AgentConnectionResult, AgentConnectionStatus, test_agent_connection};
+pub use context::*;
 pub use store::AgentProfileStore;
 
 pub const AGENT_PROFILE_SCHEMA_VERSION: u32 = 1;
@@ -40,6 +45,16 @@ pub enum AgentTransport {
     Cli,
 }
 
+impl AgentTransport {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AcpStdio => "ACP / JSON-RPC",
+            Self::AcpHttp => "ACP HTTP",
+            Self::Cli => "通用 CLI",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkingDirectoryPolicy {
@@ -53,6 +68,25 @@ pub enum WorkingDirectoryPolicy {
     Ask,
 }
 
+impl WorkingDirectoryPolicy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::SelectedItem => "所选项目",
+            Self::FileParent => "文件所在目录",
+            Self::RepositoryRoot => "Git 仓库根目录",
+            Self::Fixed { .. } => "固定目录",
+            Self::Ask => "每次询问",
+        }
+    }
+
+    pub fn fixed_path(&self) -> Option<&str> {
+        match self {
+            Self::Fixed { path } => Some(path),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionPolicy {
@@ -60,6 +94,24 @@ pub enum PermissionPolicy {
     ReadOnly,
     ConfirmWrites,
     AgentManaged,
+}
+
+impl PermissionPolicy {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "只读",
+            Self::ConfirmWrites => "写入前确认",
+            Self::AgentManaged => "由 Agent 自身管理",
+        }
+    }
+
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "Kite 仅提供文件上下文；不自动写入或执行命令。",
+            Self::ConfirmWrites => "写入和命令执行需要用户确认。",
+            Self::AgentManaged => "权限由 Agent 自身管理；Kite 不声称已沙箱化。",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
@@ -110,6 +162,8 @@ pub struct AgentProfile {
     pub timeout_seconds: u32,
     pub output_limit_bytes: u64,
     pub credential_ref: Option<String>,
+    #[serde(default)]
+    pub credential_env_var: Option<String>,
     pub capabilities: AgentCapabilities,
 }
 
@@ -129,8 +183,15 @@ impl Default for AgentProfile {
             timeout_seconds: 600,
             output_limit_bytes: 8 * 1024 * 1024,
             credential_ref: None,
+            credential_env_var: None,
             capabilities: AgentCapabilities::default(),
         }
+    }
+}
+
+impl AgentProfile {
+    pub fn has_stored_credential(&self) -> bool {
+        self.credential_ref.is_some()
     }
 }
 
@@ -142,6 +203,15 @@ pub struct AgentProfileSnapshot {
     pub warning: Option<AgentConfigWarning>,
 }
 
+impl AgentProfileSnapshot {
+    pub fn default_profile(&self) -> Option<&AgentProfile> {
+        self.default_profile_id
+            .as_deref()
+            .and_then(|id| self.profiles.iter().find(|profile| profile.id == id))
+            .or_else(|| self.profiles.first())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum AgentConfigWarning {
     CorruptConfig { message: String },
@@ -151,6 +221,31 @@ pub enum AgentConfigWarning {
     StorageUnavailable { message: String },
     Io { message: String },
     MigrationApplied { from_version: u32, to_version: u32 },
+}
+
+impl AgentConfigWarning {
+    pub fn message(&self) -> String {
+        match self {
+            Self::CorruptConfig { message } => format!("Agent 配置损坏：{message}"),
+            Self::UnknownSchemaVersion { found, supported } => {
+                format!("不支持的 Agent 配置版本：{found}（当前为 {supported}）")
+            }
+            Self::ConfigTooLarge { bytes, max_bytes } => {
+                format!("Agent 配置过大：{bytes} 字节（上限 {max_bytes} 字节）")
+            }
+            Self::InvalidProfile { field, message } => {
+                format!("Agent 配置字段 {field} 无效：{message}")
+            }
+            Self::StorageUnavailable { message } => {
+                format!("Agent 配置存储不可用：{message}")
+            }
+            Self::Io { message } => format!("Agent 配置读写失败：{message}"),
+            Self::MigrationApplied {
+                from_version,
+                to_version,
+            } => format!("Agent 配置已从版本 {from_version} 迁移到 {to_version}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, thiserror::Error, uniffi::Error)]
@@ -376,6 +471,24 @@ pub(crate) fn validate_and_normalize_profile(
     if let Some(credential_ref) = profile.credential_ref.as_deref() {
         validate_credential_ref(credential_ref)?;
     }
+    profile.credential_env_var = normalize_optional_text(
+        profile.credential_env_var.take(),
+        "credential_env_var",
+        MAX_ENVIRONMENT_NAME_BYTES,
+    )?;
+    if let Some(environment_name) = profile.credential_env_var.as_deref() {
+        validate_environment_name(0, environment_name)?;
+        if profile
+            .environment
+            .iter()
+            .any(|entry| entry.name.eq_ignore_ascii_case(environment_name))
+        {
+            return Err(invalid(
+                "credential_env_var",
+                "must not duplicate a normal environment variable",
+            ));
+        }
+    }
 
     Ok(())
 }
@@ -587,6 +700,10 @@ fn invalid(field: impl Into<String>, message: impl Into<String>) -> AgentConfigE
     }
 }
 
+pub fn new_profile_id() -> String {
+    generate_profile_id()
+}
+
 fn generate_profile_id() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -612,6 +729,38 @@ mod tests {
             executable: Some("agent".to_string()),
             ..AgentProfile::default()
         }
+    }
+
+    #[test]
+    fn snapshot_resolves_the_default_profile_with_a_first_profile_fallback() {
+        let first = profile();
+        let mut second = profile();
+        second.id = "profile-2".to_string();
+        second.name = "Review Agent".to_string();
+
+        let snapshot = AgentProfileSnapshot {
+            schema_version: AGENT_PROFILE_SCHEMA_VERSION,
+            profiles: vec![first, second.clone()],
+            default_profile_id: Some(second.id.clone()),
+            warning: None,
+        };
+        assert_eq!(
+            snapshot
+                .default_profile()
+                .map(|profile| profile.id.as_str()),
+            Some("profile-2")
+        );
+
+        let snapshot = AgentProfileSnapshot {
+            default_profile_id: None,
+            ..snapshot
+        };
+        assert_eq!(
+            snapshot
+                .default_profile()
+                .map(|profile| profile.id.as_str()),
+            Some("profile-1")
+        );
     }
 
     #[test]

@@ -1542,6 +1542,61 @@ impl KiteCore {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
+    pub fn agent_config(&self) -> crate::agent::AgentProfileSnapshot {
+        self.agent_profile_store.snapshot()
+    }
+
+    pub fn save_agent_profile(
+        &self,
+        profile: crate::agent::AgentProfile,
+        credential: Option<String>,
+        clear_credential: bool,
+    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .save_profile_with_credential(profile, credential, clear_credential)
+            .map_err(|error| KiteError::operation(error.to_string()))
+    }
+
+    pub fn delete_agent_profile(
+        &self,
+        profile_id: String,
+        replacement_default_id: Option<String>,
+    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .delete_profile_with_replacement(profile_id, replacement_default_id)
+            .map_err(|error| KiteError::operation(error.to_string()))
+    }
+
+    pub fn set_default_agent_profile(
+        &self,
+        profile_id: String,
+    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .set_default_profile(profile_id)
+            .map_err(|error| KiteError::operation(error.to_string()))
+    }
+
+    pub fn duplicate_agent_profile(
+        &self,
+        profile_id: String,
+    ) -> Result<crate::agent::AgentProfileSnapshot, KiteError> {
+        self.agent_profile_store
+            .duplicate_profile(profile_id)
+            .map_err(|error| KiteError::operation(error.to_string()))
+    }
+
+    pub fn test_agent_connection(
+        &self,
+        profile: crate::agent::AgentProfile,
+        credential: Option<String>,
+    ) -> crate::agent::AgentConnectionResult {
+        crate::agent::test_agent_connection(profile, credential)
+    }
+
+    pub fn new_agent_profile_id(&self) -> String {
+        crate::agent::new_profile_id()
+    }
+
     pub fn check_for_update(&self) -> Result<UpdateInfoDto, KiteError> {
         updater::check_for_update()
             .map(update_info_dto)

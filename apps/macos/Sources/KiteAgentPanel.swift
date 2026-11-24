@@ -88,6 +88,24 @@ struct KiteAgentContextPath: Identifiable, Hashable {
     }
 }
 
+private extension AgentProfile {
+    var panelPermissionLabel: String {
+        switch permission {
+        case .readOnly: return "只读"
+        case .confirmWrites: return "写入前确认"
+        case .agentManaged: return "由 Agent 自身管理"
+        }
+    }
+
+    var panelTransportLabel: String {
+        switch transport {
+        case .acpStdio: return "ACP / JSON-RPC"
+        case .acpHttp: return "ACP HTTP"
+        case .cli: return "通用 CLI"
+        }
+    }
+}
+
 final class KiteAgentPanelModel: ObservableObject {
     @Published private(set) var contextPaths: [KiteAgentContextPath] = []
     @Published private(set) var primaryPath: String?
@@ -97,9 +115,21 @@ final class KiteAgentPanelModel: ObservableObject {
     @Published var prompt = ""
     @Published private(set) var presentationToken = 0
     @Published private(set) var notice: String?
+    @Published private(set) var defaultProfile: AgentProfile?
 
     var hasContext: Bool {
         primaryPath != nil && !contextPaths.isEmpty
+    }
+
+    var hasConfiguredAgent: Bool {
+        defaultProfile != nil
+    }
+
+    func refreshAgentProfiles(core: KiteCore) {
+        let snapshot = core.agentConfig()
+        defaultProfile = snapshot.defaultProfileId.flatMap { id in
+            snapshot.profiles.first { $0.id == id }
+        } ?? snapshot.profiles.first
     }
 
     func present(
@@ -346,7 +376,11 @@ private struct KiteAgentPanelContent: View {
                 statusCard
                 contextCard
                 if agent.phase == .unconfigured {
-                    unconfiguredCard
+                    if agent.hasConfiguredAgent {
+                        configuredCard
+                    } else {
+                        unconfiguredCard
+                    }
                 }
                 if agent.phase != .unconfigured {
                     phaseNoticeCard
@@ -539,6 +573,24 @@ private struct KiteAgentPanelContent: View {
         .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    private var configuredCard: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.green)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("已配置 \(agent.defaultProfile?.name ?? "Agent")")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text("默认 Agent 已保存。连接测试和凭据管理可在 Agent 设置中完成。")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(10)
+        .background(Color.green.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+    }
+
     @ViewBuilder
     private var phaseNoticeCard: some View {
         if agent.phase == .error || agent.phase == .loading || agent.phase == .ended {
@@ -563,6 +615,9 @@ private struct KiteAgentPanelContent: View {
     }
 
     private var statusTitle: String {
+        if agent.phase == .unconfigured, let profile = agent.defaultProfile {
+            return profile.name
+        }
         switch agent.phase {
         case .empty: return "等待上下文"
         case .unconfigured: return "未配置 Agent"
@@ -574,6 +629,9 @@ private struct KiteAgentPanelContent: View {
     }
 
     private var statusDetail: String {
+        if let profile = agent.defaultProfile {
+            return "模型 \(profile.model ?? "—") · \(profile.panelPermissionLabel) · \(profile.panelTransportLabel)"
+        }
         switch agent.phase {
         case .unconfigured, .empty:
             return "模型 — · 只读 · Kite 宿主"
@@ -586,6 +644,13 @@ private struct KiteAgentPanelContent: View {
         case .ended:
             return "模型 — · 只读 · 会话已结束"
         }
+    }
+
+    private var promptNote: String {
+        guard let profile = agent.defaultProfile else {
+            return "当前阶段只准备上下文和提示，不会启动外部 Agent。"
+        }
+        return "已配置 \(profile.name)；发送和流式输出仍由后续阶段接入，当前不会启动外部 Agent。"
     }
 
     private var promptCard: some View {
@@ -622,7 +687,7 @@ private struct KiteAgentPanelContent: View {
                     .disabled(true)
                     .help("发送和流式输出由下一阶段接入")
             }
-            Text("当前阶段只准备上下文和提示，不会启动外部 Agent。")
+            Text(promptNote)
                 .font(.system(size: 9.5))
                 .foregroundStyle(.secondary)
         }
@@ -644,6 +709,14 @@ private struct KiteAgentPanelContent: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+            if let profile = agent.defaultProfile {
+                Text("默认 Agent：\(profile.name)")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.green.opacity(0.10), in: Capsule())
+            }
             HStack(spacing: 8) {
                 Button {
                     model.presentAgentReviewFile()

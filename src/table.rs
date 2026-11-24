@@ -17,6 +17,7 @@ pub struct FileTableDelegate {
     can_paste: bool,
     git_available: bool,
     svn_available: bool,
+    agent_available: bool,
     active_query: Option<String>,
 }
 
@@ -34,6 +35,7 @@ impl FileTableDelegate {
             can_paste: false,
             git_available: false,
             svn_available: false,
+            agent_available: false,
             active_query: None,
         }
     }
@@ -61,6 +63,10 @@ impl FileTableDelegate {
 
     pub fn set_can_paste(&mut self, can_paste: bool) {
         self.can_paste = can_paste;
+    }
+
+    pub fn set_agent_available(&mut self, available: bool) {
+        self.agent_available = available;
     }
 
     pub fn set_working_directory(&mut self, working_directory: std::path::PathBuf) {
@@ -95,6 +101,7 @@ impl FileTableDelegate {
             self.svn_available,
         );
         ContextMenuTarget::directory(self.working_directory.clone(), title, capabilities)
+            .with_agent_available(self.agent_available)
     }
 
     pub fn clear_entries(&mut self) {
@@ -214,7 +221,8 @@ impl TableDelegate for FileTableDelegate {
             entry.is_dir(),
             self.working_directory.clone(),
             capabilities,
-        );
+        )
+        .with_agent_available(self.agent_available);
         let action_context = cx.entity().read(cx).focus_handle(cx);
         render_context_menu(menu, &target, action_context, window, cx)
     }

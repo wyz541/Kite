@@ -103,6 +103,8 @@ macOS 可与 Finder 共享文件剪贴板。
 - 侧边栏快速访问、收藏、设备和磁盘入口。
 - 会话恢复，包括页签、路径和视图模式。
 - Windows 和 macOS 提供结构一致的设置窗口。
+- 设置中提供 Agent 配置页，支持添加、编辑、复制、删除、默认 Agent 和连接测试。
+- Agent 密钥只保存到 Windows 凭据管理器或 macOS 钥匙串，普通配置仅保存 `keychain://` 引用。
 - 分栏监听目录变化，自动刷新新增、删除和重命名项目。
 - macOS 和 Windows 支持分栏排序方向切换。
 - 详细信息模式下，点击名称、日期、类型或大小表头排序，再次点击切换方向。
@@ -214,6 +216,8 @@ macOS 可与 Finder 共享文件剪贴板。
 | Git Stash、Reset、Revert 与 Cherry-pick | 已支持 | 已支持 |
 | Git 远程、Fetch/Pull/Push、克隆与初始化 | 已支持 | 已支持 |
 | Diff 查看器 | 已支持 | 已支持 |
+| Agent 配置管理 | 已支持 | 已支持 |
+| Agent 连接测试与钥匙串凭据 | 已支持 | 已支持 |
 | 文本编辑器 | 内置编辑器 | 系统编辑器 |
 | 文件剪贴板 | Explorer | Finder |
 | 设备浏览与写入 | USB、WPD、MTP | USB、磁盘卷 |
