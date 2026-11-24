@@ -95,7 +95,7 @@ enum FileDragProviderSmoke {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
             provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) {
-                loadedURL, _, error in
+                loadedURL, error in
                 if let error {
                     continuation.resume(throwing: error)
                     return

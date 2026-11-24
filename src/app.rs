@@ -11575,7 +11575,6 @@ mod scroll_routing_tests {
     fn non_scrollable_directory_stays_at_start() {
         assert_eq!(directory_scroll_offset(-90.0, 0.0), 0.0);
     }
-
     #[test]
     fn derives_clone_directory_from_common_git_urls() {
         assert_eq!(
@@ -11585,5 +11584,240 @@ mod scroll_routing_tests {
         assert_eq!(clone_target_name("git@example.com:team/kite.git"), "kite");
         assert_eq!(clone_target_name("ssh://example.com/team/kite"), "kite");
         assert_eq!(clone_target_name("https://example.com/"), "example.com");
+    }
+}
+
+#[cfg(test)]
+mod column_search_tests {
+    use super::{
+        ColumnDisplayRow, ColumnPane, entry_row_step, narrow_search_entries, search_query_narrows,
+        search_selection_step,
+    };
+    use crate::fs::{EntryKind, FileEntry};
+    use crate::ui_preferences::ColumnViewRule;
+    use std::path::PathBuf;
+
+    fn entry(path: &str) -> FileEntry {
+        let path = PathBuf::from(path);
+        FileEntry {
+            extension: path
+                .extension()
+                .map(|value| value.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
+            name: path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path,
+            kind: EntryKind::File,
+            size: 0,
+            modified: None,
+            git_status: None,
+            svn_status: None,
+        }
+    }
+
+    #[test]
+    fn steps_through_search_results_without_leaving_the_list() {
+        assert_eq!(search_selection_step(None, 0, true), None);
+        assert_eq!(search_selection_step(None, 3, true), Some(0));
+        assert_eq!(search_selection_step(None, 3, false), Some(2));
+        assert_eq!(search_selection_step(Some(0), 3, true), Some(1));
+        assert_eq!(search_selection_step(Some(1), 3, false), Some(0));
+        assert_eq!(search_selection_step(Some(2), 3, true), Some(2));
+        assert_eq!(search_selection_step(Some(0), 3, false), Some(0));
+    }
+
+    #[test]
+    fn selection_skips_group_headers() {
+        let entry_rows = [1, 2, 4];
+        assert_eq!(entry_row_step(&entry_rows, None, true), Some(1));
+        assert_eq!(entry_row_step(&entry_rows, None, false), Some(4));
+        assert_eq!(entry_row_step(&entry_rows, Some(1), true), Some(2));
+        assert_eq!(entry_row_step(&entry_rows, Some(2), true), Some(4));
+        assert_eq!(entry_row_step(&entry_rows, Some(4), true), Some(4));
+        assert_eq!(entry_row_step(&entry_rows, Some(2), false), Some(1));
+        assert_eq!(entry_row_step(&entry_rows, Some(0), true), Some(1));
+        assert_eq!(entry_row_step(&[], None, true), None);
+    }
+
+    #[test]
+    fn search_results_keep_group_headers_and_rank_order() {
+        let root = PathBuf::from(r"C:\repo");
+        let mut column = ColumnPane::new(
+            root.clone(),
+            vec![entry(r"C:\repo\notes.txt")],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_search_results(
+            "target".to_string(),
+            vec![
+                entry(r"C:\repo\target.rs"),
+                entry(r"C:\repo\docs\targeting.md"),
+                entry(r"C:\repo\my-target.md"),
+                entry(r"C:\repo\target-notes.txt"),
+            ],
+            false,
+        );
+        column.group = crate::ui_preferences::ColumnGroupPreference::Extension;
+        column.refresh_view();
+
+        let rows = column.display_rows();
+        assert!(matches!(
+            rows.first(),
+            Some(ColumnDisplayRow::Group { label, count, .. })
+                if label.as_ref() == "MD" && *count == 2
+        ));
+        assert!(matches!(
+            &rows[1],
+            ColumnDisplayRow::Entry(entry) if entry.name == "targeting.md"
+        ));
+        assert!(matches!(
+            &rows[2],
+            ColumnDisplayRow::Entry(entry) if entry.name == "my-target.md"
+        ));
+        assert_eq!(column.first_search_row_index(), Some(4));
+
+        column.clear_search_results();
+        column.refresh_view();
+        assert!(matches!(
+            column.display_rows().first(),
+            Some(ColumnDisplayRow::Group { .. })
+        ));
+    }
+
+    #[test]
+    fn keeps_ranked_search_order_and_sorts_previews() {
+        let root = PathBuf::from(r"C:\repo");
+        let a = entry(r"C:\repo\a.txt");
+        let b = entry(r"C:\repo\b.txt");
+        let mut column = ColumnPane::new(
+            root,
+            vec![a.clone(), b.clone()],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+
+        column.set_search_results("txt".to_string(), vec![b.clone(), a.clone()], false);
+        assert_eq!(
+            column
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["b.txt", "a.txt"]
+        );
+
+        column.set_search_preview("txt".to_string(), vec![b, a]);
+        assert_eq!(
+            column
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+    }
+
+    #[test]
+    fn detects_narrowing_queries_case_insensitively() {
+        assert!(search_query_narrows("Target", "target.rs"));
+        assert!(search_query_narrows("tar", "target"));
+        assert!(!search_query_narrows("target", "tar"));
+        assert!(!search_query_narrows("", "target"));
+    }
+
+    #[test]
+    fn narrows_previous_results_without_reordering() {
+        let entries = vec![
+            entry(r"C:\repo\target.rs"),
+            entry(r"C:\repo\notes.txt"),
+            entry(r"C:\repo\sub\targeting.md"),
+        ];
+        let narrowed = narrow_search_entries(&entries, "TARGET");
+        assert_eq!(
+            narrowed
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["target.rs", "targeting.md"]
+        );
+    }
+
+    #[test]
+    fn distinguishes_preview_from_final_results() {
+        let root = PathBuf::from(r"C:\repo");
+        let mut column = ColumnPane::new(
+            root,
+            vec![entry(r"C:\repo\a.txt")],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_search_preview("a".to_string(), vec![entry(r"C:\repo\a.txt")]);
+        assert!(column.search_preview);
+        column.set_search_results("a".to_string(), vec![entry(r"C:\repo\a.txt")], false);
+        assert!(!column.search_preview);
+        column.clear_search_results();
+        assert!(!column.search_preview);
+    }
+
+    #[test]
+    fn closing_search_restores_a_selection_the_query_hid() {
+        let root = PathBuf::from(r"C:\repo");
+        let notes = entry(r"C:\repo\notes.txt");
+        let target = entry(r"C:\repo\target.txt");
+        let mut column = ColumnPane::new(
+            root,
+            vec![notes.clone(), target.clone()],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_single_selection(notes.path.clone());
+
+        column.set_search_preview("tar".to_string(), vec![target.clone()]);
+        assert_eq!(column.selected_path, None);
+        column.set_search_results("targ".to_string(), vec![target], false);
+        assert_eq!(column.selected_path, None);
+
+        column.clear_search_results();
+        assert_eq!(column.selected_path.as_deref(), Some(notes.path.as_path()));
+        assert!(column.is_selected(&notes.path));
+    }
+
+    #[test]
+    fn a_selection_made_in_search_survives_closing_it() {
+        let root = PathBuf::from(r"C:\repo");
+        let notes = entry(r"C:\repo\notes.txt");
+        let deep = entry(r"C:\repo\docs\target.md");
+        let mut column = ColumnPane::new(
+            root,
+            vec![notes.clone()],
+            0,
+            false,
+            false,
+            false,
+            ColumnViewRule::default(),
+        );
+        column.set_single_selection(notes.path.clone());
+        column.set_search_results("target".to_string(), vec![deep.clone()], false);
+        column.set_single_selection(deep.path.clone());
+
+        column.clear_search_results();
+        // The search pick is not in the listing, so the earlier selection
+        // returns instead of leaving the column with nothing selected.
+        assert_eq!(column.selected_path.as_deref(), Some(notes.path.as_path()));
     }
 }
