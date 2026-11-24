@@ -422,7 +422,7 @@ private extension KiteGitBranchesView {
 
     func setUpstream(_ branch: KiteGitReference) {
         let current = snapshot?.localBranches.first { $0.name == branch.name }
-        let defaultUpstream = current.map(defaultUpstream(for:)) ?? ""
+        let defaultUpstream = current.map { defaultUpstream(for: $0) } ?? ""
         guard let values = promptValues(
             title: "设置上游",
             message: "输入远程分支，例如 origin/main。留空会清除上游。",
