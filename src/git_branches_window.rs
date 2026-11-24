@@ -576,13 +576,7 @@ impl GitBranchesWindow {
             )
         };
         let answers = [PromptButton::ok("删除"), PromptButton::cancel("取消")];
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &message,
-            Some(detail),
-            &answers,
-            cx,
-        );
+        let answer = window.prompt(PromptLevel::Warning, &message, Some(detail), &answers, cx);
         let name = branch.name.clone();
         cx.spawn_in(window, async move |this, cx| {
             let Ok(choice) = answer.await else {
