@@ -959,6 +959,7 @@ private struct KiteGitRefBadge: View {
         case .localBranch: return "arrow.triangle.branch"
         case .remoteBranch: return "cloud"
         case .tag: return "tag"
+        case .commit: return "number"
         case .other: return "link"
         }
     }
@@ -971,6 +972,8 @@ private struct KiteGitRefBadge: View {
             return Color(hex: 0xc678dd)
         case .tag:
             return Color(hex: 0xe5c07b)
+        case .commit:
+            return .secondary
         case .other:
             return .secondary
         }
