@@ -30,6 +30,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
     case appearance
     case layout
     case fileHandling
+    case agent
     case updates
     case about
 
@@ -41,6 +42,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return "外观"
         case .layout: return "布局"
         case .fileHandling: return "文件处理"
+        case .agent: return "Agent"
         case .updates: return "更新"
         case .about: return "关于"
         }
@@ -52,6 +54,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return "主题和界面外观"
         case .layout: return "侧边栏、预览和栏位"
         case .fileHandling: return "默认文件查看器"
+        case .agent: return "连接、权限与默认 Agent"
         case .updates: return "版本、更新与诊断"
         case .about: return "Kite 版本信息"
         }
@@ -63,6 +66,7 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return "paintpalette.fill"
         case .layout: return "rectangle.split.3x1.fill"
         case .fileHandling: return "folder.fill"
+        case .agent: return "sparkles"
         case .updates: return "arrow.triangle.2.circlepath"
         case .about: return "info.circle.fill"
         }
@@ -74,14 +78,25 @@ enum KiteSettingsPane: String, CaseIterable, Identifiable {
         case .appearance: return KiteTheme.brandOrange
         case .layout: return .blue
         case .fileHandling: return .cyan
+        case .agent: return KiteTheme.brandOrange
         case .updates: return .green
         case .about: return .purple
         }
     }
 }
 
+extension Notification.Name {
+    static let kiteSelectSettingsPane = Notification.Name("KiteSelectSettingsPane")
+}
+
 enum KiteSettingsWindowController {
-    static func open() {
+    private static var pendingPane: KiteSettingsPane?
+
+    static func open(pane: KiteSettingsPane? = nil) {
+        if let pane {
+            pendingPane = pane
+            NotificationCenter.default.post(name: .kiteSelectSettingsPane, object: nil)
+        }
         NSApp.activate(ignoringOtherApps: true)
 
         if let appMenu = NSApp.mainMenu?.items.first?.submenu,
@@ -98,6 +113,11 @@ enum KiteSettingsWindowController {
         }
         _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
     }
+
+    static func consumePendingPane() -> KiteSettingsPane? {
+        defer { pendingPane = nil }
+        return pendingPane
+    }
 }
 
 struct KiteSettingsView: View {
@@ -112,6 +132,12 @@ struct KiteSettingsView: View {
         }
         .frame(minWidth: 760, idealWidth: 760, minHeight: 560, idealHeight: 560)
         .background(.regularMaterial)
+        .onAppear {
+            applyPendingPane()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kiteSelectSettingsPane)) { _ in
+            applyPendingPane()
+        }
     }
 
     private var settingsSidebar: some View {
@@ -209,6 +235,8 @@ struct KiteSettingsView: View {
                     layoutSettings
                 case .fileHandling:
                     fileHandlingSettings
+                case .agent:
+                    agentSettings
                 case .updates:
                     updateSettings
                 case .about:
@@ -231,6 +259,12 @@ struct KiteSettingsView: View {
             Text(selection.subtitle)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func applyPendingPane() {
+        if let pane = KiteSettingsWindowController.consumePendingPane() {
+            selection = pane
         }
     }
 
@@ -306,8 +340,8 @@ struct KiteSettingsView: View {
                     }
                     SettingsDivider()
                     SettingsRow(
-                        title: "显示预览",
-                        detail: "显示所选文件的内容和属性。"
+                        title: "显示右侧栏",
+                        detail: "显示预览或 Agent 上下文表面。"
                     ) {
                         Toggle("", isOn: previewBinding)
                             .labelsHidden()
@@ -375,6 +409,37 @@ struct KiteSettingsView: View {
                 }
             } footer: {
                 Text("更改后，Finder 和 Kite 会继续处理各自负责的系统请求。")
+            }
+        }
+    }
+
+    private var agentSettings: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            settingsSection("Agent 配置") {
+                SettingsCard {
+                    SettingsRow(
+                        title: "尚未配置 Agent",
+                        detail: "右键文件或文件夹并选择“使用 Agent”，可在不发送任务的情况下检查上下文和提示。"
+                    ) {
+                        EmptyView()
+                    }
+                    SettingsDivider()
+                    SettingsRow(
+                        title: "接入配置与凭据",
+                        detail: "Kite 只保存最小接入信息；敏感凭据通过系统钥匙串引用，不写入普通配置。"
+                    ) {
+                        EmptyView()
+                    }
+                    SettingsDivider()
+                    SettingsRow(
+                        title: "权限边界",
+                        detail: "P0 默认只读。Kite 不会自动执行 Agent 建议的命令，也不会未经确认应用文件修改。"
+                    ) {
+                        EmptyView()
+                    }
+                }
+            } footer: {
+                Text("连接测试、默认 Agent 和 Profile 管理由 Agent 配置任务接入此页面。")
             }
         }
     }

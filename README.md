@@ -146,6 +146,16 @@ macOS 可与 Finder 共享文件剪贴板。
 - 预览信息支持选择和复制。
 - 文本编辑器支持未保存状态保护和外部修改冲突检测。
 
+### Agent 表面
+
+- 右侧区域可在“预览”和“Agent”之间切换。
+- 文件、目录和多选路径可作为可见上下文快照打开。
+- 默认使用固定快照；显式开启后才跟随当前选择。
+- 上下文路径支持移除、在分栏中定位和追加。
+- Agent 可从右侧栏弹出为独立窗口，并共享同一上下文状态。
+- 窄窗口使用覆盖式抽屉，不压缩分栏导航。
+- 当前阶段只准备上下文和提示，不启动外部 Agent。
+
 ### 开发者工作流
 
 - 显示 Git 和 SVN 文件状态。
@@ -195,6 +205,7 @@ macOS 可与 Finder 共享文件剪贴板。
 | 列宽预设与布局恢复 | 已支持 | 已支持 |
 | 文件预览 | 内置预览 | 系统快速预览 |
 | 预览 Git 状态 | 已支持 | 已支持 |
+| Agent 栏/窗口上下文准备 | 已支持 | 已支持 |
 | Git 分支与标签 | 已支持 | 已支持 |
 | 提交历史与提交图 | 已支持 | 已支持 |
 | Git 客户端 | 已支持 | 已支持 |
@@ -231,6 +242,7 @@ Kite 仍处于 `0.6.x` 活跃开发阶段。
 - macOS 便携设备必须挂载为可写卷。
 - 复制操作不支持符号链接。
 - 自定义布局提供列显示开关和三个列宽预设。拖动列顺序仍未实现。
+- Agent 表面当前只准备上下文和提示；发送、流式输出、权限确认和写入尚未接入。
 
 ## 后续方向
 
@@ -329,6 +341,7 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [项目宪法与设计原则](docs/design/manifesto.md)
 - [平台边界](docs/architecture/platforms.md)
 - [右键菜单架构](docs/architecture/context-menu.md)
+- [Agent 表面架构](docs/architecture/agent-surface.md)
 - [压缩与解压实现](docs/architecture/context-menu.md#压缩菜单)
 - [默认文件管理器](docs/architecture/default-file-manager.md)
 - [更新器架构](docs/architecture/updater.md)

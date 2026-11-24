@@ -115,6 +115,7 @@ RefreshMenuProvider
 CoreMenuProvider
 ArchiveMenuProvider
 VcsMenuProvider
+AgentMenuProvider
 NativeShellMenuProvider
 ```
 
@@ -123,6 +124,13 @@ NativeShellMenuProvider
 未来可改为按能力注册。
 新增功能只需添加提供者或模型节点。
 调用点不需要再复制菜单代码。
+
+`AgentMenuProvider` 提供一级子菜单“使用 Agent”。
+该菜单携带主目标、附加路径、工作目录和预填提示。
+文件目标可以解释文件，目录目标可以总结文件夹。
+Git 目标可以审查变更或生成提交说明。
+所有 Agent 动作只打开 Agent 表面，不自动发送。
+未配置 Agent 时仍可先检查上下文，并进入设置中的 Agent 页面。
 
 ### Action Envelope
 
@@ -261,7 +269,7 @@ Windows 11 新式紧凑菜单不保证由 `IContextMenu` 返回。
 
 ## 当前限制
 
-- 当前动作目标是单一路径。
+- 普通文件操作仍以单一路径为目标；Agent 上下文支持附加路径集合。
 - 当前列视图和列表视图共享单选择语义。
 - 当前尚未提供文件夹背景菜单。
 - 当前原生 Shell 菜单是同步弹出菜单。
@@ -319,6 +327,7 @@ Windows 11 新式紧凑菜单不保证由 `IContextMenu` 返回。
 - 原生桥接测试打开 Shell 菜单并自动关闭。
 - 调试器回归测试选择原生 Shell 命令，确认进程继续运行。
 - 模型测试检查 `显示更多选项 (Show more options)` 入口。
+- 模型测试检查 Agent 上下文动作和配置入口。
 
 ## 主要来源
 

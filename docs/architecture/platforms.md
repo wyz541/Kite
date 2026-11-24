@@ -85,6 +85,7 @@ Windows 前端负责以下能力：
 - `IContextMenu` Shell 扩展菜单。
 - WPD/MTP 设备展示。
 - WPD/MTP Shell 命名空间浏览和写入。
+- 右侧 Agent 栏、上下文 chip 和独立 Agent 窗口。
 
 Windows 专属代码只在 `cfg(target_os = "windows")` 下编译。
 
@@ -125,6 +126,7 @@ SwiftUI 负责以下能力：
 - 状态栏。
 - App commands。
 - 窗口关闭和退出时的会话保存。
+- 右侧 Agent 栏、上下文 chip 和独立 Agent 窗口。
 
 AppKit 负责以下能力：
 
@@ -189,6 +191,15 @@ Swift 使用 UniFFI 记录和对象。
 - AppKit 服务菜单提供系统服务。
 - macOS UI 按 HIG 隐藏不可用项。
 - macOS 菜单控制分组和子菜单深度。
+
+## Agent 表面
+
+Agent 表面不是模型运行时。
+Kite 负责可见上下文、工作目录、权限摘要和窗口路由。
+Windows 与 macOS 都使用右侧“预览 / Agent”切换，并支持弹出独立窗口。
+固定上下文默认不随导航变化；跟随当前选择必须显式开启。
+本阶段只准备上下文和提示，不发送任务。
+详细规则见 [Agent 表面架构](agent-surface.md)。
 
 ## 导航入口
 

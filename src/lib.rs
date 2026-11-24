@@ -1,5 +1,6 @@
 uniffi::setup_scaffolding!();
 
+pub mod agent;
 pub mod archive;
 pub mod content_search;
 pub mod devices;

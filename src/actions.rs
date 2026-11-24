@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::*;
+use kite_core::agent::AgentMenuCommand;
 
 actions!(
     kite,
@@ -72,6 +73,7 @@ actions!(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextMenuCommand {
     Open,
+    Agent(AgentMenuCommand),
     Copy,
     CopyTo,
     CopyPath,
@@ -97,6 +99,7 @@ pub enum ContextMenuCommand {
 #[action(namespace = kite, no_json)]
 pub struct ContextMenuAction {
     pub target: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub working_directory: PathBuf,
     pub command: ContextMenuCommand,
 }
