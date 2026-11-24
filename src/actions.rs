@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::*;
-use kite_core::agent::AgentMenuCommand;
+use kite_core::agent_context::AgentMenuCommand;
 
 actions!(
     kite,
@@ -51,6 +51,7 @@ actions!(
         CheckForUpdates,
         OpenSettings,
         OpenWorkspaceEditor,
+        OpenAgentReview,
         GitClientRefresh,
         GitClientFetch,
         GitClientPull,

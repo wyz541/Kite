@@ -174,6 +174,11 @@ struct KiteMacApp: App {
                 }
                 .disabled(model.updateInProgress)
             }
+            CommandMenu("Agent") {
+                Button("审阅结构化结果…") {
+                    model.presentAgentReviewFile()
+                }
+            }
             CommandMenu("Git") {
                 Button("交互式 Rebase…") {
                     KiteGitRebaseWindowController.show(path: model.currentPath, model: model)

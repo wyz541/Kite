@@ -11,7 +11,7 @@ use gpui_kit::*;
 use crate::actions::{ContextMenuAction, ContextMenuCommand, VcsMenuCommand};
 use crate::archive;
 use crate::platform::HostPlatform;
-use kite_core::agent::{AgentMenuCommand, is_text_like_path};
+use kite_core::agent_context::{AgentMenuCommand, is_text_like_path};
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -842,7 +842,7 @@ mod tests {
         ContextMenuPolicy, ContextMenuTarget, VcsMenuCommand, build_model,
     };
     use crate::platform::HostPlatform;
-    use kite_core::agent::AgentMenuCommand;
+    use kite_core::agent_context::AgentMenuCommand;
     use std::path::PathBuf;
 
     fn target() -> ContextMenuTarget {
