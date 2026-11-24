@@ -247,7 +247,7 @@ fn save_column_view_rule_at(
         .column_rules
         .insert(column_rule_key(rule_path), rule);
     prune_column_rules(&mut preferences.column_rules);
-    save_ui_preferences_at(&preferences_path, preferences)
+    save_ui_preferences_at(preferences_path, preferences)
 }
 
 fn save_default_column_sort_at(path: &Path, sort: SortSpec) -> Result<(), String> {

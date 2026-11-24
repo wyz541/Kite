@@ -22,12 +22,23 @@ enum KiteFileDragProvider {
         var seen = Set<String>()
         let uniquePaths = paths.filter { seen.insert($0).inserted }
         let primaryURL = URL(fileURLWithPath: primaryPath)
+        let primaryType = fileContentType(for: primaryURL)
 
-        // Expose the file URL as the first and primary representation. Providers
-        // created with contentsOf also advertise public.plain-text first, which
-        // makes web upload targets treat the drag as text instead of a file.
+        // Register a real file promise first. A file URL item only tells browsers
+        // where the item lives, so upload widgets can receive a path string
+        // instead of the file bytes. The promise gives WebKit and native drop
+        // targets an actual file to copy, while the URL representation below
+        // keeps Finder and other file-URL consumers working.
         let provider = NSItemProvider()
         provider.suggestedName = primaryURL.lastPathComponent
+        provider.registerFileRepresentation(
+            forTypeIdentifier: primaryType.identifier,
+            fileOptions: [],
+            visibility: .all
+        ) { completion in
+            completion(primaryURL, false, nil)
+            return nil
+        }
         provider.registerItem(forTypeIdentifier: UTType.fileURL.identifier) {
             completion, _, _ in
             completion?(primaryURL as NSURL, nil)
@@ -45,6 +56,20 @@ enum KiteFileDragProvider {
             return nil
         }
         return provider
+    }
+
+    private static func fileContentType(for url: URL) -> UTType {
+        let values = try? url.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey])
+        if values?.isDirectory == true {
+            return .folder
+        }
+        if let contentType = values?.contentType, !contentType.isDynamic {
+            return contentType
+        }
+        if let contentType = UTType(filenameExtension: url.pathExtension), !contentType.isDynamic {
+            return contentType
+        }
+        return .data
     }
 
     static func loadInternalPaths(

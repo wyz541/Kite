@@ -371,6 +371,20 @@ function Wait-ForUpload {
             }
             foreach ($file in @($record.files)) {
                 if ($file.name -eq $FileName -and $file.sha256 -eq $ExpectedHash) {
+                    $fileItems = @($record.items | Where-Object {
+                        $_.kind -eq "file" -and $_.hasFile -eq $true
+                    })
+                    if ($fileItems.Count -eq 0) {
+                        $itemSummary = @($record.items) | ConvertTo-Json -Compress
+                        return [pscustomobject]@{
+                            contract_error = "$Browser exposed the accepted drop without a file DataTransferItem: $itemSummary"
+                        }
+                    }
+                    if (@($record.types) -notcontains "Files") {
+                        return [pscustomobject]@{
+                            contract_error = "$Browser did not advertise Files during drop: $(@($record.types) -join ', ')"
+                        }
+                    }
                     return $record
                 }
             }
@@ -447,6 +461,9 @@ function Test-BrowserUpload {
         $record = Wait-ForUpload -Browser $Name -FileName $FileName -ExpectedHash $ExpectedHash -KiteProcess $KiteProcess
         if ($record.PSObject.Properties.Name -contains "upload_error") {
             throw "$Name reported upload error: $($record.upload_error)"
+        }
+        if ($record.PSObject.Properties.Name -contains "contract_error") {
+            throw "$Name drag contract failed: $($record.contract_error)"
         }
         Write-Host "$Name upload verified: $($record.files[0].name) ($($record.files[0].size) bytes)"
         return $record
