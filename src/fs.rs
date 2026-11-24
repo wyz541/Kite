@@ -860,8 +860,7 @@ pub fn type_label(kind: EntryKind, extension: &str) -> String {
     }
     let category = match extension {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => "图像",
-        "txt" | "md" | "log" | "ini" | "toml" | "yaml" | "yml" | "json" | "mm" | "freemind"
-        | "opml" | "opmlm" => "文本文档",
+        "txt" | "md" | "log" | "ini" | "toml" | "yaml" | "yml" | "json" => "文本文档",
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => "文档",
         "xmind" | "mm" | "freemind" | "opml" | "opmlm" => "思维导图",
         "zip" | "7z" | "rar" | "tar" | "gz" => "压缩文件",
