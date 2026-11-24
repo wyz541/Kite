@@ -356,17 +356,15 @@ fn same_agent_path(left: &Path, right: &Path) -> bool {
 mod tests {
     use super::{
         AgentContext, AgentLaunchRequest, AgentMenuCommand, AgentPath, MAX_AGENT_CONTEXT_PATHS,
-        default_working_directory,
+        default_working_directory, is_text_like_path,
     };
     use std::path::{Path, PathBuf};
 
     #[test]
     fn file_context_uses_parent_as_working_directory() {
-        let file = Path::new(r"C:\repo\src\main.rs");
-        assert_eq!(
-            default_working_directory(file),
-            PathBuf::from(r"C:\repo\src")
-        );
+        let root = std::env::temp_dir().join("kite-agent-working-directory");
+        let file = root.join("src").join("main.rs");
+        assert_eq!(default_working_directory(&file), root.join("src"));
     }
 
     #[test]
@@ -434,6 +432,15 @@ mod tests {
         assert!(!AgentMenuCommand::ReviewChanges.is_available_for(false, true, false));
         assert!(AgentMenuCommand::ReviewChanges.is_available_for(false, true, true));
         assert!(!AgentMenuCommand::Configure.is_action());
+    }
+
+    #[test]
+    fn text_file_detection_keeps_binary_actions_out_of_explain() {
+        assert!(is_text_like_path(Path::new("notes.md")));
+        assert!(is_text_like_path(Path::new("main.rs")));
+        assert!(is_text_like_path(Path::new("Makefile")));
+        assert!(!is_text_like_path(Path::new("Kite.exe")));
+        assert!(!is_text_like_path(Path::new("photo.png")));
     }
 
     #[test]
