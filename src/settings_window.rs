@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use kite_core::agent::{
+use kite_core::agent_config::{
     AgentConfig, AgentConnectionResult, AgentConnectionStatus, AgentEnvironmentVariable,
     AgentProfile, AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, load_agent_config,
 };
@@ -677,7 +677,7 @@ impl SettingsWindow {
             (!value.is_empty()).then_some(value)
         };
         let clear_credential = editor.clear_credential;
-        match kite_core::agent::save_agent_profile(profile, credential, clear_credential) {
+        match kite_core::agent_config::save_agent_profile(profile, credential, clear_credential) {
             Ok(config) => {
                 self.agent_config = config;
                 self.agent_warning = None;
@@ -703,7 +703,7 @@ impl SettingsWindow {
             .iter()
             .map(|profile| profile.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        match kite_core::agent::duplicate_agent_profile(profile_id) {
+        match kite_core::agent_config::duplicate_agent_profile(profile_id) {
             Ok(config) => {
                 let duplicate = config
                     .profiles
@@ -724,7 +724,7 @@ impl SettingsWindow {
     }
 
     fn set_default_agent(&mut self, profile_id: &str, cx: &mut Context<Self>) {
-        match kite_core::agent::set_default_agent_profile(profile_id) {
+        match kite_core::agent_config::set_default_agent_profile(profile_id) {
             Ok(config) => {
                 self.agent_config = config;
                 self.agent_warning = None;
@@ -765,7 +765,7 @@ impl SettingsWindow {
             return;
         };
         let profile = pending.profile.clone();
-        match kite_core::agent::delete_agent_profile(&profile.id, replacement_default_id) {
+        match kite_core::agent_config::delete_agent_profile(&profile.id, replacement_default_id) {
             Ok(config) => {
                 self.agent_config = config;
                 self.agent_warning = None;
@@ -789,9 +789,9 @@ impl SettingsWindow {
         self._agent_test_task = cx.spawn(async move |this, cx| {
             let profile_id = profile.id.clone();
             let result = cx
-                .background_spawn(
-                    async move { kite_core::agent::test_agent_connection(profile, None) },
-                )
+                .background_spawn(async move {
+                    kite_core::agent_config::test_agent_connection(profile, None)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.agent_testing_id.as_deref() == Some(profile_id.as_str()) {
@@ -828,7 +828,7 @@ impl SettingsWindow {
         self._agent_test_task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    kite_core::agent::test_agent_connection(profile, credential)
+                    kite_core::agent_config::test_agent_connection(profile, credential)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

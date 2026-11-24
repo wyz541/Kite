@@ -1318,17 +1318,17 @@ impl KiteCore {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
-    pub fn agent_config(&self) -> crate::agent::AgentStoreSnapshot {
-        crate::agent::load_agent_config()
+    pub fn agent_config(&self) -> crate::agent_config::AgentStoreSnapshot {
+        crate::agent_config::load_agent_config()
     }
 
     pub fn save_agent_profile(
         &self,
-        profile: crate::agent::AgentProfile,
+        profile: crate::agent_config::AgentProfile,
         credential: Option<String>,
         clear_credential: bool,
-    ) -> Result<crate::agent::AgentConfig, KiteError> {
-        crate::agent::save_agent_profile(profile, credential, clear_credential)
+    ) -> Result<crate::agent_config::AgentConfig, KiteError> {
+        crate::agent_config::save_agent_profile(profile, credential, clear_credential)
             .map_err(KiteError::operation)
     }
 
@@ -1336,35 +1336,35 @@ impl KiteCore {
         &self,
         profile_id: String,
         replacement_default_id: Option<String>,
-    ) -> Result<crate::agent::AgentConfig, KiteError> {
-        crate::agent::delete_agent_profile(&profile_id, replacement_default_id)
+    ) -> Result<crate::agent_config::AgentConfig, KiteError> {
+        crate::agent_config::delete_agent_profile(&profile_id, replacement_default_id)
             .map_err(KiteError::operation)
     }
 
     pub fn set_default_agent_profile(
         &self,
         profile_id: String,
-    ) -> Result<crate::agent::AgentConfig, KiteError> {
-        crate::agent::set_default_agent_profile(&profile_id).map_err(KiteError::operation)
+    ) -> Result<crate::agent_config::AgentConfig, KiteError> {
+        crate::agent_config::set_default_agent_profile(&profile_id).map_err(KiteError::operation)
     }
 
     pub fn duplicate_agent_profile(
         &self,
         profile_id: String,
-    ) -> Result<crate::agent::AgentConfig, KiteError> {
-        crate::agent::duplicate_agent_profile(&profile_id).map_err(KiteError::operation)
+    ) -> Result<crate::agent_config::AgentConfig, KiteError> {
+        crate::agent_config::duplicate_agent_profile(&profile_id).map_err(KiteError::operation)
     }
 
     pub fn test_agent_connection(
         &self,
-        profile: crate::agent::AgentProfile,
+        profile: crate::agent_config::AgentProfile,
         credential: Option<String>,
-    ) -> crate::agent::AgentConnectionResult {
-        crate::agent::test_agent_connection(profile, credential)
+    ) -> crate::agent_config::AgentConnectionResult {
+        crate::agent_config::test_agent_connection(profile, credential)
     }
 
     pub fn new_agent_profile_id(&self) -> String {
-        crate::agent::new_profile_id()
+        crate::agent_config::new_profile_id()
     }
 
     pub fn check_for_update(&self) -> Result<UpdateInfoDto, KiteError> {
