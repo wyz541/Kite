@@ -12,7 +12,7 @@ $targetRoot = if ($env:CARGO_TARGET_DIR) {
     Join-Path $root 'target'
 }
 $binary = Join-Path $targetRoot 'release\kite-explorer.exe'
-$version = '0.6.90'
+$version = '0.6.91'
 $releaseName = "Kite-v$version-windows-x64"
 $staging = Join-Path $dist $releaseName
 $archive = Join-Path $dist "$releaseName.zip"
