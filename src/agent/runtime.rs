@@ -13,9 +13,7 @@ use crate::agent::diagnostics::record_agent_event;
 use crate::agent::process::{spawn_agent_process, terminate_agent_process};
 use crate::agent::redact::{Redactor, StreamingRedactor, is_sensitive_environment_key};
 use crate::agent::restore::{AgentMessage, AgentMessageRole};
-use crate::agent::{
-    AgentEnvironmentVariable, AgentProfile, AgentTransport, validate_and_normalize_profile,
-};
+use crate::agent::{AgentEnvironmentVariable, AgentProfile, validate_and_normalize_profile};
 
 const MAX_ACP_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RUNTIME_EVENTS: usize = 4_096;
@@ -298,6 +296,8 @@ impl RuntimeShared {
 pub enum AgentRuntimeError {
     #[error("{message}")]
     Failure { message: String },
+    #[error("{message}")]
+    UnsupportedTransport { message: String },
 }
 
 impl From<String> for AgentRuntimeError {
@@ -330,10 +330,13 @@ impl AgentRuntime {
     ) -> Result<Arc<Self>, AgentRuntimeError> {
         validate_and_normalize_profile(&mut profile)
             .map_err(|error| AgentRuntimeError::from(error.to_string()))?;
-        if profile.transport != AgentTransport::AcpStdio {
-            return Err(AgentRuntimeError::from(
-                "P0 Agent 运行时仅支持 ACP / JSON-RPC stdio",
-            ));
+        if !profile.transport.supports_session() {
+            return Err(AgentRuntimeError::UnsupportedTransport {
+                message: format!(
+                    "{} 当前仅支持连接测试，不能启动 Agent 会话；请在 Agent 设置中改为 ACP / JSON-RPC stdio。",
+                    profile.transport.label()
+                ),
+            });
         }
         let (runtime_profile, redactor) =
             runtime_profile_with_credential(&profile).map_err(AgentRuntimeError::from)?;
@@ -1495,6 +1498,35 @@ fn unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentTransport;
+
+    #[test]
+    fn runtime_rejects_connection_test_only_transport_with_a_typed_error() {
+        let profile = AgentProfile {
+            id: "runtime-http-probe".to_string(),
+            name: "HTTP Probe".to_string(),
+            transport: AgentTransport::AcpHttp,
+            executable: None,
+            endpoint: Some("http://127.0.0.1:9/acp".to_string()),
+            ..AgentProfile::default()
+        };
+        let error = match AgentRuntime::start(
+            profile,
+            std::env::current_dir()
+                .expect("current directory")
+                .to_string_lossy()
+                .into_owned(),
+            Vec::new(),
+            Vec::new(),
+        ) {
+            Ok(_) => panic!("connection-test-only transport must not start"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            AgentRuntimeError::UnsupportedTransport { .. }
+        ));
+    }
 
     #[test]
     fn permission_selection_prefers_requested_kind() {

@@ -66,6 +66,9 @@ pub struct AgentConnectionResult {
     pub capabilities: Vec<String>,
     pub auth_methods: Vec<String>,
     pub elapsed_ms: u64,
+    /// Connection success is diagnostic only when this is false.
+    pub session_supported: bool,
+    pub profile_save_supported: bool,
 }
 
 impl AgentConnectionResult {
@@ -84,7 +87,15 @@ impl AgentConnectionResult {
             capabilities: Vec::new(),
             auth_methods: Vec::new(),
             elapsed_ms: elapsed.as_millis() as u64,
+            session_supported: false,
+            profile_save_supported: false,
         }
+    }
+
+    fn with_transport_support(mut self, transport: AgentTransport) -> Self {
+        self.session_supported = transport.supports_session();
+        self.profile_save_supported = transport.supports_profile_save();
+        self
     }
 }
 
@@ -113,6 +124,7 @@ pub fn test_agent_connection(
     ephemeral_credential: Option<String>,
 ) -> AgentConnectionResult {
     let started = Instant::now();
+    let transport = profile.transport;
     let profile = match super::prepare_loaded_profile(profile, true) {
         Ok(profile) => profile,
         Err(message) => {
@@ -120,7 +132,8 @@ pub fn test_agent_connection(
                 AgentConnectionStatus::InvalidProfile,
                 message.to_string(),
                 started.elapsed(),
-            );
+            )
+            .with_transport_support(transport);
         }
     };
     let credential = match resolve_credential(&profile, ephemeral_credential) {
@@ -130,7 +143,8 @@ pub fn test_agent_connection(
                 AgentConnectionStatus::CredentialStore,
                 message,
                 started.elapsed(),
-            );
+            )
+            .with_transport_support(transport);
         }
     };
     let result = match profile.transport {
@@ -139,9 +153,10 @@ pub fn test_agent_connection(
         AgentTransport::Cli => test_generic_cli(&profile, credential.as_deref(), started),
     };
     match result {
-        Ok(result) => result,
+        Ok(result) => result.with_transport_support(transport),
         Err(failure) => {
             AgentConnectionResult::failure(failure.status, failure.message, started.elapsed())
+                .with_transport_support(transport)
         }
     }
 }
@@ -483,6 +498,8 @@ fn parse_initialize_response(
         capabilities,
         auth_methods,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        session_supported: false,
+        profile_save_supported: false,
     })
 }
 
@@ -572,6 +589,8 @@ fn test_generic_cli(
         capabilities: Vec::new(),
         auth_methods: Vec::new(),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        session_supported: false,
+        profile_save_supported: false,
     })
 }
 
@@ -893,6 +912,11 @@ mod tests {
         assert!(result.success, "{}", result.message);
         assert_eq!(result.agent_name.as_deref(), Some("HTTP Fixture"));
         assert_eq!(result.protocol_version, Some(1));
+        assert!(
+            !result.session_supported,
+            "HTTP connection success must remain diagnostic-only"
+        );
+        assert!(!result.profile_save_supported);
     }
 
     #[test]

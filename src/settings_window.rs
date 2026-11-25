@@ -443,6 +443,15 @@ fn environment_text(environment: &[AgentEnvironmentVariable]) -> String {
         .join("\n")
 }
 
+fn agent_transport_choice_label(transport: AgentTransport) -> String {
+    let capability = transport.capabilities();
+    if capability.profile_save_supported {
+        capability.label
+    } else {
+        format!("{}（仅测试）", capability.label)
+    }
+}
+
 fn agent_connection_target(profile: &AgentProfile) -> String {
     if profile.transport == AgentTransport::AcpHttp {
         profile
@@ -876,7 +885,9 @@ impl SettingsWindow {
             self.agent_config
                 .profiles
                 .iter()
-                .filter(|candidate| candidate.id != profile.id)
+                .filter(|candidate| {
+                    candidate.id != profile.id && candidate.transport.can_be_default()
+                })
                 .cloned()
                 .collect()
         } else {
@@ -1277,7 +1288,7 @@ impl SettingsWindow {
         let add_cli = Button::new("agent-add-cli")
             .small()
             .outline()
-            .label("使用 CLI 预设")
+            .label("测试通用 CLI")
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_new_agent(AgentTransport::Cli, window, cx);
             }))
@@ -1291,7 +1302,7 @@ impl SettingsWindow {
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(
-                            "Agent 由外部进程提供。Kite 只保存接入信息、工作目录策略和权限摘要。",
+                            "只有 ACP / JSON-RPC stdio 可保存并启动会话；ACP HTTP 与通用 CLI 仅用于连接测试。",
                         ),
                 )
                 .child(h_flex().justify_end().gap_2().child(add_cli).child(add_acp)),
@@ -1350,6 +1361,32 @@ impl SettingsWindow {
             content = content.child(self.render_agent_delete_prompt(pending, cx));
         }
 
+        if !self.agent_config.profiles.is_empty() && self.agent_config.default_profile_id.is_none()
+        {
+            content = content.child(
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(cx.theme().warning.opacity(0.45))
+                    .bg(cx.theme().warning.opacity(0.07))
+                    .p_3()
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size_4()
+                            .text_color(cx.theme().warning),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(cx.theme().warning)
+                            .child("当前没有可运行的默认 Agent。请编辑一个配置并将接入方式改为 ACP / JSON-RPC stdio。"),
+                    ),
+            );
+        }
+
         if self.agent_config.profiles.is_empty() {
             content = content.child(
                 v_flex()
@@ -1383,7 +1420,7 @@ impl SettingsWindow {
                             .text_sm()
                             .line_height(relative(1.4))
                             .text_color(cx.theme().muted_foreground)
-                            .child("添加一个 ACP Agent，或先用通用 CLI 预设验证启动命令。Kite 不会扫描或导入其他工具的配置。"),
+                            .child("添加一个 ACP / JSON-RPC stdio Agent。ACP HTTP 和通用 CLI 可从上方按钮进入仅测试模式；Kite 不会扫描或导入其他工具的配置。"),
                     )
                     .child(
                         h_flex()
@@ -1400,7 +1437,7 @@ impl SettingsWindow {
                             .child(
                                 Button::new("agent-empty-preset")
                                     .outline()
-                                    .label("使用预设")
+                                    .label("测试通用 CLI")
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         this.open_new_agent(AgentTransport::Cli, window, cx);
                                     })),
@@ -1726,7 +1763,7 @@ impl SettingsWindow {
                                             )
                                             .child(self.agent_badge("默认", cx.theme().primary))
                                             .child(self.agent_badge(
-                                                profile.transport.label(),
+                                                profile.transport.display_label(),
                                                 cx.theme().muted_foreground,
                                             )),
                                     )
@@ -1795,9 +1832,12 @@ impl SettingsWindow {
                                         this.child(self.agent_badge("默认", cx.theme().primary))
                                     })
                                     .child(self.agent_badge(
-                                        profile.transport.label(),
+                                        profile.transport.display_label(),
                                         SettingsPage::Agent.tint(),
-                                    )),
+                                    ))
+                                    .when(!profile.transport.supports_session(), |this| {
+                                        this.child(self.agent_badge("仅测试", cx.theme().warning))
+                                    }),
                             )
                             .child(
                                 div()
@@ -1865,21 +1905,23 @@ impl SettingsWindow {
                                     },
                                 )),
                             )
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "agent-duplicate-{}",
-                                    profile.id
-                                )))
-                                .small()
-                                .ghost()
-                                .label("复制")
-                                .on_click(cx.listener(
-                                    move |this, _: &ClickEvent, window, cx| {
-                                        this.duplicate_agent(&duplicate_id, window, cx);
-                                    },
-                                )),
-                            )
-                            .when(!is_default, |this| {
+                            .when(profile.transport.supports_profile_save(), |this| {
+                                this.child(
+                                    Button::new(SharedString::from(format!(
+                                        "agent-duplicate-{}",
+                                        profile.id
+                                    )))
+                                    .small()
+                                    .ghost()
+                                    .label("复制")
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            this.duplicate_agent(&duplicate_id, window, cx);
+                                        },
+                                    )),
+                                )
+                            })
+                            .when(!is_default && profile.transport.can_be_default(), |this| {
                                 this.child(
                                     Button::new(SharedString::from(format!(
                                         "agent-default-{}",
@@ -1938,7 +1980,7 @@ impl SettingsWindow {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(if self.agent_config.profiles.len() > 1 {
-                        "请选择新的默认 Agent。"
+                        "删除后将没有可运行的默认 Agent；其余配置仅用于连接测试。"
                     } else {
                         "这会让 Agent 列表变为空。"
                     }),
@@ -2026,6 +2068,9 @@ impl SettingsWindow {
         } else {
             format!("{} · {}", result.message, details.join(" · "))
         };
+        let session_notice = (!result.session_supported).then_some(
+            "此接入方式仅用于连接测试，无论结果如何都不能启动 Agent 会话；请改用 ACP / JSON-RPC stdio。",
+        );
         v_flex()
             .gap_1()
             .rounded(px(8.))
@@ -2066,6 +2111,15 @@ impl SettingsWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child(detail),
             )
+            .when_some(session_notice, |this, notice| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .line_height(relative(1.35))
+                        .text_color(cx.theme().warning)
+                        .child(notice),
+                )
+            })
             .into_any_element()
     }
 
@@ -2117,7 +2171,7 @@ impl SettingsWindow {
                 Button::new("agent-transport-acp")
                     .ghost()
                     .compact()
-                    .label("ACP / JSON-RPC")
+                    .label(agent_transport_choice_label(AgentTransport::AcpStdio))
                     .selected(editor.transport == AgentTransport::AcpStdio)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(editor) = this.agent_editor.as_mut() {
@@ -2131,7 +2185,7 @@ impl SettingsWindow {
                 Button::new("agent-transport-http")
                     .ghost()
                     .compact()
-                    .label("ACP HTTP")
+                    .label(agent_transport_choice_label(AgentTransport::AcpHttp))
                     .selected(editor.transport == AgentTransport::AcpHttp)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(editor) = this.agent_editor.as_mut() {
@@ -2145,7 +2199,7 @@ impl SettingsWindow {
                 Button::new("agent-transport-cli")
                     .ghost()
                     .compact()
-                    .label("通用 CLI")
+                    .label(agent_transport_choice_label(AgentTransport::Cli))
                     .selected(editor.transport == AgentTransport::Cli)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(editor) = this.agent_editor.as_mut() {
@@ -2265,7 +2319,7 @@ impl SettingsWindow {
             self.agent_field(
                 "agent-field-transport",
                 "接入方式",
-                Some("ACP 会执行 initialize 握手；通用 CLI 只验证进程能否启动。"),
+                Some("只有 ACP / JSON-RPC stdio 可保存并启动会话；ACP HTTP 和通用 CLI 仅执行连接测试。"),
                 transport_choices,
                 cx,
             ),
@@ -2560,7 +2614,11 @@ impl SettingsWindow {
             .child(self.section("能力声明", capability_rows, None, cx))
             .child(self.section("凭据边界", credential_rows, None, cx))
             .child(self.section("高级", advanced_rows, None, cx));
-        if editor.transport == AgentTransport::Cli {
+        if !editor.transport.supports_session() {
+            let capability = editor.transport.capabilities();
+            let note = capability
+                .limitation
+                .unwrap_or_else(|| capability.summary.clone());
             body = body.child(
                 div()
                     .rounded(px(10.))
@@ -2571,7 +2629,7 @@ impl SettingsWindow {
                     .text_xs()
                     .line_height(relative(1.4))
                     .text_color(cx.theme().warning)
-                    .child("通用 CLI 不是 ACP 协议会话。Kite 只能验证可执行文件能否启动；文件写入、命令和网络权限均由 Agent 自身管理。"),
+                    .child(format!("{} {}", capability.summary, note)),
             );
         }
         if let Some(result) = editor.test_result.clone() {
@@ -2675,7 +2733,7 @@ impl SettingsWindow {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("失败测试不会修改已保存配置。关闭或取消时若有未保存修改，Kite 会先确认。"),
+                                    .child("仅 ACP / JSON-RPC stdio 可保存为可运行配置；其他接入方式只执行连接测试。"),
                             )
                             .child(
                                 h_flex()
@@ -2693,7 +2751,7 @@ impl SettingsWindow {
                                             .outline()
                                             .label(if editor.testing { "测试中…" } else { "测试连接" })
                                             .loading(editor.testing)
-                                            .disabled(editor.testing)
+                                            .disabled(editor.testing || !editor.transport.supports_connection_test())
                                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                                 this.test_agent_editor(cx);
                                             })),
@@ -2702,6 +2760,7 @@ impl SettingsWindow {
                                         Button::new("agent-editor-save")
                                             .primary()
                                             .label("保存")
+                                            .disabled(!editor.transport.supports_profile_save())
                                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                                 this.save_agent_editor(window, cx);
                                             })),

@@ -99,6 +99,7 @@ final class KiteAgentPanelModel: ObservableObject {
     @Published private(set) var presentationToken = 0
     @Published private(set) var notice: String?
     @Published private(set) var profile: AgentProfile?
+    @Published private(set) var profileSupportsSession = false
     @Published private(set) var output = ""
     @Published private(set) var errorMessage: String?
     @Published private(set) var permissionRequests: [AgentPermissionRequest] = []
@@ -149,11 +150,11 @@ final class KiteAgentPanelModel: ObservableObject {
     }
 
     var canSend: Bool {
-        profile != nil && hasContext && phase != .loading && phase != .running
+        profile != nil && profileSupportsSession && hasContext && phase != .loading && phase != .running
     }
 
     var hasConfiguredAgent: Bool {
-        profile != nil
+        profile != nil && profileSupportsSession
     }
 
     var statusLabel: String {
@@ -181,15 +182,13 @@ final class KiteAgentPanelModel: ObservableObject {
     }
 
     func refreshAgentProfiles(core: KiteCore) {
-        let snapshot = core.agentConfig()
-        if let id = snapshot.defaultProfileId,
-           let profile = snapshot.profiles.first(where: { $0.id == id }) {
-            self.profile = profile
-        } else {
-            profile = snapshot.profiles.first
-        }
+        let selected = core.agentDefaultProfile()
+        self.profile = selected
+        self.profileSupportsSession = selected.map {
+            core.agentProfileCanStartSession(profile: $0)
+        } ?? false
         if phase == .unconfigured || phase == .ended {
-            phase = profile == nil ? .unconfigured : .ended
+            phase = profileSupportsSession ? .ended : .unconfigured
         }
     }
 
@@ -327,9 +326,9 @@ final class KiteAgentPanelModel: ObservableObject {
     }
 
     func sendPrompt() {
-        guard let profile, hasContext else {
+        guard let profile, profileSupportsSession, hasContext else {
             phase = .unconfigured
-            notice = "请先配置 Agent 并准备上下文"
+            notice = "请先配置可运行的 ACP / JSON-RPC stdio Agent，并准备上下文"
             return
         }
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -867,9 +866,9 @@ private struct KiteAgentPanelContent: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Color.accentColor)
             VStack(alignment: .leading, spacing: 3) {
-                Text("尚未配置 Agent")
+                Text("尚未配置可运行的 Agent")
                     .font(.system(size: 11.5, weight: .semibold))
-                Text("上下文和提示已经准备好。接入 Agent 后才会启用发送和流式输出。")
+                Text("上下文和提示已经准备好。请保存一个 ACP / JSON-RPC stdio Profile 后发送；仅测试传输不会启用会话。")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

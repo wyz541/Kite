@@ -1,5 +1,8 @@
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -170,4 +173,92 @@ fn mcp_read_only_and_confirmation_guards_are_enforced() {
         confirmation[1]["result"]["structuredContent"]["error"]["code"],
         "confirmation_required"
     );
+}
+
+#[test]
+fn mcp_uses_the_same_unsupported_transport_error_as_cli() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "kite-mcp-unsupported-transport-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).expect("create temp directory");
+    let config: PathBuf = root.join("agent.json");
+    fs::write(
+        &config,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "profiles": [{
+                "id": "http-probe",
+                "name": "HTTP Probe",
+                "transport": "acp_http",
+                "endpoint": "http://127.0.0.1:9/acp"
+            }],
+            "default_profile_id": "http-probe"
+        }))
+        .expect("serialize config"),
+    )
+    .expect("write config");
+
+    let responses = run_server_with_profile(
+        &config,
+        vec![
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": "2024-11-05" }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "agent_session_start",
+                    "arguments": {
+                        "profile_id": "http-probe",
+                        "working_directory": "."
+                    },
+                    "_meta": { "confirmed": true }
+                }
+            }),
+        ],
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let error = &responses[1]["result"]["structuredContent"]["error"];
+    assert_eq!(responses[1]["result"]["isError"], true);
+    assert_eq!(error["kind"], "precondition_failed");
+    assert_eq!(error["code"], "unsupported_transport");
+    assert_eq!(error["details"]["transport"], "acp_http");
+    assert!(
+        error["recovery"]
+            .as_str()
+            .is_some_and(|value| { value.contains("ACP / JSON-RPC stdio") })
+    );
+}
+
+fn run_server_with_profile(config: &PathBuf, requests: Vec<Value>) -> Vec<Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kite-mcp"))
+        .env("KITE_AGENT_PROFILE_PATH", config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn kite-mcp");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write request");
+    }
+    drop(stdin);
+    let responses = BufReader::new(stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(&line.expect("response line")).expect("json"))
+        .collect::<Vec<_>>();
+    assert!(child.wait().expect("server exit").success());
+    responses
 }

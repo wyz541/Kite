@@ -455,7 +455,7 @@ fn start_agent(
     process_slot: &Arc<OnceLock<Arc<ProcessHandle>>>,
 ) -> Result<ActiveAgent, AgentError> {
     let started = Instant::now();
-    let mut transport = transport_for(config.transport);
+    let mut transport = transport_for(config.transport)?;
     let handshake = transport.start(
         config,
         dispatcher.clone(),

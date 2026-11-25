@@ -70,10 +70,7 @@ impl AgentPanel {
                 }
             },
         );
-        let profile = agent_profiles
-            .default_profile()
-            .cloned()
-            .or_else(default_agent_profile);
+        let profile = agent_profiles.default_profile().cloned();
         let phase = if profile.is_some() {
             AgentSessionPhase::Ended
         } else {
@@ -209,10 +206,7 @@ impl AgentPanel {
         agent_profiles: AgentProfileSnapshot,
         cx: &mut Context<Self>,
     ) {
-        self.profile = agent_profiles
-            .default_profile()
-            .cloned()
-            .or_else(default_agent_profile);
+        self.profile = agent_profiles.default_profile().cloned();
         if !matches!(
             self.phase,
             AgentSessionPhase::Loading | AgentSessionPhase::Running
@@ -259,7 +253,10 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.stop_runtime();
-        self.profile = default_agent_profile();
+        self.profile = AgentProfileStore::new()
+            .snapshot()
+            .default_profile()
+            .cloned();
         self.phase = if self.profile.is_some() {
             AgentSessionPhase::Ended
         } else {
@@ -1451,15 +1448,6 @@ impl Render for AgentPanel {
                     .child(content),
             )
     }
-}
-
-fn default_agent_profile() -> Option<AgentProfile> {
-    let store = AgentProfileStore::new();
-    store
-        .default_profile()
-        .ok()
-        .flatten()
-        .or_else(|| store.list_profiles().ok()?.into_iter().next())
 }
 
 fn now_unix_ms() -> u64 {
