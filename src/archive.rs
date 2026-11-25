@@ -995,6 +995,21 @@ mod tests {
         fs::remove_dir_all(root).expect("cleanup");
     }
 
+    #[test]
+    fn preserves_plausible_cp437_names_when_raw_bytes_also_form_gbk() {
+        let root = temporary_root("ambiguous-cp437");
+        let archive_path = zip_with_raw_entry_name(&root, b"\x82\x85.txt", b"hello");
+
+        let destination = root.join("extracted");
+        extract(&archive_path, &destination).expect("extract CP437 entry");
+        assert_eq!(
+            fs::read(destination.join("éà.txt")).expect("read CP437 entry"),
+            b"hello"
+        );
+        assert!(!destination.join("倕.txt").exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
     fn zip_with_raw_entry_name(root: &Path, raw_name: &[u8], content: &[u8]) -> PathBuf {
         fs::create_dir_all(root).expect("create fixture root");
         let archive_path = root.join("legacy.zip");
