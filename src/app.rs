@@ -1577,11 +1577,16 @@ impl KiteApp {
                 AgentPath::new(path, is_dir)
             })
             .collect::<Vec<_>>();
-        match AgentLaunchRequest::new(
+        let Some(profile) = self.agent_profiles.default_profile() else {
+            self.notice = Some("请先在 Agent 设置中添加并保存默认 Agent".into());
+            self.open_agent_settings(window, cx);
+            return;
+        };
+        match AgentLaunchRequest::new_for_profile(
             command,
             action.target.clone(),
             agent_paths,
-            Some(action.working_directory.clone()),
+            profile,
         ) {
             Ok(request) => {
                 self.show_preview = true;
@@ -1616,9 +1621,8 @@ impl KiteApp {
         if paths.is_empty() {
             return;
         }
-        let current_directory = self.current_dir.clone();
         self.agent_panel.update(cx, |panel, cx| {
-            panel.replace_followed_selection(paths, Some(current_directory), cx);
+            panel.replace_followed_selection(paths, cx);
         });
     }
 

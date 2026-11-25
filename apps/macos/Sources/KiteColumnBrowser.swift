@@ -98,14 +98,12 @@ struct KiteColumnBrowser: View {
                             }
                             .onChange(of: model.selectedColumnEntries.map(\.path)) { _ in
                                 agent.updateFollowedSelection(
-                                    entries: model.selectedColumnEntries,
-                                    currentDirectory: model.currentPath
+                                    entries: model.selectedColumnEntries
                                 )
                             }
                             .onChange(of: agent.contextMode) { _ in
                                 agent.updateFollowedSelection(
-                                    entries: model.selectedColumnEntries,
-                                    currentDirectory: model.currentPath
+                                    entries: model.selectedColumnEntries
                                 )
                             }
                             .onChange(of: showsColumnDetails) { _ in
@@ -2129,8 +2127,7 @@ private struct KiteEntryMenu: View {
         agent.present(
             action: action,
             primary: entry.path,
-            entries: operationEntries,
-            workingDirectory: pasteDirectory
+            entries: operationEntries
         )
     }
 }

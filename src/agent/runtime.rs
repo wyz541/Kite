@@ -13,8 +13,10 @@ use crate::agent::diagnostics::record_agent_event;
 use crate::agent::process::{spawn_agent_process, terminate_agent_process};
 use crate::agent::redact::{Redactor, StreamingRedactor, is_sensitive_environment_key};
 use crate::agent::restore::{AgentMessage, AgentMessageRole};
-use crate::agent::{AgentEnvironmentVariable, AgentProfile, validate_and_normalize_profile};
-
+use crate::agent::{
+    AgentEnvironmentVariable, AgentProfile, AgentWorkingDirectoryStatus,
+    resolve_working_directory_for_context, validate_and_normalize_profile,
+};
 const MAX_ACP_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RUNTIME_EVENTS: usize = 4_096;
 const MAX_RESTORED_CONTEXT_BYTES: usize = 128 * 1024;
@@ -338,6 +340,24 @@ impl AgentRuntime {
                 ),
             });
         }
+        let requested_working_directory = PathBuf::from(working_directory);
+        let resolution = resolve_working_directory_for_context(
+            &profile,
+            &context_paths,
+            Some(&requested_working_directory),
+        );
+        if resolution.status != AgentWorkingDirectoryStatus::Ready {
+            return Err(AgentRuntimeError::from(
+                resolution
+                    .message
+                    .unwrap_or_else(|| "Agent 工作目录不可用".to_string()),
+            ));
+        }
+        let cwd = PathBuf::from(
+            resolution
+                .path
+                .ok_or_else(|| AgentRuntimeError::from("Agent 工作目录解析失败"))?,
+        );
         let (runtime_profile, redactor) =
             runtime_profile_with_credential(&profile).map_err(AgentRuntimeError::from)?;
         let shared = RuntimeShared::new(redactor);
@@ -346,7 +366,6 @@ impl AgentRuntime {
             *commands = Some(sender);
         }
         let worker_shared = shared.clone();
-        let cwd = PathBuf::from(working_directory);
         std::thread::Builder::new()
             .name(format!("kite-agent-{}", profile.id))
             .spawn(move || {

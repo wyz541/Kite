@@ -18,8 +18,8 @@ use kite_core::agent::{
     AgentContext, AgentContextMode, AgentConversation, AgentLaunchRequest, AgentMessage,
     AgentMessageRole, AgentPath, AgentPermissionDecision, AgentProfile, AgentProfileSnapshot,
     AgentProfileStore, AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase,
-    default_working_directory, load_agent_sessions, new_agent_conversation_id,
-    save_agent_conversation,
+    AgentWorkingDirectoryStatus, WorkingDirectoryPolicy, load_agent_sessions,
+    new_agent_conversation_id, save_agent_conversation,
 };
 use kite_core::core_api::{CoreClient, CoreRequest};
 
@@ -42,6 +42,7 @@ pub(crate) struct AgentPanel {
     auto_follow_output: bool,
     output_scroll: ScrollHandle,
     saved_terminal_snapshot: bool,
+    working_directory_selection: Option<PathBuf>,
     window_size: (u32, u32),
     poll_task: Task<()>,
     _prompt_subscription: Subscription,
@@ -64,9 +65,9 @@ impl AgentPanel {
         let prompt_subscription = cx.subscribe_in(
             &prompt_input,
             window,
-            |this, _, event: &InputEvent, _window, cx| {
+            |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    this.send_prompt(cx);
+                    this.send_prompt(window, cx);
                 }
             },
         );
@@ -95,6 +96,7 @@ impl AgentPanel {
             auto_follow_output: true,
             output_scroll: ScrollHandle::new(),
             saved_terminal_snapshot: false,
+            working_directory_selection: None,
             window_size: (960, 760),
             poll_task: Task::ready(()),
             _prompt_subscription: prompt_subscription,
@@ -151,7 +153,7 @@ impl AgentPanel {
                 .unwrap_or_default(),
             cx,
         );
-        let missing_paths = restore.working_directory_missing || !restore.missing_paths.is_empty();
+        let missing_paths = !restore.missing_paths.is_empty();
         if conversation.context_paths.is_empty() {
             self.context = None;
             self.phase = if missing_paths {
@@ -175,16 +177,20 @@ impl AgentPanel {
             .map(|path| AgentPath::new(path.clone(), Path::new(path).is_dir()))
             .collect::<Vec<_>>();
         let primary_path = paths[0].path.clone();
-        match AgentContext::new(
-            &primary_path,
-            paths,
-            Some(PathBuf::from(&conversation.working_directory)),
-        ) {
+        let Some(profile) = self.profile.as_ref() else {
+            return;
+        };
+        match AgentContext::new_for_profile(&primary_path, paths, profile, None) {
             Ok(context) => {
+                let working_directory_message = context.working_directory_message.clone();
+                let working_directory_ready = context.has_resolved_working_directory();
                 self.context = Some(context);
                 if missing_paths {
                     self.phase = AgentSessionPhase::Error;
                     self.notice = Some("恢复的 Agent 会话包含失效路径；可移除后重新选择".into());
+                } else if !working_directory_ready {
+                    self.phase = AgentSessionPhase::Error;
+                    self.notice = working_directory_message.map(Into::into);
                 } else {
                     self.phase = AgentSessionPhase::Ended;
                     self.notice = Some("已恢复上次 Agent 会话".into());
@@ -207,14 +213,29 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.profile = agent_profiles.default_profile().cloned();
+        let selected_working_directory = self.working_directory_selection.clone();
+        if let (Some(profile), Some(context)) = (self.profile.as_ref(), self.context.as_mut()) {
+            context.apply_profile_policy(profile, selected_working_directory.as_deref());
+        }
+        if !self.profile.as_ref().is_some_and(|profile| {
+            matches!(&profile.working_directory, WorkingDirectoryPolicy::Ask)
+        }) {
+            self.working_directory_selection = None;
+        }
         if !matches!(
             self.phase,
             AgentSessionPhase::Loading | AgentSessionPhase::Running
         ) {
-            self.phase = if self.profile.is_some() {
-                AgentSessionPhase::Ended
-            } else {
+            self.phase = if self.profile.is_none() {
                 AgentSessionPhase::Unconfigured
+            } else if self
+                .context
+                .as_ref()
+                .is_some_and(|context| !context.has_resolved_working_directory())
+            {
+                AgentSessionPhase::Error
+            } else {
+                AgentSessionPhase::Ended
             };
         }
         cx.notify();
@@ -263,10 +284,25 @@ impl AgentPanel {
             AgentSessionPhase::Unconfigured
         };
         self.mode = AgentContextMode::Fixed;
+        self.working_directory_selection = None;
         self.context = Some(request.context);
+        self.refresh_context_working_directory();
         self.sent_prompt.clear();
         self.saved_terminal_snapshot = false;
         self.notice = None;
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|context| !context.has_resolved_working_directory())
+        {
+            self.phase = AgentSessionPhase::Error;
+            self.notice = self
+                .context
+                .as_ref()
+                .and_then(|context| context.working_directory_message.clone())
+                .or_else(|| Some("Agent 工作目录不可用".to_string()))
+                .map(Into::into);
+        }
         self.snapshot = AgentRuntimeSnapshot::default();
         self.conversation_id = new_agent_conversation_id();
         self.history.clear();
@@ -285,24 +321,33 @@ impl AgentPanel {
     pub(crate) fn replace_followed_selection(
         &mut self,
         paths: Vec<AgentPath>,
-        current_directory: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         if !self.follows_selection() || paths.is_empty() {
             return;
         }
         let primary = paths[0].clone();
-        let working_directory = if primary.is_dir {
-            primary.path.clone()
-        } else {
-            current_directory
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or_else(|| default_working_directory(&primary.path))
+        let Some(profile) = self.profile.clone() else {
+            self.phase = AgentSessionPhase::Unconfigured;
+            self.notice = Some("请先在设置中配置 Agent".into());
+            cx.notify();
+            return;
         };
-        match AgentContext::new(&primary.path, paths, Some(working_directory)) {
+        self.working_directory_selection = None;
+        match AgentContext::new_for_profile(&primary.path, paths, &profile, None) {
             Ok(context) => {
+                let working_directory_message = context.working_directory_message.clone();
+                let working_directory_ready = context.has_resolved_working_directory();
                 self.context = Some(context);
-                self.notice = Some("Agent 上下文已跟随当前选择".into());
+                self.notice = Some(
+                    if working_directory_ready {
+                        "Agent 上下文已跟随当前选择".into()
+                    } else {
+                        working_directory_message
+                            .unwrap_or_else(|| "Agent 工作目录不可用".to_string())
+                    }
+                    .into(),
+                );
             }
             Err(error) => {
                 self.context = None;
@@ -326,15 +371,27 @@ impl AgentPanel {
             });
         } else {
             let primary = paths[0].clone();
-            let working_directory = if primary.is_dir {
-                primary.path.clone()
-            } else {
-                default_working_directory(&primary.path)
+            let Some(profile) = self.profile.clone() else {
+                self.phase = AgentSessionPhase::Unconfigured;
+                self.notice = Some("请先在设置中配置 Agent".into());
+                cx.notify();
+                return;
             };
-            match AgentContext::new(&primary.path, paths, Some(working_directory)) {
+            self.working_directory_selection = None;
+            match AgentContext::new_for_profile(&primary.path, paths, &profile, None) {
                 Ok(context) => {
+                    let working_directory_message = context.working_directory_message.clone();
+                    let working_directory_ready = context.has_resolved_working_directory();
                     self.context = Some(context);
-                    self.notice = Some("已添加上下文路径".into());
+                    self.notice = Some(
+                        if working_directory_ready {
+                            "已添加上下文路径".into()
+                        } else {
+                            working_directory_message
+                                .unwrap_or_else(|| "Agent 工作目录不可用".to_string())
+                        }
+                        .into(),
+                    );
                 }
                 Err(error) => {
                     self.phase = AgentSessionPhase::Error;
@@ -345,13 +402,33 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn remove_path(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let Some(context) = self.context.as_mut() else {
+    fn refresh_context_working_directory(&mut self) {
+        let Some(profile) = self.profile.clone() else {
             return;
         };
-        if context.remove(path) && context.paths.is_empty() {
+        let selected_working_directory = self.working_directory_selection.clone();
+        if let Some(context) = self.context.as_mut() {
+            context.apply_profile_policy(&profile, selected_working_directory.as_deref());
+        }
+    }
+
+    fn remove_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let primary_removed;
+        let context_empty;
+        {
+            let Some(context) = self.context.as_mut() else {
+                return;
+            };
+            primary_removed = context.primary_path == path;
+            context.remove(path);
+            context_empty = context.paths.is_empty();
+        }
+        if context_empty {
             self.context = None;
             self.phase = AgentSessionPhase::Empty;
+        } else if primary_removed {
+            self.working_directory_selection = None;
+            self.refresh_context_working_directory();
         }
         self.notice = Some("已从 Agent 上下文移除".into());
         cx.notify();
@@ -425,19 +502,19 @@ impl AgentPanel {
         }
     }
 
-    fn send_prompt(&mut self, cx: &mut Context<Self>) {
+    fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.prompt_input.read(cx).value().trim().to_string();
-        self.start_prompt(prompt, cx);
+        self.start_prompt(prompt, window, cx);
     }
 
-    fn retry_prompt(&mut self, cx: &mut Context<Self>) {
+    fn retry_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.sent_prompt.trim().to_string();
         if prompt.is_empty() {
             self.notice = Some("没有可重试的上一条提示".into());
             cx.notify();
             return;
         }
-        self.start_prompt(prompt, cx);
+        self.start_prompt(prompt, window, cx);
     }
 
     fn can_retry_prompt(&self) -> bool {
@@ -448,7 +525,70 @@ impl AgentPanel {
             )
     }
 
-    fn start_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
+    fn choose_working_directory(
+        &mut self,
+        prompt_to_send: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择 Agent 工作目录".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let selected = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) | Err(_) => None,
+                Ok(Err(error)) => {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.phase = AgentSessionPhase::Error;
+                        this.notice = Some(format!("无法选择工作目录：{error}").into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(path) = selected else {
+                let _ = this.update(cx, |this, cx| {
+                    this.notice = Some("尚未选择工作目录，Agent 未启动".into());
+                    cx.notify();
+                });
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.working_directory_selection = Some(path);
+                this.refresh_context_working_directory();
+                let ready = this
+                    .context
+                    .as_ref()
+                    .is_some_and(AgentContext::has_resolved_working_directory);
+                if ready {
+                    if let Some(prompt) = prompt_to_send {
+                        this.start_prompt(prompt, window, cx);
+                    } else {
+                        if this.phase == AgentSessionPhase::Error {
+                            this.phase = AgentSessionPhase::Ended;
+                        }
+                        this.notice = Some("Agent 工作目录已选择".into());
+                    }
+                } else {
+                    this.phase = AgentSessionPhase::Error;
+                    this.notice = this
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.working_directory_message.clone())
+                        .or_else(|| Some("Agent 工作目录不可用".to_string()))
+                        .map(Into::into);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_prompt(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session_id) = self.session_id.clone()
             && let Ok(snapshot) = self.core_client.session_snapshot(&session_id)
             && !matches!(
@@ -466,14 +606,13 @@ impl AgentPanel {
         if self.session_id.is_some() {
             self.stop_runtime();
         }
+        self.profile = AgentProfileStore::new()
+            .snapshot()
+            .default_profile()
+            .cloned();
         let Some(profile) = self.profile.clone() else {
             self.phase = AgentSessionPhase::Unconfigured;
             self.notice = Some("请先在设置中配置 Agent".into());
-            cx.notify();
-            return;
-        };
-        let Some(context) = self.context.clone() else {
-            self.notice = Some("请先选择文件或文件夹作为上下文".into());
             cx.notify();
             return;
         };
@@ -481,6 +620,31 @@ impl AgentPanel {
             self.notice = Some("提示不能为空".into());
             cx.notify();
             return;
+        }
+        self.refresh_context_working_directory();
+        let Some(context) = self.context.clone() else {
+            self.notice = Some("请先选择文件或文件夹作为上下文".into());
+            cx.notify();
+            return;
+        };
+        match context.working_directory_status {
+            AgentWorkingDirectoryStatus::Ready => {}
+            AgentWorkingDirectoryStatus::NeedsSelection
+                if matches!(&profile.working_directory, WorkingDirectoryPolicy::Ask) =>
+            {
+                self.choose_working_directory(Some(prompt), window, cx);
+                return;
+            }
+            AgentWorkingDirectoryStatus::NeedsSelection | AgentWorkingDirectoryStatus::Invalid => {
+                self.phase = AgentSessionPhase::Error;
+                self.notice = context
+                    .working_directory_message
+                    .clone()
+                    .or_else(|| Some("Agent 工作目录不可用".to_string()))
+                    .map(Into::into);
+                cx.notify();
+                return;
+            }
         }
         let context_paths = context
             .paths
@@ -665,6 +829,9 @@ impl AgentPanel {
         let Some(context) = self.context.as_ref() else {
             return;
         };
+        if !context.has_resolved_working_directory() {
+            return;
+        }
         let now = now_unix_ms();
         let mut messages = self.history.clone();
         let user_message_id = format!("{}:user:{}", self.conversation_id, self.turn_id);
@@ -809,11 +976,24 @@ impl AgentPanel {
             .as_ref()
             .map(|profile| profile.permission.label().to_string())
             .unwrap_or_else(|| "只读".to_string());
-        let working_directory = self
+        let (working_directory, working_directory_color) = match self.context.as_ref() {
+            Some(context) if context.has_resolved_working_directory() => (
+                context.working_directory.display().to_string(),
+                cx.theme().muted_foreground,
+            ),
+            Some(context)
+                if context.working_directory_status
+                    == AgentWorkingDirectoryStatus::NeedsSelection =>
+            {
+                ("尚未选择（发送前选择）".to_string(), cx.theme().warning)
+            }
+            Some(_) => ("不可用".to_string(), cx.theme().danger),
+            None => ("—".to_string(), cx.theme().muted_foreground),
+        };
+        let working_directory_message = self
             .context
             .as_ref()
-            .map(|context| context.working_directory.display().to_string())
-            .unwrap_or_else(|| "—".to_string());
+            .and_then(|context| context.working_directory_message.clone());
         v_flex()
             .id("agent-status")
             .w_full()
@@ -881,9 +1061,18 @@ impl AgentPanel {
                         div()
                             .text_xs()
                             .font_family("monospace")
+                            .text_color(working_directory_color)
                             .truncate()
                             .child(working_directory),
-                    ),
+                    )
+                    .when_some(working_directory_message, |this, message| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(message),
+                        )
+                    }),
             )
             .when_some(self.snapshot.error.clone(), |this, error| {
                 this.child(div().text_xs().text_color(cx.theme().danger).child(error))
@@ -1279,6 +1468,11 @@ impl AgentPanel {
         let active =
             self.phase == AgentSessionPhase::Loading || self.phase == AgentSessionPhase::Running;
         let configured = self.profile.is_some();
+        let ask_needs_selection = self.profile.as_ref().is_some_and(|profile| {
+            matches!(&profile.working_directory, WorkingDirectoryPolicy::Ask)
+        }) && self.context.as_ref().is_some_and(|context| {
+            context.working_directory_status == AgentWorkingDirectoryStatus::NeedsSelection
+        });
         v_flex()
             .id("agent-prompt")
             .w_full()
@@ -1333,7 +1527,23 @@ impl AgentPanel {
                                 .outline()
                                 .icon(IconName::RotateCcw)
                                 .label("重试")
-                                .on_click(cx.listener(|this, _, _, cx| this.retry_prompt(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.retry_prompt(window, cx)
+                                    }),
+                                ),
+                        )
+                    })
+                    .when(ask_needs_selection, |this| {
+                        this.child(
+                            Button::new("agent-choose-working-directory")
+                                .small()
+                                .outline()
+                                .icon(IconName::Folder)
+                                .label("选择目录")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_working_directory(None, window, cx)
+                                })),
                         )
                     })
                     .child(
@@ -1342,7 +1552,9 @@ impl AgentPanel {
                             .primary()
                             .label("发送")
                             .disabled(!configured || self.context.is_none() || active)
-                            .on_click(cx.listener(|this, _, _, cx| this.send_prompt(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.send_prompt(window, cx)),
+                            ),
                     ),
             )
             .into_any_element()

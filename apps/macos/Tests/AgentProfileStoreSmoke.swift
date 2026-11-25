@@ -50,6 +50,48 @@ struct AgentProfileStoreSmoke {
         let created = try store.createProfile(profile: profile)
         precondition(!created.id.isEmpty)
 
+        let core = KiteCore()
+        let selectedResolution = core.resolveAgentWorkingDirectory(
+            profile: created,
+            primaryPath: root.path,
+            selectedWorkingDirectory: nil
+        )
+        precondition(selectedResolution.status == .ready)
+        let resolvedRoot = URL(fileURLWithPath: root.path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        let resolvedSelected = URL(fileURLWithPath: selectedResolution.path ?? "")
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        precondition(resolvedSelected == resolvedRoot)
+
+        let askProfile = AgentProfile(
+            id: created.id,
+            name: created.name,
+            transport: created.transport,
+            executable: created.executable,
+            endpoint: created.endpoint,
+            arguments: created.arguments,
+            environment: created.environment,
+            model: created.model,
+            workingDirectory: .ask,
+            permission: created.permission,
+            timeoutSeconds: created.timeoutSeconds,
+            outputLimitBytes: created.outputLimitBytes,
+            credentialRef: created.credentialRef,
+            credentialEnvVar: created.credentialEnvVar,
+            capabilities: created.capabilities
+        )
+        let askResolution = core.resolveAgentWorkingDirectory(
+            profile: askProfile,
+            primaryPath: root.path,
+            selectedWorkingDirectory: nil
+        )
+        precondition(askResolution.status == .needsSelection)
+        precondition(askResolution.path == nil)
+
         let afterCreate = store.snapshot()
         precondition(afterCreate.profiles.count == 1)
         precondition(afterCreate.defaultProfileId == created.id)

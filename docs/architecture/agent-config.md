@@ -64,7 +64,7 @@ schema 1。高于当前版本的配置不会被覆盖；调用方会收到 `Unkn
 | `arguments` | 明确配置的启动参数，不经过 shell 拼接 |
 | `environment` | 非敏感环境变量；敏感值必须使用 `credential_ref` |
 | `model` | 可选模型名；留空表示沿用 Agent 自身配置 |
-| `working_directory` | `selected_item`、`file_parent`、`repository_root`、`fixed` 或 `ask` |
+| `working_directory` | `selected_item`、`file_parent`、`repository_root`、`fixed` 或 `ask`；真实会话启动前由 Core 统一解析并校验 |
 | `permission` | `read_only`、`confirm_writes` 或 `agent_managed` |
 | `timeout_seconds` | 单次任务超时，范围 1 到 86400 秒 |
 | `output_limit_bytes` | 单次输出上限，范围 1 KiB 到 256 MiB |
@@ -76,6 +76,11 @@ schema 1。高于当前版本的配置不会被覆盖；调用方会收到 `Unkn
 Profile 会将其设为默认值；删除默认 Profile 后优先选择剩余的可运行 Profile，若没有则为
 `None`。旧版本留下的 `acp_http` 或 `cli` Profile 会保留以支持诊断，但不能保存为可运行配置、
 不能设为默认，也不会进入右键菜单或 Agent 栏的可用状态。
+
+`working_directory` 的运行时语义由 Core 统一提供：`selected_item` 对目录使用目录本身、对文件使用父目录；
+`file_parent` 对目录降级为父目录；`repository_root` 在非 Git 仓库报错；`fixed` 每次启动前校验；`ask`
+必须由用户在发送前选择目录。调用方传入的 `working_directory` 只作为 `ask` 的选择结果或用于缺少上下文目标时
+构造解析目标，不能覆盖其他策略。
 
 ## 校验与凭据边界
 

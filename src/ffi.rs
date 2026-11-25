@@ -9,6 +9,7 @@ use crate::agent::{
     self as agent_store, AgentConnectionInfo, AgentContextRepair, AgentConversation,
     AgentDiagnostics, AgentPreset, AgentProfile, AgentProfileSnapshot, AgentProfileStore,
     AgentSessionRestore, AgentSessionStore, AgentStoreLoad, AgentTransportCapabilities,
+    AgentWorkingDirectoryResolution,
 };
 use crate::agent_review::{
     self, AgentAuditOutcome, AgentCommandSuggestion, AgentFileChange, AgentFileChangeDraft,
@@ -1649,6 +1650,19 @@ impl KiteCore {
 
     pub fn agent_session_state(&self) -> AgentSessionRestore {
         agent_store::load_agent_sessions()
+    }
+
+    pub fn resolve_agent_working_directory(
+        &self,
+        profile: AgentProfile,
+        primary_path: String,
+        selected_working_directory: Option<String>,
+    ) -> AgentWorkingDirectoryResolution {
+        agent_store::resolve_profile_working_directory(
+            &profile,
+            Path::new(&primary_path),
+            selected_working_directory.as_deref().map(Path::new),
+        )
     }
 
     pub fn save_agent_conversation(
