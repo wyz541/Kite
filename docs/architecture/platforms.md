@@ -28,6 +28,7 @@ kite_core
   command model
   session store
   agent profiles and ACP session
+  agent session / ACP transport
   UniFFI interface
 
 Windows frontend
@@ -65,6 +66,7 @@ Core 负责以下能力：
 - GitHub Release 检查和版本比较。
 - 平台更新资产选择和 SHA-256 校验。
 - Agent profile、上下文快照和 ACP 会话生命周期。
+- 外部 Agent 会话、JSON-RPC 传输和进程树清理。
 - Agent 诊断脱敏和可选会话恢复。
 
 Rust Core 输出 `rlib`、`staticlib` 和 `cdylib`。
@@ -164,6 +166,9 @@ Swift 使用 UniFFI 记录和对象。
 - 会话读取和保存。
 - 文本文件读取和保存。
 - 更新检查、下载进度和更新包校验。
+- Agent 会话启动、提示词、权限响应、取消和事件订阅。
+
+Agent 会话的协议、超时、错误和清理边界见 [Agent 会话与 ACP 传输](agent-session.md)。
 
 后续接口按功能域增加。
 接口不暴露 GPUI 类型。

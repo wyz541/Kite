@@ -3749,6 +3749,7 @@ dependencies = [
  "ignore",
  "image",
  "keyring",
+ "libc",
  "libloading",
  "markdown",
  "notify",

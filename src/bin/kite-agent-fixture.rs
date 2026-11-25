@@ -12,6 +12,11 @@ fn main() {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
 
+    if scenario == "startup-hang" {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+
     if scenario == "sleeper" {
         thread::sleep(Duration::from_secs(60));
         return;
@@ -36,7 +41,7 @@ fn main() {
                     "jsonrpc": "2.0",
                     "id": message["id"],
                     "result": {
-                        "protocolVersion": 1,
+                        "protocolVersion": if scenario == "old-version" { 0 } else { 1 },
                         "agentCapabilities": {
                             "loadSession": false,
                             "promptCapabilities": {
@@ -134,6 +139,14 @@ fn handle_prompt(
             }));
         }
         "idle" => {
+            thread::sleep(Duration::from_secs(30));
+        }
+        "slow-drip" => loop {
+            send_chunk("tick");
+            thread::sleep(Duration::from_millis(150));
+        },
+        "malformed" => {
+            write_raw("{this is not json}\n");
             thread::sleep(Duration::from_secs(30));
         }
         "oversized" => {
@@ -298,6 +311,12 @@ fn finish_prompt(id: Value, stop_reason: &str) {
             "stopReason": stop_reason
         }
     }));
+}
+
+fn write_raw(line: &str) {
+    let mut stdout = io::stdout().lock();
+    let _ = stdout.write_all(line.as_bytes());
+    let _ = stdout.flush();
 }
 
 fn write_json(value: &Value) {

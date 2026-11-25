@@ -218,6 +218,7 @@ macOS 可与 Finder 共享文件剪贴板。
 | Git Stash、Reset、Revert 与 Cherry-pick | 已支持 | 已支持 |
 | Git 远程、Fetch/Pull/Push、克隆与初始化 | 已支持 | 已支持 |
 | Diff 查看器 | 已支持 | 已支持 |
+| Agent 会话核心 | 已支持 | 已支持 |
 | Agent 设置与预设 | 已支持 | 已支持 |
 | Agent 右键入口 | 已支持 | 已支持 |
 | Agent 对话与任务控制 | 已支持 | 已支持 |

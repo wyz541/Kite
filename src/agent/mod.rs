@@ -1,3 +1,14 @@
+mod acp;
+mod config;
+mod events;
+pub mod model;
+mod redact;
+mod session;
+mod transport;
+
+pub use events::AgentSessionEventSubscription;
+pub use model::*;
+pub use session::AgentSession;
 pub mod capstone_diagnostics;
 pub mod capstone_diagnostics_adapter;
 pub mod connection;

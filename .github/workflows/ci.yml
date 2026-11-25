@@ -11,6 +11,7 @@ on:
       - build.rs
       - .cargo/**
       - src/**
+      - tests/**
       - build.ps1
       - README.md
       - docs/**
@@ -28,6 +29,7 @@ on:
       - build.rs
       - .cargo/**
       - src/**
+      - tests/**
       - build.ps1
       - README.md
       - docs/**
@@ -75,3 +77,6 @@ jobs:
 
       - name: Run Agent fixture contract tests
         run: cargo test --locked --test agent_fixture_protocol
+
+      - name: Run Agent session integration tests
+        run: cargo test --locked --features agent-fixture --test agent_session
