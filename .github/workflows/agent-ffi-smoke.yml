@@ -11,7 +11,10 @@ on:
       - src/agent/**
       - src/ffi.rs
       - src/lib.rs
+      - apps/macos/Sources/KiteAgentPermissionPresentation.swift
+      - apps/macos/Tests/AgentPermissionPresentationSmoke.swift
       - apps/macos/Tests/AgentProfileStoreSmoke.swift
+      - apps/macos/Tests/run-agent-permission-presentation-smoke.sh
       - apps/macos/Tests/run-agent-profile-store-smoke.sh
       - .github/workflows/agent-ffi-smoke.yml
   pull_request:
@@ -24,7 +27,10 @@ on:
       - src/agent/**
       - src/ffi.rs
       - src/lib.rs
+      - apps/macos/Sources/KiteAgentPermissionPresentation.swift
+      - apps/macos/Tests/AgentPermissionPresentationSmoke.swift
       - apps/macos/Tests/AgentProfileStoreSmoke.swift
+      - apps/macos/Tests/run-agent-permission-presentation-smoke.sh
       - apps/macos/Tests/run-agent-profile-store-smoke.sh
       - .github/workflows/agent-ffi-smoke.yml
   workflow_dispatch:
@@ -53,3 +59,6 @@ jobs:
 
       - name: Run Swift agent store smoke test
         run: bash apps/macos/Tests/run-agent-profile-store-smoke.sh
+
+      - name: Run Swift agent permission presentation smoke test
+        run: bash apps/macos/Tests/run-agent-permission-presentation-smoke.sh

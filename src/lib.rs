@@ -1,6 +1,8 @@
 uniffi::setup_scaffolding!();
 
 pub mod agent;
+#[cfg(windows)]
+pub mod agent_permission_ui;
 pub mod agent_review;
 pub mod archive;
 pub mod content_search;

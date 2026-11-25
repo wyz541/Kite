@@ -776,10 +776,11 @@ impl CoreApi {
             "allow_once" => AgentPermissionDecision::AllowOnce,
             "allow_task" => AgentPermissionDecision::AllowTask,
             "reject_once" => AgentPermissionDecision::RejectOnce,
+            "reject_always" => AgentPermissionDecision::RejectAlways,
             "cancel" => AgentPermissionDecision::Cancel,
             other => {
                 return Err(CoreError::invalid_args(format!(
-                    "decision must be allow_once, allow_task, reject_once, or cancel; got {other}"
+                    "decision must be allow_once, allow_task, reject_once, reject_always, or cancel; got {other}"
                 )));
             }
         };
@@ -1209,12 +1210,12 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "agent_session_permission",
-            "Respond to an Agent permission request with allow_once, allow_task, reject_once, or cancel.",
+            "Respond to an Agent permission request with allow_once, allow_task, reject_once, reject_always, or cancel.",
             schema(
                 json!({
                     "session_id": { "type": "string" },
                     "request_id": { "type": "string" },
-                    "decision": { "type": "string", "enum": ["allow_once", "allow_task", "reject_once", "cancel"] }
+                    "decision": { "type": "string", "enum": ["allow_once", "allow_task", "reject_once", "reject_always", "cancel"] }
                 }),
                 &["session_id", "request_id", "decision"],
             ),

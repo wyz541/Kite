@@ -1,6 +1,8 @@
 use std::fmt;
 
-use crate::agent::{AgentEnvironmentVariable, AgentProfile, AgentTransport};
+use crate::agent::{
+    AgentCapabilities, AgentEnvironmentVariable, AgentProfile, AgentTransport, PermissionPolicy,
+};
 
 /// The ACP wire protocol version supported by this client.
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
@@ -28,6 +30,10 @@ pub struct AgentSessionConfig {
     pub shutdown_timeout_ms: u64,
     pub max_frame_bytes: u32,
     pub max_output_bytes: u64,
+    /// Kite-side permission policy applied before an ACP option can be selected.
+    pub permission_policy: PermissionPolicy,
+    /// Profile declarations used by managed policies; not a process sandbox.
+    pub capabilities: AgentCapabilities,
 }
 
 impl AgentSessionConfig {
@@ -66,6 +72,8 @@ impl AgentSessionConfig {
             shutdown_timeout_ms: 2_000,
             max_frame_bytes: 256 * 1024,
             max_output_bytes: profile.output_limit_bytes,
+            permission_policy: profile.permission,
+            capabilities: profile.capabilities.clone(),
         }
     }
 }
@@ -85,6 +93,8 @@ impl Default for AgentSessionConfig {
             shutdown_timeout_ms: 2_000,
             max_frame_bytes: 256 * 1024,
             max_output_bytes: 16 * 1024 * 1024,
+            permission_policy: PermissionPolicy::default(),
+            capabilities: AgentCapabilities::default(),
         }
     }
 }
@@ -418,6 +428,11 @@ mod tests {
             arguments: vec!["--acp".to_string()],
             timeout_seconds: 120,
             output_limit_bytes: 4 * 1024 * 1024,
+            permission: PermissionPolicy::ConfirmWrites,
+            capabilities: AgentCapabilities {
+                write_files: true,
+                ..AgentCapabilities::default()
+            },
             ..AgentProfile::default()
         };
         profile.environment = vec![AgentEnvironmentVariable {
@@ -438,5 +453,7 @@ mod tests {
         assert_eq!(config.max_output_bytes, 4 * 1024 * 1024);
         assert_eq!(config.environment.len(), 1);
         assert_eq!(config.environment[0].value, "zh_CN.UTF-8");
+        assert_eq!(config.permission_policy, PermissionPolicy::ConfirmWrites);
+        assert!(config.capabilities.write_files);
     }
 }

@@ -6,7 +6,7 @@
 - Open an Agent from the file or folder context menu with a fixed context snapshot, explicit working directory, and a prefilled prompt that is not sent automatically.
 - Add a right-side Agent panel and an independent Agent window with model, workspace, permission, connection, and context status.
 - Support ACP / JSON-RPC over stdio handshake, session creation, streamed Markdown, stop, retry, copy, long-output protection, and structured error recovery.
-- Show permission requests with explicit allow-once, allow-for-task, and reject choices. A rejection is returned to the Agent instead of leaving the task blocked.
+- Show permission requests with the Agent-provided option labels and exact allow-once, allow-always, reject-once, and reject-always choices. Missing option kinds are disabled instead of falling back to a different authorization scope.
 - Review structured file changes as a unified diff before applying or saving them. Files changed after review are not overwritten without a new confirmation.
 - Optionally restore the Agent, model, working directory, context snapshot, conversation, draft, and independent window size. Missing paths expose a repair path and never block Kite startup.
 - Add a diagnostics view for command resolution, version, ACP protocol, capabilities, recent errors, configuration paths, and redacted logs.
@@ -15,7 +15,7 @@
 
 ## Security boundary
 
-- P0 is read-only by default. Kite applies file edits only after explicit diff review and confirmation, never executes suggested shell commands, and never suppresses permission requests.
+- P0 is read-only by default. Kite denies write, command, and network allow decisions for read-only Profiles, gates confirm-write decisions by declared capabilities, applies file edits only after explicit diff review, never executes suggested shell commands, and never suppresses permission requests.
 - Secrets are not stored in `agent.json`; profiles keep only credential references and rely on the Agent's native authentication where applicable.
 - External Agents are not sandboxed by Kite. The UI states when an Agent's own permission system remains authoritative.
 - Diagnostics redact Bearer tokens, API keys, passwords, URL credentials, and common `sk-*` secrets.

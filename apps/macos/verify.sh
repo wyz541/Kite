@@ -19,6 +19,9 @@ bash apps/macos/test-directory-watcher.sh
 echo "Testing file drag provider..."
 bash apps/macos/test-file-drag.sh
 
+echo "Testing Agent permission presentation..."
+bash apps/macos/Tests/run-agent-permission-presentation-smoke.sh
+
 echo "Building release app..."
 bash apps/macos/build.sh
 

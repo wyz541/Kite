@@ -961,7 +961,7 @@ private struct KiteAgentEditorView: View {
             }
 
             editorSection("能力声明") {
-                editorField("上下文", detail: "这些声明用于权限摘要；普通 CLI 的实际权限仍由 Agent 自身管理。") {
+                editorField("上下文", detail: "受管模式会据此过滤权限请求；AgentManaged 模式下这些字段仅为声明，不构成沙箱。") {
                     VStack(alignment: .leading, spacing: 7) {
                         Toggle("读取选中项", isOn: $draft.capabilities.readSelection)
                         Toggle("读取工作区", isOn: $draft.capabilities.readWorkspace)
@@ -971,7 +971,7 @@ private struct KiteAgentEditorView: View {
                     .controlSize(.small)
                 }
                 AgentDivider()
-                editorField("写入与执行", detail: "Kite 不会因为这里的声明而绕过确认。") {
+                editorField("写入与执行", detail: "受管模式只在声明能力和 Profile 策略同时允许时开放授权选项。") {
                     VStack(alignment: .leading, spacing: 7) {
                         Toggle("写入文件", isOn: $draft.capabilities.writeFiles)
                         Toggle("执行命令", isOn: $draft.capabilities.executeCommands)
@@ -1222,9 +1222,9 @@ private extension PermissionPolicy {
 
     var summary: String {
         switch self {
-        case .readOnly: return "Kite 仅提供文件上下文；不自动写入或执行命令。"
-        case .confirmWrites: return "写入和命令执行需要用户确认。"
-        case .agentManaged: return "权限由 Agent 自身管理；Kite 不声称已沙箱化。"
+        case .readOnly: return "Kite 拒绝写入、命令和网络授权请求；不沙箱化外部 Agent。"
+        case .confirmWrites: return "仅对 Profile 声明的能力逐次确认；始终允许由 Agent 解释。"
+        case .agentManaged: return "Kite 不强制限制；能力声明仅供展示，实际边界由 Agent 管理。"
         }
     }
 }

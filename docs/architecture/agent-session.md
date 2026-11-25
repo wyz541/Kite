@@ -91,6 +91,22 @@ Idle -> Starting -> Ready -> Running -> Ready
 11. 用户取消时发送 `session/cancel`，并把所有未决权限请求回复为 `cancelled`。
 12. `session/prompt` 返回后发送 `TurnCompleted` 或 `TurnCancelled`。
 
+## 权限策略与能力过滤
+
+`AgentRuntime` 在展示权限请求前同时计算 Profile 权限策略、上下文能力和 ACP 实际选项：
+
+| 策略 | 行为 |
+| --- | --- |
+| `ReadOnly` | 读取类请求可确认；写文件、执行命令、网络访问和未知工具类型不开放允许决策，只保留 Agent 返回的拒绝选项与取消。 |
+| `ConfirmWrites` | 只有 `write_files`、`execute_commands`、`network` 中对应能力已声明时才开放允许决策；未声明的风险类型只允许拒绝或取消。 |
+| `AgentManaged` | Kite 不强制限制；原始 ACP 选项可用，但 UI 明确说明能力声明只是声明信息，实际边界由 Agent 管理。 |
+
+- `allowed_decisions` 在 Core 中计算并随权限请求返回给 Windows 与 macOS UI。
+- `allow_once`、`allow_always`、`reject_once`、`reject_always` 只映射到完全相同的 ACP option kind，不跨 kind 回退。
+- 缺少目标 option 时，对应按钮禁用；Core 的 `respond_permission` 也会再次拒绝非法决策。
+- UI 按钮优先使用 Agent 返回的 option `name`，避免把 `allow_always` 文案成范围更窄的临时授权。
+- `Cancel` 始终可用，并把 ACP 权限结果回为 `cancelled`。
+
 ## 超时
 
 | 超时 | 默认值 | 行为 |
@@ -141,7 +157,7 @@ Profile 中显式配置的环境变量会覆盖白名单值。
 
 `AgentSessionConfig.environment` 是运行时解析后的映射，不用于持久化。Profile 存储只应保存 `credential_ref`，由 #150/#152 在启动会话前从系统钥匙串解析为环境变量。
 
-`AgentSessionConfig::from_profile` 负责把已校验的 `AgentProfile`、解析后的工作目录和凭据环境映射到运行时启动参数。
+`AgentSessionConfig::from_profile` 负责把已校验的 `AgentProfile`、解析后的工作目录、`permission` / `capabilities` 和凭据环境映射到运行时启动参数。权限策略同时进入低层 `AgentSession`，避免绕过 `AgentRuntime` 后重新开放被阻止的 ACP 选项。
 
 日志和错误详情会遮罩：
 
@@ -205,6 +221,10 @@ subscribe(AgentSessionEventCallback) -> AgentSessionEventSubscription
 | --- | --- |
 | `normal` | 启动、握手、流式输出、完成 |
 | `permission` | 权限请求不会被静默接受 |
+| `permission-write` | 写文件请求的精确 option、策略和 UI 标签 |
+| `permission-command` | 命令请求在只读 Profile 下不可授权 |
+| `permission-always` | 只有 `allow_always` 时不会启用 `allow_once` |
+| `permission-repeat` | 连续权限请求各自应用策略 |
 | `cancel` | `session/cancel`、取消事件、会话复用 |
 | `spawn-tree` | 取消后子进程树被清理 |
 | `idle` | 空闲超时 |

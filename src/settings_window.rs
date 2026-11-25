@@ -2513,7 +2513,7 @@ impl SettingsWindow {
             self.row(
                 "agent-capability-write",
                 "写入文件",
-                Some("仅用于权限摘要；实际写入仍需通过确认和 diff 审核。"),
+                Some("参与受管权限请求过滤；不代表 Kite 可以沙箱化任意 Agent。"),
                 Switch::new("agent-cap-write")
                     .checked(editor.capabilities.write_files)
                     .small()
@@ -2531,7 +2531,7 @@ impl SettingsWindow {
             self.row(
                 "agent-capability-commands",
                 "执行命令",
-                Some("仅用于权限摘要；Kite 不会自动执行 Agent 的建议命令。"),
+                Some("参与受管权限请求过滤；Kite 不会自动执行 Agent 的建议命令。"),
                 Switch::new("agent-cap-commands")
                     .checked(editor.capabilities.execute_commands)
                     .small()
@@ -2549,7 +2549,7 @@ impl SettingsWindow {
             self.row(
                 "agent-capability-network",
                 "网络访问",
-                Some("声明 Agent 可能访问网络；Kite 不做强制网络隔离。"),
+                Some("参与受管网络授权过滤；Kite 不做强制网络隔离。"),
                 Switch::new("agent-cap-network")
                     .checked(editor.capabilities.network)
                     .small()

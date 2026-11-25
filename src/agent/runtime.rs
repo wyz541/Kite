@@ -10,6 +10,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::agent::diagnostics::record_agent_event;
+use crate::agent::permissions::{
+    AgentPermissionDecision, AgentPermissionOption, AgentPermissionRequest,
+    blocked_decision_message, decision_is_allowed, evaluate_permission_request, exact_option_id,
+};
 use crate::agent::process::{spawn_agent_process, terminate_agent_process};
 use crate::agent::redact::{Redactor, StreamingRedactor, is_sensitive_environment_key};
 use crate::agent::restore::{AgentMessage, AgentMessageRole};
@@ -55,30 +59,6 @@ pub struct AgentEvent {
     pub text: Option<String>,
     pub request_id: Option<String>,
     pub state: Option<AgentRuntimeState>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
-pub struct AgentPermissionOption {
-    pub option_id: String,
-    pub name: String,
-    pub kind: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
-pub struct AgentPermissionRequest {
-    pub request_id: String,
-    pub title: String,
-    pub description: String,
-    pub options: Vec<AgentPermissionOption>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, uniffi::Enum)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentPermissionDecision {
-    AllowOnce,
-    AllowTask,
-    RejectOnce,
-    Cancel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
@@ -393,6 +373,23 @@ impl AgentRuntime {
         request_id: String,
         decision: AgentPermissionDecision,
     ) -> Result<(), AgentRuntimeError> {
+        {
+            let snapshot = self
+                .shared
+                .snapshot
+                .lock()
+                .map_err(|_| AgentRuntimeError::from("Agent 状态不可用"))?;
+            let request = snapshot
+                .permission_requests
+                .iter()
+                .find(|request| request.request_id == request_id)
+                .ok_or_else(|| AgentRuntimeError::from("权限请求已失效"))?;
+            if !decision_is_allowed(request, decision) {
+                return Err(AgentRuntimeError::from(blocked_decision_message(
+                    request, decision,
+                )));
+            }
+        }
         self.shared
             .send(RuntimeSignal::Permission {
                 request_id,
@@ -495,6 +492,7 @@ enum PendingRequest {
 struct PendingPermission {
     request_id: Value,
     options: Vec<AgentPermissionOption>,
+    allowed_decisions: Vec<AgentPermissionDecision>,
 }
 
 struct RuntimeWorker {
@@ -811,7 +809,13 @@ impl RuntimeWorker {
             RuntimeSignal::Permission {
                 request_id,
                 decision,
-            } => self.respond_permission(&request_id, decision),
+            } => {
+                if let Err(error) = self.respond_permission(&request_id, decision) {
+                    self.shared
+                        .emit(AgentEventKind::Diagnostic, Some(error), Some(request_id));
+                }
+                Ok(())
+            }
             RuntimeSignal::Shutdown => {
                 self.shutdown_requested = true;
                 Ok(())
@@ -1077,13 +1081,19 @@ impl RuntimeWorker {
                 options
                     .iter()
                     .filter_map(|option| {
+                        let option_id = option.get("optionId")?.as_str()?.to_string();
+                        let name = option
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&option_id)
+                            .to_string();
                         Some(AgentPermissionOption {
-                            option_id: option.get("optionId")?.as_str()?.to_string(),
-                            name: option.get("name")?.as_str()?.to_string(),
+                            option_id,
+                            name,
                             kind: option
                                 .get("kind")
                                 .and_then(Value::as_str)
-                                .unwrap_or("allow_once")
+                                .unwrap_or("unknown")
                                 .to_string(),
                         })
                     })
@@ -1091,28 +1101,42 @@ impl RuntimeWorker {
             })
             .unwrap_or_default();
         let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
+        let tool_kind = tool_call
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let title = tool_call
             .get("title")
             .and_then(Value::as_str)
             .unwrap_or("Agent 请求权限")
             .to_string();
-        let description = tool_call
-            .get("kind")
-            .and_then(Value::as_str)
-            .map(|kind| format!("权限类型：{kind}"))
-            .unwrap_or_else(|| "请确认是否允许 Agent 执行该操作".to_string());
+        let evaluation = evaluate_permission_request(
+            self.profile.permission,
+            &self.profile.capabilities,
+            tool_kind.as_deref(),
+            &options,
+        );
+        let description = match tool_kind.as_deref() {
+            Some(kind) => format!("{}（ACP: {kind}）", evaluation.risk.label()),
+            None => "Agent 未声明工具类型，请检查操作范围".to_string(),
+        };
         self.pending_permissions.insert(
             string_id.clone(),
             PendingPermission {
                 request_id,
                 options: options.clone(),
+                allowed_decisions: evaluation.allowed_decisions.clone(),
             },
         );
         self.shared.add_permission(AgentPermissionRequest {
             request_id: string_id,
             title,
             description,
+            kind: tool_kind.unwrap_or_default(),
+            risk: evaluation.risk,
             options,
+            allowed_decisions: evaluation.allowed_decisions,
+            policy_notice: evaluation.policy_notice,
         });
     }
 
@@ -1121,24 +1145,31 @@ impl RuntimeWorker {
         request_id: &str,
         decision: AgentPermissionDecision,
     ) -> Result<(), String> {
-        let Some(pending) = self.pending_permissions.remove(request_id) else {
+        let Some(pending) = self.pending_permissions.get(request_id) else {
             return Err("权限请求已失效".to_string());
         };
-        self.shared.remove_permission(request_id);
-        let outcome = match decision {
-            AgentPermissionDecision::AllowOnce => {
-                select_permission(&pending.options, &["allow_once", "allow_always"])
-            }
-            AgentPermissionDecision::AllowTask => {
-                select_permission(&pending.options, &["allow_always", "allow_once"])
-            }
-            AgentPermissionDecision::RejectOnce => {
-                select_permission(&pending.options, &["reject_once", "reject_always"])
-            }
-            AgentPermissionDecision::Cancel => None,
+        if !pending.allowed_decisions.contains(&decision) {
+            return Err(format!(
+                "{} 未被当前权限策略或 Agent 选项允许。",
+                decision.label()
+            ));
+        }
+        let option_id = if decision == AgentPermissionDecision::Cancel {
+            None
+        } else {
+            Some(
+                exact_option_id(&pending.options, decision)
+                    .ok_or_else(|| {
+                        format!(
+                            "Agent 未提供 {} 对应的选项，Kite 不会使用其他授权范围替代。",
+                            decision.label()
+                        )
+                    })?
+                    .to_string(),
+            )
         };
-        let result = match outcome {
-            Some(option_id) if decision != AgentPermissionDecision::Cancel => json!({
+        let result = match option_id {
+            Some(option_id) => json!({
                 "outcome": { "outcome": "selected", "optionId": option_id }
             }),
             _ => json!({ "outcome": { "outcome": "cancelled" } }),
@@ -1147,7 +1178,10 @@ impl RuntimeWorker {
             "jsonrpc": "2.0",
             "id": pending.request_id,
             "result": result
-        }))
+        }))?;
+        self.pending_permissions.remove(request_id);
+        self.shared.remove_permission(request_id);
+        Ok(())
     }
 
     fn cancel_running(&mut self) -> Result<(), String> {
@@ -1456,18 +1490,6 @@ fn collect_capabilities(value: Value) -> Vec<String> {
     capabilities
 }
 
-fn select_permission(options: &[AgentPermissionOption], preferred: &[&str]) -> Option<String> {
-    for kind in preferred {
-        if let Some(option) = options.iter().find(|option| option.kind == *kind) {
-            return Some(option.option_id.clone());
-        }
-    }
-    options
-        .iter()
-        .find(|option| !option.kind.starts_with("reject"))
-        .map(|option| option.option_id.clone())
-}
-
 fn path_to_uri(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
     if cfg!(windows) && !normalized.starts_with('/') {
@@ -1529,23 +1551,25 @@ mod tests {
     }
 
     #[test]
-    fn permission_selection_prefers_requested_kind() {
-        let options = vec![
-            AgentPermissionOption {
-                option_id: "reject".to_string(),
-                name: "Reject".to_string(),
-                kind: "reject_once".to_string(),
-            },
-            AgentPermissionOption {
-                option_id: "allow".to_string(),
-                name: "Allow".to_string(),
-                kind: "allow_once".to_string(),
-            },
-        ];
-        assert_eq!(
-            select_permission(&options, &["allow_once"]),
-            Some("allow".to_string())
-        );
+    fn repeated_permission_requests_replace_the_existing_snapshot_entry() {
+        let shared = RuntimeShared::new(Arc::new(Redactor::new(Vec::new())));
+        let mut request = AgentPermissionRequest {
+            request_id: "900".to_string(),
+            title: "First".to_string(),
+            description: "file write".to_string(),
+            kind: "edit".to_string(),
+            risk: crate::agent::AgentPermissionRisk::Write,
+            options: Vec::new(),
+            allowed_decisions: vec![AgentPermissionDecision::Cancel],
+            policy_notice: None,
+        };
+        shared.add_permission(request.clone());
+        request.title = "Updated".to_string();
+        shared.add_permission(request);
+
+        let snapshot = shared.snapshot.lock().expect("snapshot");
+        assert_eq!(snapshot.permission_requests.len(), 1);
+        assert_eq!(snapshot.permission_requests[0].title, "Updated");
     }
 
     #[test]
