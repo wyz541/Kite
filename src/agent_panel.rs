@@ -6,7 +6,7 @@ use crate::app::KiteApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -38,9 +38,12 @@ pub(crate) struct AgentPanel {
     history: Vec<AgentMessage>,
     turn_id: u64,
     sent_prompt: String,
+    auto_follow_output: bool,
+    output_scroll: ScrollHandle,
     saved_terminal_snapshot: bool,
     window_size: (u32, u32),
     poll_task: Task<()>,
+    _prompt_subscription: Subscription,
 }
 
 impl AgentPanel {
@@ -53,10 +56,19 @@ impl AgentPanel {
             TextareaState::new(window, cx)
                 .placeholder("向 Agent 提问。发送前可检查工作目录、上下文和权限。")
                 .auto_grow(2, 6)
-                .submit_on_enter(false)
+                .submit_on_enter(true)
                 .clean_on_escape()
         });
         let output_view = cx.new(|cx| TextViewState::markdown("", cx));
+        let prompt_subscription = cx.subscribe_in(
+            &prompt_input,
+            window,
+            |this, _, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                    this.send_prompt(cx);
+                }
+            },
+        );
         let profile = agent_profiles
             .default_profile()
             .cloned()
@@ -81,9 +93,12 @@ impl AgentPanel {
             history: Vec::new(),
             turn_id: 0,
             sent_prompt: String::new(),
+            auto_follow_output: true,
+            output_scroll: ScrollHandle::new(),
             saved_terminal_snapshot: false,
             window_size: (960, 760),
             poll_task: Task::ready(()),
+            _prompt_subscription: prompt_subscription,
         };
         panel.restore_session(window, cx);
         panel
@@ -412,6 +427,29 @@ impl AgentPanel {
     }
 
     fn send_prompt(&mut self, cx: &mut Context<Self>) {
+        let prompt = self.prompt_input.read(cx).value().trim().to_string();
+        self.start_prompt(prompt, cx);
+    }
+
+    fn retry_prompt(&mut self, cx: &mut Context<Self>) {
+        let prompt = self.sent_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.notice = Some("没有可重试的上一条提示".into());
+            cx.notify();
+            return;
+        }
+        self.start_prompt(prompt, cx);
+    }
+
+    fn can_retry_prompt(&self) -> bool {
+        !self.sent_prompt.trim().is_empty()
+            && matches!(
+                self.phase,
+                AgentSessionPhase::Ended | AgentSessionPhase::Error
+            )
+    }
+
+    fn start_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
         if self.runtime.as_ref().is_some_and(|runtime| {
             !runtime.is_closed()
                 && !matches!(
@@ -437,7 +475,6 @@ impl AgentPanel {
             cx.notify();
             return;
         };
-        let prompt = self.prompt_input.read(cx).value().trim().to_string();
         if prompt.is_empty() {
             self.notice = Some("提示不能为空".into());
             cx.notify();
@@ -457,6 +494,7 @@ impl AgentPanel {
         ) {
             Ok(runtime) => {
                 self.sent_prompt = prompt;
+                self.auto_follow_output = true;
                 self.saved_terminal_snapshot = false;
                 self.snapshot = runtime.snapshot();
                 self.runtime = Some(runtime.clone());
@@ -527,6 +565,15 @@ impl AgentPanel {
         let output = output.to_string();
         self.output_view
             .update(cx, |view, cx| view.set_text(&output, cx));
+        if self.auto_follow_output && !output.is_empty() {
+            self.output_scroll.scroll_to_bottom();
+        }
+    }
+
+    fn resume_auto_follow(&mut self, cx: &mut Context<Self>) {
+        self.auto_follow_output = true;
+        self.output_scroll.scroll_to_bottom();
+        cx.notify();
     }
 
     fn persist_conversation(&mut self, draft: String) {
@@ -623,14 +670,29 @@ impl AgentPanel {
     }
 
     fn render_status(&self, cx: &App) -> AnyElement {
-        let (status_color, connection_label) = match self.phase {
-            AgentSessionPhase::Empty | AgentSessionPhase::Unconfigured => {
-                (cx.theme().muted_foreground, "未连接")
+        let (status_color, connection_label) = if self.runtime.is_some() {
+            match self.snapshot.state {
+                AgentRuntimeState::Starting => (cx.theme().primary, "启动中"),
+                AgentRuntimeState::Initializing => (cx.theme().primary, "握手中"),
+                AgentRuntimeState::Ready => (cx.theme().success, "已就绪"),
+                AgentRuntimeState::Running => (cx.theme().success, "运行中"),
+                AgentRuntimeState::WaitingPermission => (cx.theme().warning, "等待权限"),
+                AgentRuntimeState::Cancelling => (cx.theme().warning, "取消中"),
+                AgentRuntimeState::Completed => (cx.theme().success, "完成"),
+                AgentRuntimeState::Failed => (cx.theme().danger, "失败"),
+                AgentRuntimeState::Cancelled => (cx.theme().muted_foreground, "已取消"),
+                AgentRuntimeState::Closed => (cx.theme().muted_foreground, "已关闭"),
             }
-            AgentSessionPhase::Loading => (cx.theme().primary, "正在连接"),
-            AgentSessionPhase::Running => (cx.theme().success, "运行中"),
-            AgentSessionPhase::Error => (cx.theme().danger, "失败"),
-            AgentSessionPhase::Ended => (cx.theme().muted_foreground, "就绪"),
+        } else {
+            match self.phase {
+                AgentSessionPhase::Empty | AgentSessionPhase::Unconfigured => {
+                    (cx.theme().muted_foreground, "未连接")
+                }
+                AgentSessionPhase::Loading => (cx.theme().primary, "正在连接"),
+                AgentSessionPhase::Running => (cx.theme().success, "运行中"),
+                AgentSessionPhase::Error => (cx.theme().danger, "失败"),
+                AgentSessionPhase::Ended => (cx.theme().muted_foreground, "已结束"),
+            }
         };
         let profile_name = self
             .profile
@@ -920,28 +982,39 @@ impl AgentPanel {
             .into_any_element()
     }
 
-    fn render_output(&self, cx: &App) -> AnyElement {
+    fn render_output(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let output_empty = self.snapshot.output.trim().is_empty();
+        let auto_follow = self.auto_follow_output;
+        let mut header = h_flex()
+            .w_full()
+            .gap_2()
+            .items_center()
+            .child(div().text_xs().font_semibold().child("回答"))
+            .child(div().flex_1());
+        if !auto_follow && !output_empty {
+            header = header.child(
+                Button::new("agent-resume-follow")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::ArrowDown)
+                    .label("回到最新")
+                    .tooltip("恢复自动跟随并滚动到最新回答")
+                    .on_click(cx.listener(|this, _, _, cx| this.resume_auto_follow(cx))),
+            );
+        }
+        if !output_empty {
+            header = header.child(
+                Clipboard::new("agent-copy-output")
+                    .value(self.snapshot.output.clone())
+                    .tooltip("复制 Agent 回答")
+                    .accessibility_label("复制 Agent 回答"),
+            );
+        }
         v_flex()
             .id("agent-output")
             .w_full()
             .gap_2()
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .items_center()
-                    .child(div().text_xs().font_semibold().child("回答"))
-                    .child(div().flex_1())
-                    .when(!output_empty, |this| {
-                        this.child(
-                            Clipboard::new("agent-copy-output")
-                                .value(self.snapshot.output.clone())
-                                .tooltip("复制 Agent 回答")
-                                .accessibility_label("复制 Agent 回答"),
-                        )
-                    }),
-            )
+            .child(header)
             .child(
                 div()
                     .id("agent-output-scroll")
@@ -949,6 +1022,15 @@ impl AgentPanel {
                     .min_h(px(160.))
                     .max_h(px(360.))
                     .overflow_y_scroll()
+                    .track_scroll(&self.output_scroll)
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        if delta.y.as_f32() > 0.0 {
+                            this.auto_follow_output = false;
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    }))
                     .rounded_lg()
                     .border_1()
                     .border_color(cx.theme().border)
@@ -1132,6 +1214,16 @@ impl AgentPanel {
                                 .outline()
                                 .label("停止")
                                 .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                        )
+                    })
+                    .when(self.can_retry_prompt(), |this| {
+                        this.child(
+                            Button::new("agent-retry")
+                                .small()
+                                .outline()
+                                .icon(IconName::RotateCcw)
+                                .label("重试")
+                                .on_click(cx.listener(|this, _, _, cx| this.retry_prompt(cx))),
                         )
                     })
                     .child(

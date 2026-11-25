@@ -103,6 +103,8 @@ final class KiteAgentPanelModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var permissionRequests: [AgentPermissionRequest] = []
     @Published private(set) var canCancel = false
+    @Published private(set) var runtimeState: AgentRuntimeState?
+    @Published var autoFollow = true
 
     private let core = KiteCore()
     private var runtime: AgentRuntime?
@@ -154,6 +156,30 @@ final class KiteAgentPanelModel: ObservableObject {
         profile != nil
     }
 
+    var statusLabel: String {
+        guard let runtimeState else { return phase.label }
+        switch runtimeState {
+        case .starting: return "启动中"
+        case .initializing: return "握手中"
+        case .ready: return "已就绪"
+        case .running: return "运行中"
+        case .waitingPermission: return "等待权限"
+        case .cancelling: return "取消中"
+        case .completed: return "完成"
+        case .failed: return "失败"
+        case .cancelled: return "已取消"
+        case .closed: return "已关闭"
+        @unknown default: return phase.label
+        }
+    }
+
+    var canRetry: Bool {
+        !sentPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (phase == .ended || phase == .error)
+            && phase != .loading
+            && phase != .running
+    }
+
     func refreshAgentProfiles(core: KiteCore) {
         let snapshot = core.agentConfig()
         if let id = snapshot.defaultProfileId,
@@ -198,6 +224,7 @@ final class KiteAgentPanelModel: ObservableObject {
         refreshProfile()
         phase = profile == nil ? .unconfigured : .ended
         prompt = action.prompt
+        runtimeState = nil
         output = ""
         errorMessage = nil
         permissionRequests = []
@@ -227,6 +254,7 @@ final class KiteAgentPanelModel: ObservableObject {
         refreshProfile()
         phase = profile == nil ? .unconfigured : .ended
         prompt = action.prompt
+        runtimeState = nil
         output = ""
         errorMessage = nil
         permissionRequests = []
@@ -318,8 +346,10 @@ final class KiteAgentPanelModel: ObservableObject {
                 restoredMessages: restoredMessages
             )
             self.runtime = runtime
+            runtimeState = .starting
             sentPrompt = trimmed
             output = ""
+            autoFollow = true
             errorMessage = nil
             permissionRequests = []
             savedTerminalSnapshot = false
@@ -328,6 +358,7 @@ final class KiteAgentPanelModel: ObservableObject {
             startPolling(runtime)
         } catch {
             phase = .error
+            runtimeState = .failed
             errorMessage = error.localizedDescription
             notice = error.localizedDescription
         }
@@ -339,6 +370,21 @@ final class KiteAgentPanelModel: ObservableObject {
         } catch {
             notice = error.localizedDescription
         }
+    }
+
+    func retryPrompt() {
+        let retry = sentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !retry.isEmpty, phase == .ended || phase == .error else { return }
+        prompt = retry
+        sendPrompt()
+    }
+
+    func pauseAutoFollow() {
+        autoFollow = false
+    }
+
+    func resumeAutoFollow() {
+        autoFollow = true
     }
 
     func respondPermission(_ request: AgentPermissionRequest, decision: AgentPermissionDecision) {
@@ -385,6 +431,7 @@ final class KiteAgentPanelModel: ObservableObject {
         case .failed:
             phase = .error
         }
+        runtimeState = snapshot.state
         output = snapshot.output
         errorMessage = snapshot.error
         permissionRequests = snapshot.permissionRequests
@@ -677,7 +724,7 @@ private struct KiteAgentPanelContent: View {
                     Circle()
                         .fill(color(for: agent.phase))
                         .frame(width: 7, height: 7)
-                    Text(agent.phase.label)
+                    Text(agent.statusLabel)
                         .font(.system(size: 9.5, weight: .medium))
                         .foregroundStyle(color(for: agent.phase))
                 }
@@ -836,13 +883,19 @@ private struct KiteAgentPanelContent: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("发送准备")
                 .font(.system(size: 10, weight: .semibold))
-            TextField("添加问题或指令。内容会先停留在 Kite 中。", text: $agent.prompt, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 11))
-                .lineLimit(3...6)
-                .padding(8)
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
-                .accessibilityLabel("Agent 问题或指令")
+            ZStack(alignment: .topLeading) {
+                if agent.prompt.isEmpty {
+                    Text("添加问题或指令。Enter 发送，Shift+Enter 换行。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .padding(8)
+                        .allowsHitTesting(false)
+                }
+                promptEditor
+            }
+            .padding(2)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+            .accessibilityLabel("Agent 问题或指令")
             HStack {
                 Button {
                     model.presentAgentReviewFile()
@@ -866,6 +919,12 @@ private struct KiteAgentPanelContent: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                } else if agent.canRetry {
+                    Button("重试") {
+                        agent.retryPrompt()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 Button("发送") {
                     agent.sendPrompt()
@@ -880,6 +939,36 @@ private struct KiteAgentPanelContent: View {
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    @ViewBuilder
+    private var promptEditor: some View {
+        if #available(macOS 14.0, *) {
+            TextEditor(text: $agent.prompt)
+                .font(.system(size: 11))
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 72, maxHeight: 132)
+                .onKeyPress(phases: .down) { keyPress in
+                    guard keyPress.key == .return else { return .ignored }
+                    if keyPress.modifiers.contains(.shift) {
+                        return .ignored
+                    }
+                    agent.sendPrompt()
+                    return .handled
+                }
+        } else {
+            TextField(
+                "添加问题或指令。内容会先停留在 Kite 中。",
+                text: $agent.prompt,
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 11))
+            .lineLimit(3...6)
+            .onSubmit {
+                agent.sendPrompt()
+            }
+        }
     }
 
     private var outputCard: some View {
@@ -897,21 +986,54 @@ private struct KiteAgentPanelContent: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
             }
-            ScrollView {
-                Group {
-                    if let rendered = try? AttributedString(
-                        markdown: agent.output,
-                        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-                    ) {
-                        Text(rendered)
-                    } else {
-                        Text(agent.output)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Group {
+                        if let rendered = try? AttributedString(
+                            markdown: agent.output,
+                            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                        ) {
+                            Text(rendered)
+                        } else {
+                            Text(agent.output)
+                        }
+                    }
+                    .font(.system(size: 11))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .id("agent-output-bottom")
+                }
+                .onAppear {
+                    if agent.autoFollow {
+                        proxy.scrollTo("agent-output-bottom", anchor: .bottom)
                     }
                 }
-                .font(.system(size: 11))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+                .onChange(of: agent.output) { _ in
+                    guard agent.autoFollow else { return }
+                    withAnimation(.snappy(duration: 0.18)) {
+                        proxy.scrollTo("agent-output-bottom", anchor: .bottom)
+                    }
+                }
+                .background(KiteAgentScrollWheelMonitor {
+                    agent.pauseAutoFollow()
+                })
+                .overlay(alignment: .bottom) {
+                    if !agent.autoFollow {
+                        Button {
+                            agent.resumeAutoFollow()
+                            withAnimation(.snappy(duration: 0.18)) {
+                                proxy.scrollTo("agent-output-bottom", anchor: .bottom)
+                            }
+                        } label: {
+                            Label("回到最新", systemImage: "arrow.down")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(.bottom, 8)
+                    }
+                }
             }
             .frame(minHeight: 80, maxHeight: 280)
             .padding(8)
@@ -973,13 +1095,29 @@ private struct KiteAgentPanelContent: View {
     }
 
     private func errorBanner(_ error: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-            Text(error)
-                .font(.system(size: 10))
-                .foregroundStyle(.red)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                Text(error)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 7) {
+                if agent.canRetry {
+                    Button("重试") {
+                        agent.retryPrompt()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                Button("Agent 设置") {
+                    KiteSettingsWindowController.open(pane: .agent)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1140,5 +1278,58 @@ final class KiteAgentWindowController: NSWindowController, NSWindowDelegate {
         let width = UInt32(max(CGFloat(1), window.frame.width.rounded()))
         let height = UInt32(max(CGFloat(1), window.frame.height.rounded()))
         agent?.persistWindowState(width: width, height: height)
+    }
+}
+
+private struct KiteAgentScrollWheelMonitor: NSViewRepresentable {
+    let onScrollUp: () -> Void
+
+    func makeNSView(context: Context) -> KiteAgentScrollWheelMonitorView {
+        let view = KiteAgentScrollWheelMonitorView()
+        view.onScrollUp = onScrollUp
+        return view
+    }
+
+    func updateNSView(_ nsView: KiteAgentScrollWheelMonitorView, context: Context) {
+        nsView.onScrollUp = onScrollUp
+    }
+}
+
+private final class KiteAgentScrollWheelMonitorView: NSView {
+    var onScrollUp: (() -> Void)?
+    private var monitor: Any?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeMonitor()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self,
+                  let window = self.window,
+                  event.window === window,
+                  event.scrollingDeltaY > 0.1 else {
+                return event
+            }
+            let point = self.convert(event.locationInWindow, from: nil)
+            if self.bounds.contains(point) {
+                self.onScrollUp?()
+            }
+            return event
+        }
+    }
+
+    deinit {
+        removeMonitor()
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
     }
 }
