@@ -101,7 +101,7 @@ kite-cli agent run \
     "kite": {
       "command": "D:/path/to/kite-mcp.exe",
       "env": {
-        "KITE_AGENT_PROFILE_PATH": "C:/Users/me/AppData/Roaming/Kite/agent.json"
+        "KITE_AGENT_PROFILE_PATH": "C:/Users/<name>/AppData/Roaming/Kite/agent.json"
       }
     }
   }
