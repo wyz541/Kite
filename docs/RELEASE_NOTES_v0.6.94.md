@@ -24,6 +24,12 @@
 - Add startup latency, Agent process memory, streamed-output throughput, and long-conversation preparation baselines.
 - Keep configuration, context, permission, cancellation, error, and recovery semantics aligned between Windows and macOS while retaining native UI and process cleanup.
 
+## Update reliability
+
+- Make macOS update downloads use the configured system HTTPS, HTTP, or SOCKS5 proxy before falling back to a direct connection.
+- Retry transient GitHub asset `403` responses with a fresh release download redirect.
+- Record download failures in the updater diagnostic log so Settings can expose actionable troubleshooting information.
+
 ## Known limitations
 
 - Kite does not bundle, download, or log in an Agent. Users must install and authenticate the external Agent first.

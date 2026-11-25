@@ -486,6 +486,12 @@ fn configured_proxy_urls() -> Vec<String> {
     {
         proxies.push(proxy);
     }
+    #[cfg(target_os = "macos")]
+    if let Some(proxy) = macos_system_proxy_url()
+        && !proxies.iter().any(|value| value == &proxy)
+    {
+        proxies.push(proxy);
+    }
     proxies
 }
 
@@ -544,8 +550,64 @@ fn proxy_url(scheme: &str, address: &str) -> String {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_system_proxy_url() -> Option<String> {
+    let output = std::process::Command::new("/usr/sbin/scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_system_proxy(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_system_proxy(value: &str) -> Option<String> {
+    for (enable_key, host_key, port_key, scheme) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort", "http"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort", "http"),
+        ("SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5"),
+    ] {
+        if macos_proxy_field(value, enable_key) != Some("1") {
+            continue;
+        }
+        let Some(host) = macos_proxy_field(value, host_key) else {
+            continue;
+        };
+        let Some(port) = macos_proxy_field(value, port_key) else {
+            continue;
+        };
+        if let Some(url) = proxy_url_with_port(scheme, host, port) {
+            return Some(url);
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_proxy_field<'a>(value: &'a str, key: &str) -> Option<&'a str> {
+    value.lines().find_map(|line| {
+        let (candidate, field_value) = line.split_once(':')?;
+        (candidate.trim() == key)
+            .then(|| field_value.trim().trim_matches('"'))
+            .filter(|field_value| !field_value.is_empty())
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn proxy_url_with_port(scheme: &str, host: &str, port: &str) -> Option<String> {
+    let port = port.parse::<u16>().ok()?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    Some(format!("{scheme}://{host}:{port}"))
+}
+
 fn retryable_status(status: u16) -> bool {
-    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+    matches!(status, 403 | 408 | 425 | 429 | 500 | 502 | 503 | 504)
 }
 
 #[derive(Debug)]
@@ -704,6 +766,14 @@ fn integrity_failure_message(version: &str) -> String {
     format!("下载的 Kite {version} 更新包校验失败。请稍后重试，或前往 GitHub Releases 手动下载。")
 }
 
+fn append_update_diagnostic(directory: &Path, message: &str) {
+    let log = directory.parent().unwrap_or(directory).join("update.log");
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log) {
+        let _ = writeln!(file, "[{timestamp}] {message}");
+    }
+}
+
 pub fn download_update(info: &UpdateInfo) -> Result<PathBuf, String> {
     validate_asset_name(&info.asset_name)?;
     validate_asset_url(&info.asset_url)?;
@@ -773,9 +843,12 @@ pub fn download_update(info: &UpdateInfo) -> Result<PathBuf, String> {
 
     if !partial.is_file() {
         let _ = fs::remove_file(&partial);
-        if let Some(detail) = last_error {
-            eprintln!("Kite update download failed: {detail}");
-        }
+        let detail = last_error.unwrap_or_else(|| "所有下载连接均未返回更新文件".to_string());
+        append_update_diagnostic(
+            &directory,
+            &format!("Kite update download failed: {detail}"),
+        );
+        eprintln!("Kite update download failed: {detail}");
         return Err(if integrity_failed {
             integrity_failure_message(&info.latest_version)
         } else {
@@ -1532,10 +1605,10 @@ semver = { version = "1" }
 
     #[test]
     fn retryable_http_statuses_cover_transient_failures() {
-        for status in [408, 425, 429, 500, 502, 503, 504] {
+        for status in [403, 408, 425, 429, 500, 502, 503, 504] {
             assert!(retryable_status(status), "status {status} should retry");
         }
-        for status in [400, 401, 403, 404, 422] {
+        for status in [400, 401, 404, 422] {
             assert!(
                 !retryable_status(status),
                 "status {status} should not retry"
@@ -1561,6 +1634,60 @@ semver = { version = "1" }
         assert_eq!(parse_windows_proxy_server("  "), None);
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    #[test]
+    fn macos_proxy_parser_prefers_https_entry() {
+        let proxy = r#"<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7891
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 7892
+  SOCKSProxy : 127.0.0.1
+}"#;
+        assert_eq!(
+            parse_macos_system_proxy(proxy),
+            Some("http://127.0.0.1:7891".to_string())
+        );
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    #[test]
+    fn macos_proxy_parser_skips_disabled_and_formats_ipv6_socks() {
+        let proxy = r#"<dictionary> {
+  HTTPEnable : 0
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 1080
+  SOCKSProxy : ::1
+}"#;
+        assert_eq!(
+            parse_macos_system_proxy(proxy),
+            Some("socks5://[::1]:1080".to_string())
+        );
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    #[test]
+    fn macos_proxy_parser_ignores_incomplete_entries() {
+        let proxy = r#"<dictionary> {
+  HTTPSEnable : 1
+  HTTPSProxy : 127.0.0.1
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+}"#;
+        assert_eq!(
+            parse_macos_system_proxy(proxy),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+        assert_eq!(parse_macos_system_proxy("<dictionary> { }"), None);
+    }
+
     #[test]
     fn download_failure_message_omits_transport_details() {
         let message = download_failure_message("0.6.77");
@@ -1569,6 +1696,30 @@ semver = { version = "1" }
         assert!(message.contains("GitHub Releases"));
         assert!(!message.contains("Connection"));
         assert!(!message.contains("https://github.com"));
+    }
+
+    #[test]
+    fn download_failure_is_written_to_update_diagnostics() {
+        let directory = std::env::temp_dir().join(format!(
+            "kite-update-diagnostic-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let version_directory = directory.join("0.6.93");
+        fs::create_dir_all(&version_directory).expect("create diagnostic test directory");
+
+        append_update_diagnostic(
+            &version_directory,
+            "Kite update download failed: network failed",
+        );
+
+        let log = fs::read_to_string(directory.join("update.log")).expect("read update log");
+        assert!(log.contains("Kite update download failed"));
+        assert!(log.contains("network failed"));
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
