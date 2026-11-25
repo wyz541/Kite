@@ -119,6 +119,9 @@ Kite 不自动扫描、导入或覆盖 Agent 原生配置。
 6. 接收 `session/request_permission`，等待用户选择。
 7. 收到 `session/prompt` 响应后进入空闲状态。
 
+Windows Agent 面板在同一轮询任务中等待 session 进入 `Ready` 后再发送 `session/prompt`，因此不会阻塞 UI 线程。
+内层独立窗口按钮会等当前 `AgentPanel` update 完全退出后再创建共享窗口，避免同一实体的 double lease。
+
 Kite 只向 Agent 广告它实际实现的客户端能力。
 P0 不广告文件写入或终端执行能力。
 Agent 自己仍可能通过其原生工具请求权限，因此界面必须显示真实权限边界。

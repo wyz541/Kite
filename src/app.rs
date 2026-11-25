@@ -1661,7 +1661,7 @@ impl KiteApp {
         }
     }
 
-    pub(crate) fn open_agent_window(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_agent_window(&mut self, cx: &mut Context<Self>, window_size: (u32, u32)) {
         if let Some(handle) = self.agent_window.as_ref()
             && handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -1670,7 +1670,7 @@ impl KiteApp {
             return;
         }
         self.agent_window = None;
-        match crate::agent_window::open_agent_window(self.agent_panel.clone(), cx) {
+        match crate::agent_window::open_agent_window(self.agent_panel.clone(), window_size, cx) {
             Ok(handle) => {
                 self.agent_window = Some(handle);
                 self.notice = Some("Agent 已在独立窗口中打开，状态与右侧栏共享".into());
@@ -6807,14 +6807,15 @@ impl KiteApp {
                     .child(self.right_pane_tabs(cx))
                     .child(div().flex_1())
                     .child(
-                        Button::new("agent-popout")
+                        Button::new("agent-pane-popout")
                             .ghost()
                             .compact()
                             .icon(IconName::Maximize2)
                             .tooltip("在独立窗口中打开")
                             .accessibility_label("在独立窗口中打开 Agent")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_agent_window(window, cx)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let window_size = this.agent_panel.read(cx).window_size();
+                                this.open_agent_window(cx, window_size)
                             })),
                     )
                     .child(
