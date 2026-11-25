@@ -196,6 +196,32 @@ fn streams_normal_output_and_completes() {
 }
 
 #[test]
+fn streamed_markdown_and_stderr_redact_the_resolved_credential() {
+    let harness = start_session(fixture_config("secret-stream"));
+    harness
+        .session
+        .send_prompt("echo the credential".to_string(), Vec::new())
+        .expect("prompt");
+    let events = collect_turn(&harness.events);
+    let output = message_text(&events);
+    assert!(output.contains("## Fixture answer"));
+    assert!(output.contains("[REDACTED]"));
+    assert!(!output.contains(SECRET));
+
+    let diagnostics = harness
+        .early_events
+        .iter()
+        .chain(events.iter())
+        .filter_map(|event| match event {
+            AgentSessionEvent::Diagnostic { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(diagnostics.contains("[REDACTED]"));
+    assert!(!diagnostics.contains(SECRET));
+}
+
+#[test]
 fn permission_request_requires_explicit_response() {
     let harness = start_session(fixture_config("permission"));
     harness
