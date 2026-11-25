@@ -72,6 +72,7 @@ fn run() -> Result<(), String> {
             })),
             "tools/call" => Some(handle_tool_call(&mut plane, &params, id)),
             "notifications/initialized" | "notifications/cancelled" => None,
+            _ if id.is_none() => None,
             _ => Some(json!({
                 "jsonrpc": "2.0",
                 "id": id.clone().unwrap_or(Value::Null),
