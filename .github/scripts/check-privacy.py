@@ -29,6 +29,7 @@ ALLOWED_IMAGES = {
     "docs/images/agent-acceptance-v0.6.94/windows-agent-error.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-repair.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-permission.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-permission-rejected.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-narrow.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-diagnostics.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-settings.png",
