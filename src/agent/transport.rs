@@ -68,68 +68,14 @@ pub(crate) trait AgentTransport: Send {
     fn try_wait(&mut self) -> Option<std::process::ExitStatus>;
 }
 
-pub(crate) fn transport_for(kind: AgentTransportMode) -> Box<dyn AgentTransport> {
+pub(crate) fn transport_for(
+    kind: AgentTransportMode,
+) -> Result<Box<dyn AgentTransport>, AgentError> {
     match kind {
-        AgentTransportMode::AcpStdio => Box::new(AcpStdioTransport::new()),
-        AgentTransportMode::AcpHttp | AgentTransportMode::Cli => Box::new(CliTransport),
-    }
-}
-
-struct CliTransport;
-
-impl AgentTransport for CliTransport {
-    fn start(
-        &mut self,
-        _config: &ValidatedSessionConfig,
-        _events: Arc<EventDispatcher>,
-        _process_slot: &OnceLock<Arc<ProcessHandle>>,
-        _timeout: Duration,
-    ) -> Result<AgentHandshake, AgentError> {
-        Err(AgentError::new(
+        AgentTransportMode::AcpStdio => Ok(Box::new(AcpStdioTransport::new())),
+        AgentTransportMode::AcpHttp | AgentTransportMode::Cli => Err(AgentError::new(
             AgentErrorKind::UnsupportedTransport,
-            "当前 Agent 传输方式尚未启用。",
-        ))
+            format!("{} 当前仅支持连接测试，不能启动 Agent 会话。", kind.label()),
+        )),
     }
-
-    fn create_session(
-        &mut self,
-        _cwd: &std::path::Path,
-        _additional_directories: &[PathBuf],
-        _timeout: Duration,
-    ) -> Result<String, AgentError> {
-        Err(unsupported_cli())
-    }
-
-    fn send_prompt(&mut self, _session_id: &str, _prompt: &AgentPrompt) -> Result<(), AgentError> {
-        Err(unsupported_cli())
-    }
-
-    fn wait_for_event(&mut self, _timeout: Duration) -> Result<Option<TransportEvent>, AgentError> {
-        Err(unsupported_cli())
-    }
-
-    fn respond_permission(
-        &mut self,
-        _request_id: &str,
-        _option_id: Option<&str>,
-    ) -> Result<bool, AgentError> {
-        Err(unsupported_cli())
-    }
-
-    fn cancel(&mut self, _session_id: &str) -> Result<(), AgentError> {
-        Err(unsupported_cli())
-    }
-
-    fn shutdown(&mut self) {}
-
-    fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
-        None
-    }
-}
-
-fn unsupported_cli() -> AgentError {
-    AgentError::new(
-        AgentErrorKind::UnsupportedTransport,
-        "当前 Agent 传输方式尚未启用。",
-    )
 }

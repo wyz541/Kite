@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::{
     AGENT_PROFILE_SCHEMA_VERSION, AgentConfigError, AgentConfigWarning, AgentProfile,
     AgentProfileSnapshot, MAX_AGENT_PROFILE_FILE_BYTES, MAX_AGENT_PROFILES, credentials,
-    prepare_loaded_profile, prepare_new_profile,
+    ensure_profile_can_be_saved, prepare_loaded_profile, prepare_new_profile,
 };
 
 const AGENT_CONFIG_ENV: &str = "KITE_AGENT_PROFILE_PATH";
@@ -141,6 +141,7 @@ impl AgentProfileStore {
         let _guard = lock_config_io();
         let (mut config, _) = self.load_config_locked()?;
         let profile = prepare_loaded_profile(profile, false)?;
+        ensure_profile_can_be_saved(&profile)?;
         let Some(index) = config
             .profiles
             .iter()
@@ -188,12 +189,21 @@ impl AgentProfileStore {
         let _guard = lock_config_io();
         let (mut config, _) = self.load_config_locked()?;
         let profile_id = profile_id.trim().to_string();
-        if !config
+        let Some(profile) = config
             .profiles
             .iter()
-            .any(|profile| profile.id == profile_id)
-        {
+            .find(|profile| profile.id == profile_id)
+        else {
             return Err(AgentConfigError::ProfileNotFound { profile_id });
+        };
+        if !profile.transport.can_be_default() {
+            return Err(AgentConfigError::InvalidProfile {
+                field: "transport".to_string(),
+                message: format!(
+                    "{} cannot be the default until its Agent runtime is enabled",
+                    profile.transport.label()
+                ),
+            });
         }
         config.default_profile_id = Some(profile_id);
         config = normalize_config(config)?;
@@ -218,6 +228,7 @@ impl AgentProfileStore {
         if profile.id.is_empty() {
             profile.id = super::generate_profile_id();
         }
+        ensure_profile_can_be_saved(&profile)?;
         let previous_credential_ref = existing_index
             .and_then(|index| config.profiles.get(index))
             .and_then(|existing| existing.credential_ref.clone());
@@ -360,25 +371,30 @@ impl AgentProfileStore {
             return Err(AgentConfigError::ProfileNotFound { profile_id });
         };
         let was_default = config.default_profile_id.as_deref() == Some(profile_id.as_str());
-        if was_default && config.profiles.len() > 1 {
+        let has_other_runnable = config
+            .profiles
+            .iter()
+            .any(|profile| profile.id != profile_id && profile.transport.can_be_default());
+        if was_default && has_other_runnable {
             let replacement = replacement_default_id
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| AgentConfigError::InvalidProfile {
                     field: "default_profile_id".to_string(),
                     message:
-                        "a replacement default is required before deleting the default profile"
+                        "a runnable replacement default is required before deleting the default profile"
                             .to_string(),
                 })?;
-            if replacement == profile_id
-                || !config
-                    .profiles
-                    .iter()
-                    .any(|profile| profile.id == replacement)
-            {
+            let replacement_profile = config
+                .profiles
+                .iter()
+                .find(|profile| profile.id == replacement && profile.id != profile_id)
+                .filter(|profile| profile.transport.can_be_default());
+            if replacement_profile.is_none() {
                 return Err(AgentConfigError::InvalidProfile {
                     field: "default_profile_id".to_string(),
-                    message: "replacement default profile is invalid".to_string(),
+                    message: "replacement default must be a runnable ACP / JSON-RPC stdio profile"
+                        .to_string(),
                 });
             }
             config.default_profile_id = Some(replacement);
@@ -447,6 +463,9 @@ impl AgentProfileStore {
         snapshot: AgentProfileSnapshot,
     ) -> Result<AgentProfileSnapshot, AgentConfigError> {
         let _guard = lock_config_io();
+        for profile in &snapshot.profiles {
+            ensure_profile_can_be_saved(profile)?;
+        }
         let config = normalize_config(AgentConfigFile {
             schema_version: snapshot.schema_version,
             profiles: snapshot.profiles,
@@ -699,9 +718,15 @@ fn normalize_config(mut config: AgentConfigFile) -> Result<AgentConfigFile, Agen
             config
                 .profiles
                 .iter()
-                .any(|profile| profile.id == *profile_id)
+                .any(|profile| profile.id == *profile_id && profile.transport.can_be_default())
         })
-        .or_else(|| config.profiles.first().map(|profile| profile.id.clone()));
+        .or_else(|| {
+            config
+                .profiles
+                .iter()
+                .find(|profile| profile.transport.can_be_default())
+                .map(|profile| profile.id.clone())
+        });
     Ok(config)
 }
 

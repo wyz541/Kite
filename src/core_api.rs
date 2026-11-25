@@ -19,7 +19,8 @@ use serde_json::{Map, Value, json};
 
 use crate::agent::{
     AgentPermissionDecision, AgentProfile, AgentProfileStore, AgentRuntime, AgentRuntimeSnapshot,
-    AgentRuntimeState, diagnose_agents, new_agent_conversation_id, test_agent_connection,
+    AgentRuntimeState, agent_transport_capabilities, diagnose_agents, new_agent_conversation_id,
+    test_agent_connection,
 };
 use crate::fs::{EntryKind, SortKey, SortSpec, load_directory};
 use crate::session::load_session;
@@ -612,8 +613,14 @@ impl CoreApi {
 
     fn agent_profiles_list(&self) -> Result<Value, CoreError> {
         let snapshot = self.profiles.snapshot();
-        serde_json::to_value(snapshot)
-            .map_err(|error| CoreError::new("serialization", error.to_string()))
+        let mut value = serde_json::to_value(snapshot)
+            .map_err(|error| CoreError::new("serialization", error.to_string()))?;
+        let capabilities = serde_json::to_value(agent_transport_capabilities())
+            .map_err(|error| CoreError::new("serialization", error.to_string()))?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("transport_capabilities".to_string(), capabilities);
+        }
+        Ok(value)
     }
 
     fn agent_connection_test(&self, arguments: &Map<String, Value>) -> Result<Value, CoreError> {
@@ -629,6 +636,8 @@ impl CoreApi {
             "capabilities": result.capabilities,
             "auth_methods": result.auth_methods,
             "elapsed_ms": result.elapsed_ms,
+            "session_supported": result.session_supported,
+            "profile_save_supported": result.profile_save_supported,
         }))
     }
 
@@ -638,6 +647,7 @@ impl CoreApi {
         execution: &ExecutionContext,
     ) -> Result<Value, CoreError> {
         let profile = self.select_profile(optional_string(arguments, "profile_id")?)?;
+        ensure_profile_can_start_session(&profile)?;
         let working_directory = match optional_string(arguments, "working_directory")? {
             Some(path) => path.to_string(),
             None => std::env::current_dir()
@@ -802,6 +812,7 @@ impl CoreApi {
 
     fn agent_run(&mut self, arguments: &Map<String, Value>) -> Result<Value, CoreError> {
         let profile = self.select_profile(optional_string(arguments, "profile_id")?)?;
+        ensure_profile_can_start_session(&profile)?;
         let working_directory = match optional_string(arguments, "working_directory")? {
             Some(path) => path.to_string(),
             None => std::env::current_dir()
@@ -1024,7 +1035,11 @@ impl CoreApi {
         }
         let snapshot = self.profiles.snapshot();
         snapshot.default_profile().cloned().ok_or_else(|| {
-            CoreError::new("profile_not_configured", "no Agent profile is configured")
+            CoreError::new(
+                "profile_not_configured",
+                "no runnable ACP / JSON-RPC stdio Agent profile is configured",
+            )
+            .with_recovery("Open Agent settings and save an ACP / JSON-RPC stdio profile.")
         })
     }
 
@@ -1095,7 +1110,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "agent_profiles_list",
-            "List Agent profiles loaded by Kite, including the resolved default profile.",
+            "List Agent profiles, the runnable default, and the shared transport capability matrix.",
             schema(json!({}), &[]),
             true,
             false,
@@ -1103,7 +1118,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "agent_connection_test",
-            "Run the ACP initialize handshake for a profile without starting a prompt.",
+            "Probe a profile without starting a prompt. A successful result may be diagnostic-only when session_supported is false.",
             schema(
                 json!({
                     "profile_id": { "type": "string", "description": "Profile id; uses the default when omitted." }
@@ -1116,7 +1131,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "agent_session_start",
-            "Start a persistent ACP Agent session. Sessions live in the MCP server or CLI batch process.",
+            "Start a persistent ACP stdio Agent session. Connection-test-only transports return unsupported_transport.",
             schema(
                 json!({
                     "profile_id": { "type": "string" },
@@ -1356,6 +1371,31 @@ fn apply_context_timeout(
         .unwrap_or(remaining);
     arguments.insert(key.to_string(), json!(existing.min(remaining)));
     Ok(())
+}
+
+fn ensure_profile_can_start_session(profile: &AgentProfile) -> Result<(), CoreError> {
+    if profile.transport.supports_session() {
+        return Ok(());
+    }
+    let capability = profile.transport.capabilities();
+    Err(CoreError::new(
+        "unsupported_transport",
+        format!(
+            "transport {label} is connection-test-only in this release; use ACP / JSON-RPC stdio to start an Agent session",
+            label = profile.transport.label()
+        ),
+    )
+    .with_kind(CoreErrorKind::PreconditionFailed)
+    .with_recovery(
+        capability
+            .limitation
+            .unwrap_or_else(|| "Choose ACP / JSON-RPC stdio in Agent settings.".to_string()),
+    )
+    .with_details(json!({
+        "transport": profile.transport,
+        "session_supported": capability.session_supported,
+        "supported_transports": ["acp_stdio"],
+    })))
 }
 
 fn infer_error_kind(code: &str) -> CoreErrorKind {

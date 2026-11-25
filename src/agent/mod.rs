@@ -65,6 +65,23 @@ pub enum AgentTransport {
     Cli,
 }
 
+/// Capability matrix shared by settings, menus, Core API and runtime paths.
+///
+/// Connection tests are diagnostic-only for transports whose session support
+/// has not shipped yet. Keeping this data in one place prevents the UI from
+/// presenting a successful probe as a runnable Agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
+pub struct AgentTransportCapabilities {
+    pub transport: AgentTransport,
+    pub label: String,
+    pub connection_test_supported: bool,
+    pub session_supported: bool,
+    pub profile_save_supported: bool,
+    pub can_be_default: bool,
+    pub summary: String,
+    pub limitation: Option<String>,
+}
+
 impl AgentTransport {
     pub const fn label(self) -> &'static str {
         match self {
@@ -73,6 +90,76 @@ impl AgentTransport {
             Self::Cli => "通用 CLI",
         }
     }
+
+    pub const fn display_label(self) -> &'static str {
+        match self {
+            Self::AcpStdio => "ACP / JSON-RPC (stdio)",
+            Self::AcpHttp => "ACP HTTP",
+            Self::Cli => "通用 CLI",
+        }
+    }
+
+    pub const fn supports_connection_test(self) -> bool {
+        true
+    }
+
+    /// Whether this transport can own a real Agent session today.
+    pub const fn supports_session(self) -> bool {
+        matches!(self, Self::AcpStdio)
+    }
+
+    /// Whether the transport may be persisted as a runnable profile.
+    pub const fn supports_profile_save(self) -> bool {
+        self.supports_session()
+    }
+
+    pub const fn can_be_default(self) -> bool {
+        self.supports_session()
+    }
+
+    pub fn capabilities(self) -> AgentTransportCapabilities {
+        let (summary, limitation) = match self {
+            Self::AcpStdio => (
+                "可保存，并可启动 ACP / JSON-RPC stdio 会话。".to_string(),
+                None,
+            ),
+            Self::AcpHttp => (
+                "仅用于连接测试；ACP HTTP 会话运行时尚未启用。".to_string(),
+                Some(
+                    "请在 Agent 设置中将接入方式改为 ACP / JSON-RPC stdio，并配置可执行文件。"
+                        .to_string(),
+                ),
+            ),
+            Self::Cli => (
+                "仅用于连接测试；通用 CLI 会话运行时尚未启用。".to_string(),
+                Some(
+                    "请在 Agent 设置中将接入方式改为 ACP / JSON-RPC stdio，并配置可执行文件。"
+                        .to_string(),
+                ),
+            ),
+        };
+        AgentTransportCapabilities {
+            transport: self,
+            label: self.display_label().to_string(),
+            connection_test_supported: self.supports_connection_test(),
+            session_supported: self.supports_session(),
+            profile_save_supported: self.supports_profile_save(),
+            can_be_default: self.can_be_default(),
+            summary,
+            limitation,
+        }
+    }
+}
+
+pub fn agent_transport_capabilities() -> Vec<AgentTransportCapabilities> {
+    [
+        AgentTransport::AcpStdio,
+        AgentTransport::AcpHttp,
+        AgentTransport::Cli,
+    ]
+    .into_iter()
+    .map(AgentTransport::capabilities)
+    .collect()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
@@ -213,6 +300,10 @@ impl AgentProfile {
     pub fn has_stored_credential(&self) -> bool {
         self.credential_ref.is_some()
     }
+
+    pub fn supports_session(&self) -> bool {
+        self.transport.supports_session()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
@@ -224,11 +315,21 @@ pub struct AgentProfileSnapshot {
 }
 
 impl AgentProfileSnapshot {
+    /// The default profile is always a session-capable profile. A stale or
+    /// connection-test-only default never falls through into the Agent menu.
     pub fn default_profile(&self) -> Option<&AgentProfile> {
         self.default_profile_id
             .as_deref()
-            .and_then(|id| self.profiles.iter().find(|profile| profile.id == id))
-            .or_else(|| self.profiles.first())
+            .and_then(|id| {
+                self.profiles
+                    .iter()
+                    .find(|profile| profile.id == id && profile.transport.can_be_default())
+            })
+            .or_else(|| {
+                self.profiles
+                    .iter()
+                    .find(|profile| profile.transport.can_be_default())
+            })
     }
 }
 
@@ -347,7 +448,21 @@ pub(crate) fn prepare_new_profile(
         profile.id = generate_profile_id();
     }
     validate_and_normalize_profile(&mut profile)?;
+    ensure_profile_can_be_saved(&profile)?;
     Ok(profile)
+}
+
+pub(crate) fn ensure_profile_can_be_saved(profile: &AgentProfile) -> Result<(), AgentConfigError> {
+    if profile.transport.supports_profile_save() {
+        return Ok(());
+    }
+    Err(invalid(
+        "transport",
+        format!(
+            "{} 当前只能用于连接测试；请保存 ACP / JSON-RPC stdio Profile 后再启动会话。",
+            profile.transport.capabilities().summary
+        ),
+    ))
 }
 
 pub(crate) fn prepare_loaded_profile(
@@ -774,6 +889,24 @@ mod tests {
             name: "Local Agent".to_string(),
             executable: Some("agent".to_string()),
             ..AgentProfile::default()
+        }
+    }
+
+    #[test]
+    fn transport_capability_matrix_has_one_runnable_mode() {
+        let capabilities = agent_transport_capabilities();
+        assert_eq!(capabilities.len(), 3);
+        for capability in capabilities {
+            assert!(capability.connection_test_supported);
+            assert_eq!(
+                capability.session_supported,
+                capability.transport == AgentTransport::AcpStdio
+            );
+            assert_eq!(
+                capability.profile_save_supported,
+                capability.session_supported
+            );
+            assert_eq!(capability.can_be_default, capability.session_supported);
         }
     }
 

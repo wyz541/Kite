@@ -15,6 +15,13 @@ struct AgentProfileStoreSmoke {
         precondition(initial.defaultProfileId == nil)
         precondition(initial.warning == nil)
 
+        let transportCapabilities = KiteCore().agentTransportCapabilities()
+        precondition(transportCapabilities.count == 3)
+        precondition(transportCapabilities.filter { $0.sessionSupported }.count == 1)
+        precondition(transportCapabilities.first { $0.transport == .acpStdio }?.sessionSupported == true)
+        precondition(transportCapabilities.first { $0.transport == .acpHttp }?.sessionSupported == false)
+        precondition(transportCapabilities.first { $0.transport == .cli }?.sessionSupported == false)
+
         let capabilities = AgentCapabilities(
             readSelection: true,
             readWorkspace: false,
@@ -46,6 +53,30 @@ struct AgentProfileStoreSmoke {
         let afterCreate = store.snapshot()
         precondition(afterCreate.profiles.count == 1)
         precondition(afterCreate.defaultProfileId == created.id)
+
+        let httpProbe = AgentProfile(
+            id: "",
+            name: "HTTP Probe",
+            transport: .acpHttp,
+            executable: nil,
+            endpoint: "http://127.0.0.1:9/acp",
+            arguments: [],
+            environment: [],
+            model: nil,
+            workingDirectory: .ask,
+            permission: .readOnly,
+            timeoutSeconds: 30,
+            outputLimitBytes: 65_536,
+            credentialRef: nil,
+            credentialEnvVar: nil,
+            capabilities: capabilities
+        )
+        do {
+            _ = try store.createProfile(profile: httpProbe)
+            preconditionFailure("Connection-test-only HTTP profile was saved")
+        } catch {
+            // Expected: Core rejects profiles that cannot start a session.
+        }
 
         let unsafe = AgentProfile(
             id: "",

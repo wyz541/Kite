@@ -2,6 +2,7 @@ use super::*;
 use crate::agent::{
     AgentEnvironmentVariable, AgentTransport, MAX_AGENT_PROFILE_FILE_BYTES, PermissionPolicy,
 };
+use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -133,6 +134,120 @@ fn creates_updates_defaults_and_deletes_profiles() {
     let empty = store.snapshot();
     assert!(empty.profiles.is_empty());
     assert!(empty.default_profile_id.is_none());
+}
+
+#[test]
+fn connection_test_only_transports_cannot_be_saved_or_defaulted() {
+    let temp = TestDirectory::new("transport-save-guard");
+    let store = AgentProfileStore::with_path(temp.path_string());
+
+    let mut cli = profile("CLI Probe");
+    cli.transport = AgentTransport::Cli;
+    cli.endpoint = None;
+    let error = store
+        .create_profile(cli)
+        .expect_err("CLI profiles must be connection-test-only");
+    assert!(matches!(
+        error,
+        AgentConfigError::InvalidProfile { field, .. } if field == "transport"
+    ));
+
+    let mut http = profile("HTTP Probe");
+    http.transport = AgentTransport::AcpHttp;
+    http.executable = None;
+    http.endpoint = Some("http://127.0.0.1:9/acp".to_string());
+    let error = store
+        .save_profile_with_credential(http, None, false)
+        .expect_err("HTTP profiles must not bypass the save guard");
+    assert!(matches!(
+        error,
+        AgentConfigError::InvalidProfile { field, .. } if field == "transport"
+    ));
+    assert!(!temp.config_path().exists());
+}
+
+#[test]
+fn existing_connection_test_only_profiles_are_retained_but_never_selected() {
+    let temp = TestDirectory::new("transport-existing");
+    let store = AgentProfileStore::with_path(temp.path_string());
+    fs::write(
+        temp.config_path(),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": AGENT_PROFILE_SCHEMA_VERSION,
+            "profiles": [
+                {
+                    "id": "http-probe",
+                    "name": "HTTP Probe",
+                    "transport": "acp_http",
+                    "endpoint": "http://127.0.0.1:9/acp"
+                },
+                {
+                    "id": "runnable",
+                    "name": "Runnable Agent",
+                    "transport": "acp_stdio",
+                    "executable": "agent"
+                }
+            ],
+            "default_profile_id": "http-probe"
+        }))
+        .expect("serialize config"),
+    )
+    .expect("write config");
+
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.profiles.len(), 2);
+    assert_eq!(snapshot.default_profile_id.as_deref(), Some("runnable"));
+    assert_eq!(
+        snapshot
+            .default_profile()
+            .map(|profile| profile.id.as_str()),
+        Some("runnable")
+    );
+
+    let error = store
+        .set_default_profile("http-probe".to_string())
+        .expect_err("connection-only profile must not become default");
+    assert!(matches!(
+        error,
+        AgentConfigError::InvalidProfile { field, .. } if field == "transport"
+    ));
+}
+
+#[test]
+fn deleting_the_last_runnable_default_leaves_no_implicit_default() {
+    let temp = TestDirectory::new("transport-delete-default");
+    let store = AgentProfileStore::with_path(temp.path_string());
+    fs::write(
+        temp.config_path(),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": AGENT_PROFILE_SCHEMA_VERSION,
+            "profiles": [
+                {
+                    "id": "runnable",
+                    "name": "Runnable Agent",
+                    "transport": "acp_stdio",
+                    "executable": "agent"
+                },
+                {
+                    "id": "cli-probe",
+                    "name": "CLI Probe",
+                    "transport": "cli",
+                    "executable": "agent"
+                }
+            ],
+            "default_profile_id": "runnable"
+        }))
+        .expect("serialize config"),
+    )
+    .expect("write config");
+
+    let snapshot = store
+        .delete_profile_with_replacement("runnable".to_string(), None)
+        .expect("delete last runnable default without a replacement");
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(snapshot.profiles[0].id, "cli-probe");
+    assert!(snapshot.default_profile_id.is_none());
+    assert!(snapshot.default_profile().is_none());
 }
 
 #[test]

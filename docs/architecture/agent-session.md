@@ -220,7 +220,7 @@ Linux CI 验证 POSIX 进程组路径；Windows CI 验证 Job Object 和 `CREATE
 
 ## 当前限制
 
-- 通用 CLI 适配器只有接口占位，不启动。
+- 只有 ACP / JSON-RPC stdio 可启动会话；ACP HTTP 与通用 CLI 仅用于连接测试，会话启动返回 `unsupported_transport`。
 - 尚未提供 Agent 认证 UI；认证错误会传给上层设置/会话界面。
 - 不实现 `session/load`、历史回放和跨应用重启恢复；这些属于 P1。
 - 不实现 Agent 发起的文件系统或终端客户端方法；P0 初始化时明确声明不支持。

@@ -60,6 +60,9 @@ struct ContentView: View {
             showsPreview = true
             rightPaneMode = .agent
         }
+        .onReceive(NotificationCenter.default.publisher(for: .kiteAgentProfilesDidChange)) { _ in
+            agent.refreshAgentProfiles(core: model.core)
+        }
         .animation(.snappy(duration: 0.22), value: showsSidebar)
         .environmentObject(agent)
     }

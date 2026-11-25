@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 use crate::agent::{
     self as agent_store, AgentConnectionInfo, AgentContextRepair, AgentConversation,
     AgentDiagnostics, AgentPreset, AgentProfile, AgentProfileSnapshot, AgentProfileStore,
-    AgentSessionRestore, AgentSessionStore, AgentStoreLoad,
+    AgentSessionRestore, AgentSessionStore, AgentStoreLoad, AgentTransportCapabilities,
 };
 use crate::agent_review::{
     self, AgentAuditOutcome, AgentCommandSuggestion, AgentFileChange, AgentFileChangeDraft,
@@ -1548,6 +1548,21 @@ impl KiteCore {
 
     pub fn agent_config(&self) -> AgentProfileSnapshot {
         self.agent_profile_store.snapshot()
+    }
+
+    pub fn agent_transport_capabilities(&self) -> Vec<AgentTransportCapabilities> {
+        agent_store::agent_transport_capabilities()
+    }
+
+    pub fn agent_default_profile(&self) -> Option<AgentProfile> {
+        self.agent_profile_store
+            .snapshot()
+            .default_profile()
+            .cloned()
+    }
+
+    pub fn agent_profile_can_start_session(&self, profile: AgentProfile) -> bool {
+        profile.supports_session()
     }
 
     pub fn agent_store_load(&self) -> AgentStoreLoad {

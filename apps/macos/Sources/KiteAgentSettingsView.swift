@@ -15,6 +15,7 @@ final class KiteAgentSettingsStore: ObservableObject {
     @Published private(set) var tests: [String: AgentConnectionResult] = [:]
     @Published private(set) var testingIDs: Set<String> = []
     @Published private(set) var error: String?
+    @Published private(set) var transportCapabilities: [AgentTransportCapabilities] = []
 
     private var core: KiteCore?
 
@@ -25,6 +26,7 @@ final class KiteAgentSettingsStore: ObservableObject {
 
     func reload() {
         guard let core else { return }
+        transportCapabilities = core.agentTransportCapabilities()
         apply(core.agentConfig())
     }
 
@@ -94,7 +96,9 @@ final class KiteAgentSettingsStore: ObservableObject {
                 protocolVersion: nil,
                 capabilities: [],
                 authMethods: [],
-                elapsedMs: 0
+                elapsedMs: 0,
+                sessionSupported: false,
+                profileSaveSupported: false
             )
         }
         return await Task.detached(priority: .userInitiated) {
@@ -105,6 +109,36 @@ final class KiteAgentSettingsStore: ObservableObject {
     var defaultProfile: AgentProfile? {
         guard let defaultProfileID else { return nil }
         return profiles.first { $0.id == defaultProfileID }
+    }
+
+    func capability(for transport: AgentTransport) -> AgentTransportCapabilities? {
+        transportCapabilities.first { $0.transport == transport }
+    }
+
+    func canStartSession(_ transport: AgentTransport) -> Bool {
+        capability(for: transport)?.sessionSupported == true
+    }
+
+    func canStartSession(_ profile: AgentProfile) -> Bool {
+        canStartSession(profile.transport)
+    }
+
+    func canSaveProfile(_ transport: AgentTransport) -> Bool {
+        capability(for: transport)?.profileSaveSupported == true
+    }
+
+    func canTestConnection(_ transport: AgentTransport) -> Bool {
+        capability(for: transport)?.connectionTestSupported == true
+    }
+
+    func transportLabel(for transport: AgentTransport, includeDiagnosticSuffix: Bool = true) -> String {
+        guard let capability = capability(for: transport) else {
+            return transport.label
+        }
+        if includeDiagnosticSuffix && !capability.profileSaveSupported {
+            return "\(capability.label)（仅测试）"
+        }
+        return capability.label
     }
 
     private func apply(_ snapshot: AgentProfileSnapshot) {
@@ -360,7 +394,7 @@ struct KiteAgentSettingsView: View {
             }
             presetsSection
             diagnosticsSection
-            Text("Token 或密码只写入 macOS 钥匙串；agent.json 仅保存 keychain:// 引用。通用 CLI 的权限由 Agent 自身管理，Kite 不声称完成沙箱隔离。")
+            Text("Token 或密码只写入 macOS 钥匙串；agent.json 仅保存 keychain:// 引用。只有 ACP / JSON-RPC stdio 可保存为可运行配置。")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -400,12 +434,12 @@ struct KiteAgentSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Agent 由外部进程提供。")
                 .font(.system(size: 12, weight: .medium))
-            Text("Kite 只保存最小接入信息、工作目录策略和权限摘要，不扫描或导入其他工具配置。")
+            Text("仅 ACP / JSON-RPC stdio 可保存并启动会话；ACP HTTP 和通用 CLI 只用于连接测试。")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 Spacer()
-                Button("使用 CLI 预设") { openNew(.cli) }
+                Button("测试通用 CLI") { openNew(.cli) }
                     .controlSize(.small)
                 Button("添加 Agent") { openNew(.acpStdio) }
                     .buttonStyle(.borderedProminent)
@@ -423,14 +457,14 @@ struct KiteAgentSettingsView: View {
                 .background(Color.purple.opacity(0.12), in: RoundedRectangle(cornerRadius: 15))
             Text("尚未配置 Agent")
                 .font(.system(size: 16, weight: .semibold))
-            Text("添加一个 ACP Agent，或先用通用 CLI 预设验证启动命令。")
+            Text("添加一个 ACP / JSON-RPC stdio Agent。ACP HTTP 和通用 CLI 仅用于连接测试。")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             HStack(spacing: 8) {
                 Button("添加 Agent") { openNew(.acpStdio) }
                     .buttonStyle(.borderedProminent)
-                Button("使用预设") { openNew(.cli) }
+                Button("测试通用 CLI") { openNew(.cli) }
             }
             .controlSize(.small)
         }
@@ -460,7 +494,7 @@ struct KiteAgentSettingsView: View {
                             HStack(spacing: 6) {
                                 Text(profile.name).font(.system(size: 13, weight: .semibold))
                                 agentBadge("默认", color: .accentColor)
-                                agentBadge(profile.transport.label, color: .purple)
+                                agentBadge(store.transportLabel(for: profile.transport, includeDiagnosticSuffix: false), color: .purple)
                             }
                             Text(profile.connectionTarget)
                                 .font(.system(size: 10.5, design: .monospaced))
@@ -476,7 +510,7 @@ struct KiteAgentSettingsView: View {
                             Task { await store.testAndRecord(profile) }
                         }
                         .controlSize(.small)
-                        .disabled(store.isTesting(profile))
+                        .disabled(store.isTesting(profile) || !store.canTestConnection(profile.transport))
                     }
                     if let result = store.tests[profile.id] {
                         KiteAgentConnectionResultView(result: result)
@@ -489,6 +523,14 @@ struct KiteAgentSettingsView: View {
                         .stroke(Color.purple.opacity(0.28), lineWidth: 1)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                Text("当前没有可运行的默认 Agent。请编辑一个配置并将接入方式改为 ACP / JSON-RPC stdio。")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
             }
         }
     }
@@ -513,13 +555,16 @@ struct KiteAgentSettingsView: View {
 
     private func agentProfileRow(_ profile: AgentProfile) -> some View {
         let isDefault = store.defaultProfileID == profile.id
+        let canRun = store.canStartSession(profile)
+        let canSave = store.canSaveProfile(profile.transport)
         return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(profile.name).font(.system(size: 13, weight: .medium))
                         if isDefault { agentBadge("默认", color: .accentColor) }
-                        agentBadge(profile.transport.label, color: .purple)
+                        agentBadge(store.transportLabel(for: profile.transport, includeDiagnosticSuffix: false), color: .purple)
+                        if !canRun { agentBadge("仅测试", color: .orange) }
                     }
                     Text(profile.connectionTarget)
                         .font(.system(size: 10.5, design: .monospaced))
@@ -535,12 +580,14 @@ struct KiteAgentSettingsView: View {
                     Button(store.isTesting(profile) ? "测试中…" : "测试") {
                         Task { await store.testAndRecord(profile) }
                     }
-                    .disabled(store.isTesting(profile))
+                    .disabled(store.isTesting(profile) || !store.canTestConnection(profile.transport))
                     Button("编辑") { editorDraft = AgentProfileDraft(profile: profile) }
-                    Button("复制") {
-                        editorDraft = AgentProfileDraft.duplicate(profile, core: core)
+                    if canSave {
+                        Button("复制") {
+                            editorDraft = AgentProfileDraft.duplicate(profile, core: core)
+                        }
                     }
-                    if !isDefault { Button("设为默认") { store.setDefault(profile) } }
+                    if !isDefault && canRun { Button("设为默认") { store.setDefault(profile) } }
                     Button("删除", role: .destructive) { deleteTarget = profile }
                 }
                 .controlSize(.small)
@@ -681,8 +728,11 @@ struct KiteAgentSettingsView: View {
 
     @ViewBuilder
     private func deleteButtons(for profile: AgentProfile) -> some View {
-        if store.defaultProfileID == profile.id && store.profiles.count > 1 {
-            ForEach(store.profiles.filter { $0.id != profile.id }, id: \.id) { candidate in
+        let runnableReplacements = store.profiles.filter {
+            $0.id != profile.id && store.canStartSession($0)
+        }
+        if store.defaultProfileID == profile.id && !runnableReplacements.isEmpty {
+            ForEach(runnableReplacements, id: \.id) { candidate in
                 Button("删除并设为 \(candidate.name)", role: .destructive) {
                     store.delete(profile, replacementDefaultID: candidate.id)
                     deleteTarget = nil
@@ -697,8 +747,14 @@ struct KiteAgentSettingsView: View {
     }
 
     private func deleteMessage(for profile: AgentProfile) -> String {
+        let hasRunnableReplacement = store.profiles.contains {
+            $0.id != profile.id && store.canStartSession($0)
+        }
+        if store.defaultProfileID == profile.id && hasRunnableReplacement {
+            return "这是当前默认 Agent。请选择一个可运行的新默认 Agent，然后删除。"
+        }
         if store.defaultProfileID == profile.id && store.profiles.count > 1 {
-            return "这是当前默认 Agent。请选择一个新的默认 Agent，然后删除。"
+            return "删除后将没有可运行的默认 Agent；其余配置只能用于连接测试。"
         }
         if store.profiles.count == 1 { return "这会让 Agent 列表变为空。" }
         return "此操作会从 agent.json 删除配置，并清理对应钥匙串条目。"
@@ -771,8 +827,8 @@ private struct KiteAgentEditorView: View {
                     workspaceSection
                     credentialSection
                     advancedSection
-                    if draft.transport == .cli {
-                        warningBox("通用 CLI 不是 ACP 协议会话。Kite 只能验证可执行文件能否启动；文件写入、命令和网络权限均由 Agent 自身管理。")
+                    if let capability = store.capability(for: draft.transport), !capability.sessionSupported {
+                        warningBox("\(capability.summary) \(capability.limitation ?? "")")
                     }
                     if let testResult { KiteAgentConnectionResultView(result: testResult) }
                     if let error { notice(error, systemImage: "exclamationmark.triangle.fill", color: .red) }
@@ -801,7 +857,7 @@ private struct KiteAgentEditorView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(draft.isNew ? "添加 Agent" : "编辑 Agent")
                     .font(.system(size: 18, weight: .semibold))
-                Text("测试使用当前表单值，但不会保存；只有“保存”会写入 agent.json。")
+                Text("测试使用当前表单值，但不会保存；只有 ACP / JSON-RPC stdio 可以保存为可运行配置。")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
@@ -824,11 +880,12 @@ private struct KiteAgentEditorView: View {
                     .accessibilityLabel("Agent 名称")
             }
             AgentDivider()
-            editorField("接入方式", detail: "ACP 会执行 initialize 握手；通用 CLI 只验证进程能否启动。") {
+            editorField("接入方式", detail: "只有 ACP / JSON-RPC stdio 可保存并启动会话；ACP HTTP 和通用 CLI 仅执行连接测试。") {
                 Picker("接入方式", selection: $draft.transport) {
-                    Text("ACP / JSON-RPC").tag(AgentTransport.acpStdio)
-                    Text("ACP HTTP").tag(AgentTransport.acpHttp)
-                    Text("通用 CLI").tag(AgentTransport.cli)
+                    ForEach(Array(store.transportCapabilities.enumerated()), id: \.offset) { _, capability in
+                        Text(store.transportLabel(for: capability.transport))
+                            .tag(capability.transport)
+                    }
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
@@ -992,15 +1049,17 @@ private struct KiteAgentEditorView: View {
 
     private var editorFooter: some View {
         HStack(spacing: 10) {
-            Text("失败测试不会修改已保存配置。关闭或取消时若有未保存修改，Kite 会先确认。")
+            Text("仅 ACP / JSON-RPC stdio 可保存为可运行配置；其他接入方式只执行连接测试。")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
             Spacer()
             Button("取消") { requestClose() }.keyboardShortcut(.cancelAction)
-            Button(testing ? "测试中…" : "测试连接") { testConnection() }.disabled(testing)
+            Button(testing ? "测试中…" : "测试连接") { testConnection() }
+                .disabled(testing || !store.canTestConnection(draft.transport))
             Button("保存") { save() }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
+                .disabled(!store.canSaveProfile(draft.transport))
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
@@ -1124,6 +1183,12 @@ private struct KiteAgentConnectionResultView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                if !result.sessionSupported {
+                    Text("此接入方式仅用于连接测试，无论结果如何都不能启动 Agent 会话；请改用 ACP / JSON-RPC stdio。")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 0)
         }

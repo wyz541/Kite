@@ -72,8 +72,10 @@ schema 1。高于当前版本的配置不会被覆盖；调用方会收到 `Unkn
 | `credential_env_var` | 可选；启动进程时注入已保存凭据的环境变量名 |
 | `capabilities` | Agent 声明支持的读取、写入、命令、网络和权限请求能力 |
 
-`default_profile_id` 在存在 Profile 时始终指向一个有效 Profile。创建第一个 Profile 会将其设为
-默认值；删除默认 Profile 后自动选择剩余列表中的第一个。
+`default_profile_id` 只指向可启动会话的 Profile（当前仅有 `acp_stdio`）。创建第一个可运行
+Profile 会将其设为默认值；删除默认 Profile 后优先选择剩余的可运行 Profile，若没有则为
+`None`。旧版本留下的 `acp_http` 或 `cli` Profile 会保留以支持诊断，但不能保存为可运行配置、
+不能设为默认，也不会进入右键菜单或 Agent 栏的可用状态。
 
 ## 校验与凭据边界
 
@@ -81,6 +83,7 @@ Core 在保存前统一校验并规范化字段：
 
 - Profile 名称去除首尾空白，长度不超过 80 字节。
 - 进程型传输必须提供 `executable`，HTTP 传输必须提供有效 `endpoint`；二者不能混用。
+- 当前仅 `acp_stdio` 可保存为可运行 Profile；`acp_http` 和 `cli` 只允许旧配置加载与连接测试。
 - 环境变量名必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，且忽略大小写后不能重复。
 - 参数、环境变量、模型、端点和凭据引用都会检查常见明文密钥形式。
 - 带内嵌用户名或密码的 URL 会被拒绝。
@@ -125,6 +128,11 @@ Core 在保存前统一校验并规范化字段：
 - `saveProfileWithCredential(profile:credential:clearCredential:)`
 - `setDefaultProfile(profileId:)`
 - `reset()`
+
+`KiteCore` additionally exposes `agentTransportCapabilities()`,
+`agentDefaultProfile()` and `agentProfileCanStartSession(profile:)` so
+native UIs use the same transport matrix and default-profile semantics as the
+runtime.
 
 `KiteCore.agentProfileStore()` 返回共享 Store 实例。Windows 直接调用 Rust Core；macOS 通过
 生成的 Swift 绑定调用同一套记录、方法和错误类型。Swift 冒烟测试位于
