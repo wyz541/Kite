@@ -18,7 +18,7 @@ use crate::agent::model::{
     AgentSessionPermissionRequest, AgentToolCall,
 };
 use crate::agent::process::{ProcessGuard, ProcessHandle};
-use crate::agent::redact::Redactor;
+use crate::agent::redact::{Redactor, StreamingRedactor};
 use crate::agent::transport::{AgentHandshake, AgentPrompt, AgentTransport, TransportEvent};
 
 const DIAGNOSTIC_DETAIL_CHARS: usize = 2048;
@@ -44,6 +44,10 @@ pub(crate) struct AcpStdioTransport {
     incoming: Option<Receiver<Incoming>>,
     events: Option<Arc<EventDispatcher>>,
     redactor: Option<Arc<Redactor>>,
+    message_stream: Option<StreamingRedactor>,
+    message_stream_id: Option<Option<String>>,
+    thought_stream: Option<StreamingRedactor>,
+    thought_stream_id: Option<Option<String>>,
     next_id: u64,
     session_id: Option<String>,
     pending_prompt: Option<u64>,
@@ -63,6 +67,10 @@ impl AcpStdioTransport {
             incoming: None,
             events: None,
             redactor: None,
+            message_stream: None,
+            message_stream_id: None,
+            thought_stream: None,
+            thought_stream_id: None,
             next_id: 1,
             session_id: None,
             pending_prompt: None,
@@ -102,6 +110,8 @@ impl AcpStdioTransport {
         self.stdin = Some(spawned.stdin);
         self.events = Some(events.clone());
         self.redactor = Some(config.redactor.clone());
+        self.message_stream = Some(StreamingRedactor::new(config.redactor.clone()));
+        self.thought_stream = Some(StreamingRedactor::new(config.redactor.clone()));
         self.max_output_bytes = config.max_output_bytes;
         self.shutdown_timeout = config.shutdown_timeout;
         self.output_bytes.store(0, Ordering::Release);
@@ -484,6 +494,14 @@ impl AcpStdioTransport {
             return Err(AgentError::invalid_configuration("Agent 提示词不能为空。"));
         }
         self.output_bytes.store(0, Ordering::Release);
+        self.message_stream_id = None;
+        self.thought_stream_id = None;
+        if let Some(stream) = self.message_stream.as_mut() {
+            stream.reset();
+        }
+        if let Some(stream) = self.thought_stream.as_mut() {
+            stream.reset();
+        }
 
         let mut prompt_blocks = Vec::new();
         if !prompt.text.is_empty() {
@@ -626,7 +644,32 @@ impl AcpStdioTransport {
             })?;
         let reason = crate::agent::model::AgentStopReason::from_wire(reason);
         self.pending_prompt = None;
+        self.flush_redacted_chunks();
         Ok(Some(TransportEvent::PromptCompleted(reason)))
+    }
+
+    fn flush_redacted_chunks(&mut self) {
+        let Some(events) = self.events.as_ref().cloned() else {
+            return;
+        };
+        if let Some(stream) = self.message_stream.as_mut() {
+            let text = stream.finish();
+            if !text.is_empty() {
+                events.emit(AgentSessionEvent::MessageChunk {
+                    text,
+                    message_id: self.message_stream_id.clone().flatten(),
+                });
+            }
+        }
+        if let Some(stream) = self.thought_stream.as_mut() {
+            let text = stream.finish();
+            if !text.is_empty() {
+                events.emit(AgentSessionEvent::ThoughtChunk {
+                    text,
+                    message_id: self.thought_stream_id.clone().flatten(),
+                });
+            }
+        }
     }
 
     fn handle_permission_request(
@@ -650,14 +693,17 @@ impl AcpStdioTransport {
             .and_then(Value::as_str)
             .ok_or_else(|| AgentError::new(AgentErrorKind::Protocol, "Agent 工具调用缺少标识。"))?
             .to_string();
+        let redactor = self.redactor.clone();
         let title = tool_call
             .get("title")
             .and_then(Value::as_str)
-            .map(str::to_string);
+            .map(str::to_string)
+            .map(|value| redact_optional(&redactor, value));
         let kind = tool_call
             .get("kind")
             .and_then(Value::as_str)
-            .map(str::to_string);
+            .map(str::to_string)
+            .map(|value| redact_optional(&redactor, value));
 
         let mut options = Vec::new();
         let mut option_ids = HashSet::new();
@@ -683,8 +729,8 @@ impl AcpStdioTransport {
             option_ids.insert(option_id.to_string());
             options.push(AgentSessionPermissionOption {
                 option_id: option_id.to_string(),
-                name: name.to_string(),
-                kind: kind.to_string(),
+                name: redact_optional(&redactor, name.to_string()),
+                kind: redact_optional(&redactor, kind.to_string()),
             });
         }
         if options.is_empty() {
@@ -771,10 +817,11 @@ impl AcpStdioTransport {
             .get("sessionUpdate")
             .and_then(Value::as_str)
             .ok_or_else(|| AgentError::new(AgentErrorKind::Protocol, "Agent 会话更新缺少类型。"))?;
-        let events = self
-            .events
-            .as_ref()
-            .ok_or_else(|| AgentError::new(AgentErrorKind::Closed, "Agent 事件通道已经关闭。"))?;
+        let events =
+            self.events.as_ref().cloned().ok_or_else(|| {
+                AgentError::new(AgentErrorKind::Closed, "Agent 事件通道已经关闭。")
+            })?;
+        let redactor = self.redactor.clone();
         let message_id = update
             .get("messageId")
             .and_then(Value::as_str)
@@ -789,13 +836,30 @@ impl AcpStdioTransport {
                     .unwrap_or_default()
                     .to_string();
                 if kind == "agent_message_chunk" {
-                    events.emit(AgentSessionEvent::MessageChunk { text, message_id });
+                    self.message_stream_id = Some(message_id.clone());
+                    let text = self
+                        .message_stream
+                        .as_mut()
+                        .map(|stream| stream.push(&text))
+                        .unwrap_or_else(|| redact_optional(&redactor, text.clone()));
+                    if !text.is_empty() {
+                        events.emit(AgentSessionEvent::MessageChunk { text, message_id });
+                    }
                 } else {
-                    events.emit(AgentSessionEvent::ThoughtChunk { text, message_id });
+                    self.thought_stream_id = Some(message_id.clone());
+                    let text = self
+                        .thought_stream
+                        .as_mut()
+                        .map(|stream| stream.push(&text))
+                        .unwrap_or_else(|| redact_optional(&redactor, text.clone()));
+                    if !text.is_empty() {
+                        events.emit(AgentSessionEvent::ThoughtChunk { text, message_id });
+                    }
                 }
             }
             "tool_call" | "tool_call_update" => {
-                let tool_call = parse_tool_call(update)?;
+                let mut tool_call = parse_tool_call(update)?;
+                redact_tool_call(&redactor, &mut tool_call);
                 events.emit(AgentSessionEvent::ToolCallUpdated { tool_call });
             }
             "plan" => {
@@ -807,15 +871,20 @@ impl AcpStdioTransport {
                             .iter()
                             .filter_map(|entry| {
                                 Some(AgentPlanEntry {
-                                    content: entry.get("content")?.as_str()?.to_string(),
+                                    content: redact_optional(
+                                        &redactor,
+                                        entry.get("content")?.as_str()?.to_string(),
+                                    ),
                                     status: entry
                                         .get("status")
                                         .and_then(Value::as_str)
-                                        .map(str::to_string),
+                                        .map(str::to_string)
+                                        .map(|value| redact_optional(&redactor, value)),
                                     priority: entry
                                         .get("priority")
                                         .and_then(Value::as_str)
-                                        .map(str::to_string),
+                                        .map(str::to_string)
+                                        .map(|value| redact_optional(&redactor, value)),
                                 })
                             })
                             .collect()
@@ -858,6 +927,32 @@ impl From<AgentFailure> for AgentError {
             retryable: failure.retryable,
         }
     }
+}
+
+fn redact_optional(redactor: &Option<Arc<Redactor>>, value: String) -> String {
+    redactor
+        .as_ref()
+        .map(|redactor| redactor.redact(&value))
+        .unwrap_or(value)
+}
+
+fn redact_tool_call(redactor: &Option<Arc<Redactor>>, tool_call: &mut AgentToolCall) {
+    tool_call.title = tool_call
+        .title
+        .take()
+        .map(|value| redact_optional(redactor, value));
+    tool_call.kind = tool_call
+        .kind
+        .take()
+        .map(|value| redact_optional(redactor, value));
+    tool_call.status = tool_call
+        .status
+        .take()
+        .map(|value| redact_optional(redactor, value));
+    tool_call.content = tool_call
+        .content
+        .take()
+        .map(|value| redact_optional(redactor, value));
 }
 
 fn bool_field(value: &Value, field: &str) -> bool {

@@ -57,6 +57,24 @@ pub fn remove_secret(_profile_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn resolve_secret(profile_id: &str, credential_ref: &str) -> Result<Option<String>, String> {
+    let (scheme, reference) = credential_ref
+        .split_once(':')
+        .ok_or_else(|| "凭据引用格式无效".to_string())?;
+    match scheme {
+        "env" => match std::env::var(reference.trim()) {
+            Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_string())),
+            Ok(_) => Ok(None),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(format!("环境变量 {reference} 中的凭据不是有效 Unicode"))
+            }
+        },
+        "keychain" | "credential" => load_secret(profile_id),
+        _ => Err(format!("不支持的凭据引用 scheme：{scheme}")),
+    }
+}
+
 pub fn has_secret(profile_id: &str) -> bool {
     load_secret(profile_id).ok().flatten().is_some()
 }
@@ -65,6 +83,22 @@ pub fn has_secret(profile_id: &str) -> bool {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn env_reference_resolves_without_storing_the_value_in_the_reference() {
+        let name = format!("KITE_AGENT_TEST_CREDENTIAL_{}", std::process::id());
+        let value = format!("random-credential-{}", std::process::id());
+        unsafe { std::env::set_var(&name, &value) };
+        let reference = format!("env:{name}");
+        assert!(!reference.contains(&value));
+        assert_eq!(
+            resolve_secret("unused-profile", &reference)
+                .expect("resolve env credential")
+                .as_deref(),
+            Some(value.as_str())
+        );
+        unsafe { std::env::remove_var(&name) };
+    }
 
     #[test]
     #[ignore = "writes a temporary entry to the local system keychain"]

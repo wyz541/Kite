@@ -23,8 +23,13 @@ fn main() {
     }
 
     if scenario != "auth" && scenario != "idle" {
-        let secret = env::var("FIXTURE_TOKEN").unwrap_or_else(|_| "fixture-secret".to_string());
-        eprintln!("fixture diagnostic token={secret} url=https://alice:hunter2@example.test/path");
+        if let Some(secret) = fixture_secret() {
+            eprintln!(
+                "fixture diagnostic credential {secret} url=https://alice:hunter2@example.test/path"
+            );
+        } else {
+            eprintln!("fixture diagnostic ready");
+        }
     }
 
     while let Some(Ok(line)) = lines.next() {
@@ -100,13 +105,15 @@ fn handle_prompt(
     let id = message["id"].clone();
     match scenario {
         "error" => {
-            let secret = env::var("FIXTURE_TOKEN").unwrap_or_else(|_| "fixture-secret".to_string());
+            let message = fixture_secret()
+                .map(|secret| format!("fixture failure at credential {secret} end"))
+                .unwrap_or_else(|| "fixture failure".to_string());
             write_json(&json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "error": {
                     "code": -32603,
-                    "message": format!("fixture failure token={secret}")
+                    "message": message
                 }
             }));
         }
@@ -180,6 +187,45 @@ fn handle_prompt(
             send_chunk("println!(\"streaming markdown\");\n");
             send_chunk("```\n");
             finish_prompt(id, "end_turn");
+        }
+        "secret-stream" => {
+            let Some(secret) = fixture_secret() else {
+                write_json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": "fixture credential is missing"
+                    }
+                }));
+                return;
+            };
+            send_chunk("## Fixture answer\n\n");
+            let split = secret.len().min(5);
+            send_chunk(&format!("before {}", &secret[..split]));
+            send_chunk(&format!("{}\n", &secret[split..]));
+            finish_prompt(id, "end_turn");
+        }
+        "secret-error" => {
+            let Some(secret) = fixture_secret() else {
+                write_json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": "fixture credential is missing"
+                    }
+                }));
+                return;
+            };
+            write_json(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32603,
+                    "message": format!("fixture failure at credential {secret} end")
+                }
+            }));
         }
         "long" => {
             let chunk = "0123456789abcdef".repeat(64);
@@ -273,6 +319,13 @@ fn handle_prompt(
             finish_prompt(id, "end_turn");
         }
     }
+}
+
+fn fixture_secret() -> Option<String> {
+    env::var("FIXTURE_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn scenario() -> String {

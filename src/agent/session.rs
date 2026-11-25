@@ -13,6 +13,7 @@ use crate::agent::model::{
     AgentSessionEventCallback, AgentSessionState, AgentStopReason,
 };
 use crate::agent::process::ProcessHandle;
+use crate::agent::redact::Redactor;
 use crate::agent::transport::{AgentPrompt as TransportPrompt, TransportEvent, transport_for};
 
 /// A non-blocking Rust Core owner for one external ACP Agent process.
@@ -295,6 +296,7 @@ fn run_worker(
     closed: Arc<AtomicBool>,
 ) {
     let mut active: Option<ActiveAgent> = None;
+    let redactor = config.redactor.clone();
 
     loop {
         let command = if active.is_some() {
@@ -318,7 +320,7 @@ fn run_worker(
                     exit_code: status.code(),
                 });
                 let error = process_exit_error(status.code());
-                emit_error(&dispatcher, &error);
+                emit_error(&dispatcher, &error, &redactor);
                 set_state(&state, &dispatcher, &closed, AgentSessionState::Failed);
                 break;
             }
@@ -332,6 +334,7 @@ fn run_worker(
                         &dispatcher,
                         AgentDiagnosticLevel::Warning,
                         "Agent 会话已经启动。",
+                        &redactor,
                     );
                     continue;
                 }
@@ -345,7 +348,7 @@ fn run_worker(
                         set_state(&state, &dispatcher, &closed, AgentSessionState::Ready);
                     }
                     Err(error) => {
-                        emit_error(&dispatcher, &error);
+                        emit_error(&dispatcher, &error, &redactor);
                         set_state(&state, &dispatcher, &closed, AgentSessionState::Failed);
                         break;
                     }
@@ -354,7 +357,7 @@ fn run_worker(
             SessionCommand::Prompt(prompt) => {
                 let Some(agent) = active.as_mut() else {
                     let error = closed_error();
-                    emit_error(&dispatcher, &error);
+                    emit_error(&dispatcher, &error, &redactor);
                     set_state(&state, &dispatcher, &closed, AgentSessionState::Failed);
                     break;
                 };
@@ -404,7 +407,7 @@ fn run_worker(
                         if terminal {
                             agent.transport.shutdown();
                         }
-                        emit_error(&dispatcher, &error);
+                        emit_error(&dispatcher, &error, &redactor);
                         set_state(
                             &state,
                             &dispatcher,
@@ -428,6 +431,7 @@ fn run_worker(
                     &dispatcher,
                     AgentDiagnosticLevel::Warning,
                     "当前没有等待处理的 Agent 权限请求。",
+                    &redactor,
                 );
             }
             SessionCommand::Shutdown => {
@@ -515,6 +519,7 @@ fn run_turn(
                                 dispatcher,
                                 AgentDiagnosticLevel::Warning,
                                 &format!("发送 Agent 取消请求失败：{}", error.message()),
+                                &config.redactor,
                             );
                         }
                     }
@@ -536,6 +541,7 @@ fn run_turn(
                             dispatcher,
                             AgentDiagnosticLevel::Warning,
                             "Agent 权限请求已失效。",
+                            &config.redactor,
                         );
                     }
                     Err(error) => {
@@ -543,6 +549,7 @@ fn run_turn(
                             dispatcher,
                             AgentDiagnosticLevel::Warning,
                             &format!("Agent 权限响应失败：{}", error.message()),
+                            &config.redactor,
                         );
                     }
                 },
@@ -555,6 +562,7 @@ fn run_turn(
                         dispatcher,
                         AgentDiagnosticLevel::Warning,
                         "Agent 正在执行任务，已忽略新的提示词。",
+                        &config.redactor,
                     );
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -710,16 +718,22 @@ fn set_state(
     true
 }
 
-fn emit_error(dispatcher: &EventDispatcher, error: &AgentError) {
-    dispatcher.emit(AgentSessionEvent::Error {
-        failure: error.as_failure(),
-    });
+fn emit_error(dispatcher: &EventDispatcher, error: &AgentError, redactor: &Redactor) {
+    let mut failure = error.as_failure();
+    failure.message = redactor.redact(&failure.message);
+    failure.detail = failure.detail.map(|detail| redactor.redact(&detail));
+    dispatcher.emit(AgentSessionEvent::Error { failure });
 }
 
-fn emit_diagnostic(dispatcher: &EventDispatcher, level: AgentDiagnosticLevel, message: &str) {
+fn emit_diagnostic(
+    dispatcher: &EventDispatcher,
+    level: AgentDiagnosticLevel,
+    message: &str,
+    redactor: &Redactor,
+) {
     dispatcher.emit(AgentSessionEvent::Diagnostic {
         level,
-        message: message.to_string(),
+        message: redactor.redact(message),
     });
 }
 

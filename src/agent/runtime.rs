@@ -9,8 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::agent::diagnostics::{record_agent_event, redact_agent_text};
+use crate::agent::diagnostics::record_agent_event;
 use crate::agent::process::{spawn_agent_process, terminate_agent_process};
+use crate::agent::redact::{Redactor, StreamingRedactor, is_sensitive_environment_key};
 use crate::agent::restore::{AgentMessage, AgentMessageRole};
 use crate::agent::{
     AgentEnvironmentVariable, AgentProfile, AgentTransport, validate_and_normalize_profile,
@@ -122,16 +123,22 @@ struct RuntimeShared {
     commands: Mutex<Option<mpsc::Sender<RuntimeSignal>>>,
     snapshot: Mutex<AgentRuntimeSnapshot>,
     events: Mutex<VecDeque<AgentEvent>>,
+    redactor: Arc<Redactor>,
+    output_stream: Mutex<StreamingRedactor>,
+    raw_output_bytes: AtomicU64,
     next_event_sequence: AtomicU64,
     started: Instant,
 }
 
 impl RuntimeShared {
-    fn new() -> Arc<Self> {
+    fn new(redactor: Arc<Redactor>) -> Arc<Self> {
         Arc::new(Self {
             commands: Mutex::new(None),
             snapshot: Mutex::new(AgentRuntimeSnapshot::default()),
             events: Mutex::new(VecDeque::new()),
+            output_stream: Mutex::new(StreamingRedactor::new(redactor.clone())),
+            redactor,
+            raw_output_bytes: AtomicU64::new(0),
             next_event_sequence: AtomicU64::new(1),
             started: Instant::now(),
         })
@@ -158,7 +165,7 @@ impl RuntimeShared {
             events.push_back(AgentEvent {
                 sequence,
                 kind,
-                text: text.map(|text| redact_agent_text(&text)),
+                text: text.map(|text| self.redactor.redact(&text)),
                 request_id,
                 state,
             });
@@ -176,7 +183,7 @@ impl RuntimeShared {
     }
 
     fn set_error(&self, error: impl Into<String>) {
-        let error = redact_agent_text(&error.into());
+        let error = self.redactor.redact(&error.into());
         if let Ok(mut snapshot) = self.snapshot.lock() {
             snapshot.error = Some(error.clone());
             snapshot.state = AgentRuntimeState::Failed;
@@ -186,22 +193,67 @@ impl RuntimeShared {
         self.emit(AgentEventKind::Failed, Some(error), None);
     }
 
+    fn begin_turn(&self) {
+        self.raw_output_bytes.store(0, Ordering::Release);
+        if let Ok(mut stream) = self.output_stream.lock() {
+            stream.reset();
+        }
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.output.clear();
+            snapshot.error = None;
+            snapshot.output_truncated = false;
+            snapshot.permission_requests.clear();
+        }
+    }
+
     fn append_output(&self, text: &str, max_output_bytes: u64) -> bool {
         if text.is_empty() {
             return true;
         }
-        if let Ok(mut snapshot) = self.snapshot.lock() {
-            if snapshot.output.len() + text.len() > max_output_bytes as usize {
+        let current = self.raw_output_bytes.load(Ordering::Acquire);
+        let next = current.saturating_add(text.len() as u64);
+        if next > max_output_bytes {
+            if let Ok(mut snapshot) = self.snapshot.lock() {
                 snapshot.output_truncated = true;
-                return false;
             }
-            snapshot.output.push_str(text);
+            return false;
         }
-        self.emit(AgentEventKind::Output, Some(text.to_string()), None);
+        self.raw_output_bytes.store(next, Ordering::Release);
+        let safe = self
+            .output_stream
+            .lock()
+            .map(|mut stream| stream.push(text))
+            .unwrap_or_default();
+        self.append_safe_output(&safe);
         true
     }
 
-    fn add_permission(&self, request: AgentPermissionRequest) {
+    fn flush_output(&self) {
+        let safe = self
+            .output_stream
+            .lock()
+            .map(|mut stream| stream.finish())
+            .unwrap_or_default();
+        self.append_safe_output(&safe);
+    }
+
+    fn append_safe_output(&self, safe: &str) {
+        if safe.is_empty() {
+            return;
+        }
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.output.push_str(safe);
+        }
+        self.emit(AgentEventKind::Output, Some(safe.to_string()), None);
+    }
+
+    fn add_permission(&self, mut request: AgentPermissionRequest) {
+        request.title = self.redactor.redact(&request.title);
+        request.description = self.redactor.redact(&request.description);
+        for option in &mut request.options {
+            option.name = self.redactor.redact(&option.name);
+            option.kind = self.redactor.redact(&option.kind);
+        }
         if let Ok(mut snapshot) = self.snapshot.lock() {
             snapshot
                 .permission_requests
@@ -283,7 +335,9 @@ impl AgentRuntime {
                 "P0 Agent 运行时仅支持 ACP / JSON-RPC stdio",
             ));
         }
-        let shared = RuntimeShared::new();
+        let (runtime_profile, redactor) =
+            runtime_profile_with_credential(&profile).map_err(AgentRuntimeError::from)?;
+        let shared = RuntimeShared::new(redactor);
         let (sender, receiver) = mpsc::channel();
         if let Ok(mut commands) = shared.commands.lock() {
             *commands = Some(sender);
@@ -295,7 +349,7 @@ impl AgentRuntime {
             .spawn(move || {
                 let mut worker = RuntimeWorker::new(
                     worker_shared,
-                    profile,
+                    runtime_profile,
                     cwd,
                     context_paths,
                     restored_messages,
@@ -345,14 +399,42 @@ impl AgentRuntime {
     }
 
     pub fn snapshot(&self) -> AgentRuntimeSnapshot {
-        self.shared
+        let mut snapshot = self
+            .shared
             .snapshot
             .lock()
             .map(|snapshot| AgentRuntimeSnapshot {
                 elapsed_ms: self.shared.started.elapsed().as_millis() as u64,
                 ..snapshot.clone()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        snapshot.output = self.shared.redactor.redact(&snapshot.output);
+        snapshot.error = snapshot
+            .error
+            .as_deref()
+            .map(|error| self.shared.redactor.redact(error));
+        snapshot.agent_name = snapshot
+            .agent_name
+            .as_deref()
+            .map(|value| self.shared.redactor.redact(value));
+        snapshot.agent_version = snapshot
+            .agent_version
+            .as_deref()
+            .map(|value| self.shared.redactor.redact(value));
+        snapshot.capabilities = snapshot
+            .capabilities
+            .iter()
+            .map(|value| self.shared.redactor.redact(value))
+            .collect();
+        for request in &mut snapshot.permission_requests {
+            request.title = self.shared.redactor.redact(&request.title);
+            request.description = self.shared.redactor.redact(&request.description);
+            for option in &mut request.options {
+                option.name = self.shared.redactor.redact(&option.name);
+                option.kind = self.shared.redactor.redact(&option.kind);
+            }
+        }
+        snapshot
     }
 
     pub fn drain_events(&self) -> Vec<AgentEvent> {
@@ -435,26 +517,36 @@ struct RuntimeWorker {
     shutdown_requested: bool,
 }
 
-fn runtime_profile_with_credential(profile: &AgentProfile) -> Result<AgentProfile, String> {
+fn runtime_profile_with_credential(
+    profile: &AgentProfile,
+) -> Result<(AgentProfile, Arc<Redactor>), String> {
     let mut runtime_profile = profile.clone();
-    if profile.credential_ref.is_none() {
-        return Ok(runtime_profile);
+    let mut secrets = Vec::new();
+    if let Some(credential_ref) = profile.credential_ref.as_deref() {
+        let secret = crate::agent::credentials::resolve_secret(&profile.id, credential_ref)?
+            .ok_or_else(|| "Agent 配置引用了凭据，但找不到该条目".to_string())?;
+        let name = profile
+            .credential_env_var
+            .as_deref()
+            .unwrap_or("KITE_AGENT_TOKEN");
+        runtime_profile
+            .environment
+            .retain(|entry| entry.name != name);
+        runtime_profile.environment.push(AgentEnvironmentVariable {
+            name: name.to_string(),
+            value: secret.clone(),
+        });
+        secrets.push(secret);
     }
 
-    let secret = crate::agent::credentials::load_secret(&profile.id)?
-        .ok_or_else(|| "Agent 配置引用了系统钥匙串凭据，但找不到该条目".to_string())?;
-    let name = profile
-        .credential_env_var
-        .as_deref()
-        .unwrap_or("KITE_AGENT_TOKEN");
-    runtime_profile
-        .environment
-        .retain(|entry| entry.name != name);
-    runtime_profile.environment.push(AgentEnvironmentVariable {
-        name: name.to_string(),
-        value: secret,
-    });
-    Ok(runtime_profile)
+    secrets.extend(
+        runtime_profile
+            .environment
+            .iter()
+            .filter(|entry| is_sensitive_environment_key(&entry.name))
+            .map(|entry| entry.value.clone()),
+    );
+    Ok((runtime_profile, Arc::new(Redactor::new(secrets))))
 }
 
 impl RuntimeWorker {
@@ -552,8 +644,7 @@ impl RuntimeWorker {
     }
 
     fn start_process(&mut self) -> Result<(), String> {
-        let runtime_profile = runtime_profile_with_credential(&self.profile)?;
-        let mut child = spawn_agent_process(&runtime_profile, &self.cwd)?;
+        let mut child = spawn_agent_process(&self.profile, &self.cwd)?;
         let stdin = child
             .stdin
             .take()
@@ -599,11 +690,12 @@ impl RuntimeWorker {
         }
         self.child = Some(child);
         self.stdin = Some(stdin);
-        record_agent_event(
-            "info",
-            "stream_start",
-            format!("profile={} cwd={}", self.profile.id, self.cwd.display()),
-        );
+        let diagnostic = self.shared.redactor.redact(&format!(
+            "profile={} cwd={}",
+            self.profile.id,
+            self.cwd.display()
+        ));
+        record_agent_event("info", "stream_start", diagnostic);
         Ok(())
     }
 
@@ -655,12 +747,7 @@ impl RuntimeWorker {
         self.last_activity = Instant::now();
         self.output_limit_sent = false;
         self.received_any_output = false;
-        if let Ok(mut snapshot) = self.shared.snapshot.lock() {
-            snapshot.output.clear();
-            snapshot.error = None;
-            snapshot.output_truncated = false;
-            snapshot.permission_requests.clear();
-        }
+        self.shared.begin_turn();
         self.context_paths = context_paths;
         let mut prompt_blocks = Vec::new();
         if let Some(history) = self.restored_history_context() {
@@ -733,6 +820,7 @@ impl RuntimeWorker {
             )),
             RuntimeSignal::StderrLine(line) => {
                 if !line.trim().is_empty() {
+                    let line = self.shared.redactor.redact(&line);
                     record_agent_event("debug", "agent_stderr", line);
                 }
                 Ok(())
@@ -1123,6 +1211,10 @@ impl RuntimeWorker {
 
     fn complete(&mut self, state: AgentRuntimeState, message: String) {
         self.prompt_started = None;
+        if state == AgentRuntimeState::Completed {
+            self.shared.flush_output();
+        }
+        let message = self.shared.redactor.redact(&message);
         if let Ok(mut snapshot) = self.shared.snapshot.lock() {
             snapshot.state = state;
             snapshot.error = if state == AgentRuntimeState::Failed {
@@ -1452,7 +1544,8 @@ mod tests {
             ..AgentProfile::default()
         };
 
-        let runtime_profile = runtime_profile_with_credential(&profile).expect("runtime profile");
+        let (runtime_profile, redactor) =
+            runtime_profile_with_credential(&profile).expect("runtime profile");
         let credential = runtime_profile
             .environment
             .iter()
@@ -1461,6 +1554,44 @@ mod tests {
 
         assert_eq!(credential.len(), 1);
         assert_eq!(credential[0].value, "runtime-secret");
+        assert!(
+            !redactor
+                .redact("value runtime-secret")
+                .contains("runtime-secret")
+        );
         crate::agent::credentials::remove_secret(&profile_id).expect("remove secret");
+    }
+
+    #[test]
+    fn runtime_profile_resolves_env_credential_and_builds_exact_redactor() {
+        let env_name = format!("KITE_RUNTIME_ENV_CREDENTIAL_{}", std::process::id());
+        let secret = format!("plain-random-value-{}", std::process::id());
+        unsafe { std::env::set_var(&env_name, &secret) };
+        let profile = AgentProfile {
+            id: "runtime-env-credential".to_string(),
+            credential_ref: Some(format!("env:{env_name}")),
+            credential_env_var: Some("FIXTURE_TOKEN".to_string()),
+            ..AgentProfile::default()
+        };
+
+        let (runtime_profile, redactor) =
+            runtime_profile_with_credential(&profile).expect("runtime profile");
+        assert!(
+            runtime_profile
+                .environment
+                .iter()
+                .any(|entry| { entry.name == "FIXTURE_TOKEN" && entry.value == secret })
+        );
+        assert!(
+            !redactor
+                .redact(&format!("before {secret} after"))
+                .contains(&secret)
+        );
+        assert!(
+            redactor
+                .redact(&format!("before {secret} after"))
+                .contains("[REDACTED]")
+        );
+        unsafe { std::env::remove_var(&env_name) };
     }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::agent::model::{AgentError, AgentErrorKind, AgentSessionConfig};
-use crate::agent::redact::Redactor;
+use crate::agent::redact::{Redactor, is_sensitive_environment_key};
 use crate::agent::{AgentEnvironmentVariable, AgentTransport};
 
 #[derive(Clone, Debug)]
@@ -56,7 +56,7 @@ impl ValidatedSessionConfig {
         let environment = validate_environment(&config.environment)?;
         let secret_values = environment
             .iter()
-            .filter(|(key, _)| is_sensitive_key(key))
+            .filter(|(key, _)| is_sensitive_environment_key(key))
             .map(|(_, value)| value.clone())
             .collect::<Vec<_>>();
         let redactor = Arc::new(Redactor::new(secret_values));
@@ -194,23 +194,6 @@ fn validate_environment(
         environment.insert(key.to_string(), variable.value.clone());
     }
     Ok(environment)
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "api_key",
-        "apikey",
-        "credential",
-        "authorization",
-        "private_key",
-    ]
-    .iter()
-    .any(|needle| key.contains(needle))
 }
 
 fn inherited_environment_keys() -> &'static [&'static str] {
