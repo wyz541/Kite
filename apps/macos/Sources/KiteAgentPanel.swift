@@ -948,7 +948,8 @@ private struct KiteAgentPanelContent: View {
                 .font(.system(size: 11))
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 72, maxHeight: 132)
-                .onKeyPress(.return) { keyPress in
+                .onKeyPress(phases: .down) { keyPress in
+                    guard keyPress.key == .return else { return .ignored }
                     if keyPress.modifiers.contains(.shift) {
                         return .ignored
                     }
