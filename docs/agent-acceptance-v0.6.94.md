@@ -4,7 +4,7 @@
 
 该记录用于 #157 的双平台产品化验收。
 Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。
-2026-11-25 已在 Windows 上使用真实 Claude Code ACP 完成一次 UI 闭环；macOS 实机、Codex ACP 以及剩余权限、错误和路径修复状态仍需继续验收。
+2026-11-25 已在 Windows 上使用真实 Claude Code ACP 完成一次 UI 闭环；macOS 实机、Codex ACP、真实 Agent 权限、自动跟随和完整键盘焦点仍需继续验收。
 
 ## Windows 实机验收（2026-11-25）
 
@@ -19,11 +19,13 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。
 - 取消后可重试；重试任务再次进入运行并可停止。
 - 关闭独立 Agent 窗口后重新打开，会话与上下文保持一致。
 - 窄窗口、Agent 设置、诊断页与连接初始化。
+- 故意损坏的合成会话可在恢复时显示失效路径，不阻塞启动；移除入口可清理失效上下文。
+- ACP fixture 可完整展示权限卡片的允许、拒绝和取消入口；真实 Agent 权限确认仍未验收。
 - 修复内层 popout 的 double-lease 崩溃：窗口创建延后到 AgentPanel 当前 update 结束之后。
 - 修复 session 启动后未发送 `AgentSessionPrompt` 的问题：轮询到 Ready 后再提交提示词，不阻塞 UI。
 - 修复终态提示残留：完成、取消、失败和关闭都有明确状态文案。
 
-仍未完成的 Windows 验收：Codex ACP、真实权限确认截图、错误与路径修复截图、自动跟随/手动滚动暂停、完整键盘焦点序列。上述项目不得记为通过。
+仍未完成的 Windows 验收：Codex ACP、真实 Agent 权限确认、自动跟随/手动滚动暂停、完整键盘焦点序列。上述项目不得记为通过。
 
 ## 当前自动化证据
 
@@ -57,7 +59,7 @@ macOS 构建和真实 Agent 验收不能在当前 Windows 主机上替代，必�
 | 独立窗口关闭/重开并保持会话 | 已通过 | 待实机执行 |
 
 验收使用真实 Agent，不使用 fixture 替代产品闭环。
-fixture 只用于自动化边界测试。
+fixture 只用于自动化边界测试；权限截图明确标注为 fixture 视觉验证。
 
 ## 截图矩阵
 
@@ -69,9 +71,9 @@ fixture 只用于自动化边界测试。
 | 未配置空状态 | [windows-agent-empty.png](images/agent-acceptance-v0.6.94/windows-agent-empty.png) | `macos-agent-empty.png`（待执行） |
 | 已连接空闲 | [windows-agent-ready.png](images/agent-acceptance-v0.6.94/windows-agent-ready.png) | `macos-agent-ready.png`（待执行） |
 | 流式回答 | [windows-agent-streaming.png](images/agent-acceptance-v0.6.94/windows-agent-streaming.png) | `macos-agent-streaming.png`（待执行） |
-| 权限确认 | 待实机执行 | `macos-agent-permission.png`（待执行） |
-| 错误与恢复 | 待实机执行 | `macos-agent-error.png`（待执行） |
-| 会话路径修复 | 待实机执行 | `macos-agent-repair.png`（待执行） |
+| 权限确认 | [windows-agent-permission.png](images/agent-acceptance-v0.6.94/windows-agent-permission.png)（fixture 视觉验证） | `macos-agent-permission.png`（待执行） |
+| 错误与恢复 | [windows-agent-error.png](images/agent-acceptance-v0.6.94/windows-agent-error.png) | `macos-agent-error.png`（待执行） |
+| 会话路径修复 | [windows-agent-repair.png](images/agent-acceptance-v0.6.94/windows-agent-repair.png) | `macos-agent-repair.png`（待执行） |
 | 诊断页 | [windows-agent-diagnostics.png](images/agent-acceptance-v0.6.94/windows-agent-diagnostics.png) | `macos-agent-diagnostics.png`（待执行） |
 | 窄窗口 Agent 栏 | [windows-agent-narrow.png](images/agent-acceptance-v0.6.94/windows-agent-narrow.png) | `macos-agent-narrow.png`（待执行） |
 
@@ -82,6 +84,8 @@ Windows 额外证据：
 [Agent 设置](images/agent-acceptance-v0.6.94/windows-agent-settings.png)、
 [连接测试](images/agent-acceptance-v0.6.94/windows-agent-connection-test.png)。
 
+`windows-agent-error.png` 与 `windows-agent-repair.png` 使用故意损坏的合成会话验证恢复和移除入口，不代表真实 Agent 协议失败。
+`windows-agent-permission.png` 使用 ACP fixture 验证权限卡片视觉与操作入口，不代表真实 Agent 权限请求已完成验收。
 截图不得包含密钥、真实用户名、真实项目路径或提示正文。
 
 ## 键盘验收
