@@ -1084,6 +1084,7 @@ private struct KiteAgentPanelContent: View {
                                 .disabled(!action.enabled)
                                 .accessibilityIdentifier("agent-permission-\(action.id)")
                             }
+                        }
                     }
                 }
                 .padding(10)
