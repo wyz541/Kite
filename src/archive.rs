@@ -8,6 +8,7 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use walkdir::WalkDir;
+use zip::read::ZipFile;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -461,7 +462,7 @@ fn extract_zip(
         let entry = archive
             .by_index(index)
             .map_err(|error| format!("无法读取 ZIP 文件项：{error}"))?;
-        let Some(relative) = entry.enclosed_name() else {
+        let Some(relative) = zip_entry_path(&entry) else {
             return Err(format!("ZIP 文件包含不安全路径：{}", entry.name()));
         };
         validate_relative_path(&relative)?;
@@ -511,6 +512,55 @@ fn extract_zip(
     }
     report.bytes(ArchivePhase::Working, processed, total, true);
     Ok(())
+}
+
+fn zip_entry_path(entry: &ZipFile<'_>) -> Option<PathBuf> {
+    // ZIP specifies CP437 when the UTF-8 flag is absent, but legacy Windows
+    // archives commonly store GBK bytes. Only override the crate's decoded
+    // name when that result is visibly CP437 mojibake and GBK recovers CJK.
+    let current = entry.enclosed_name()?;
+    let raw = entry.name_raw();
+    if raw.is_ascii() {
+        return Some(current);
+    }
+
+    if let Ok(decoded) = std::str::from_utf8(raw) {
+        return Some(PathBuf::from(decoded));
+    }
+
+    let (decoded, had_errors) = encoding_rs::GBK.decode_without_bom_handling(raw);
+    if had_errors
+        || !decoded.chars().any(is_cjk)
+        || current.to_string_lossy().chars().any(is_cjk)
+        || !looks_like_legacy_mojibake(&current.to_string_lossy())
+    {
+        return Some(current);
+    }
+
+    Some(PathBuf::from(decoded.as_ref()))
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2FA1F
+            | 0x30000..=0x323AF
+    )
+}
+
+fn looks_like_legacy_mojibake(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x0370..=0x03FF
+                | 0x2000..=0x2BFF
+                | 0x3000..=0x303F
+                | 0x3200..=0x33FF
+        )
+    })
 }
 
 fn extract_tar_gz(
@@ -858,6 +908,108 @@ mod tests {
             b"data"
         );
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn zip_round_trip_keeps_utf8_chinese_names() {
+        let root = temporary_root("utf8-chinese");
+        fs::create_dir_all(&root).expect("create fixture root");
+        let archive_path = root.join("utf8.zip");
+        let file = File::create(&archive_path).expect("create archive");
+        let mut writer = ZipWriter::new(file);
+        writer
+            .start_file("中文目录/说明.txt", SimpleFileOptions::default())
+            .expect("start UTF-8 entry");
+        writer.write_all(b"hello").expect("write entry");
+        writer.finish().expect("finish archive");
+
+        let destination = root.join("extracted");
+        extract(&archive_path, &destination).expect("extract");
+        assert_eq!(
+            fs::read(destination.join("中文目录").join("说明.txt")).expect("read UTF-8 entry"),
+            b"hello"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn extracts_gbk_zip_names_without_utf8_flag() {
+        let root = temporary_root("gbk-chinese");
+        let name = "珠海开放大学/计算机科学与技术/课程说明.txt";
+        let (raw, _, had_errors) = encoding_rs::GBK.encode(name);
+        assert!(!had_errors);
+        let archive_path = zip_with_raw_entry_name(&root, &raw, b"hello");
+
+        let destination = root.join("extracted");
+        extract(&archive_path, &destination).expect("extract GBK entry");
+        assert_eq!(
+            fs::read(destination.join(name)).expect("read GBK entry"),
+            b"hello"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn extracts_utf8_zip_names_without_utf8_flag() {
+        let root = temporary_root("unflagged-utf8");
+        let name = "中文目录/说明.txt";
+        let archive_path = zip_with_raw_entry_name(&root, name.as_bytes(), b"hello");
+
+        let destination = root.join("extracted");
+        extract(&archive_path, &destination).expect("extract unflagged UTF-8 entry");
+        assert_eq!(
+            fs::read(destination.join(name)).expect("read unflagged UTF-8 entry"),
+            b"hello"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn preserves_cp437_names_when_they_are_not_gbk() {
+        let root = temporary_root("cp437");
+        let archive_path = zip_with_raw_entry_name(&root, b"Caf\x82.txt", b"hello");
+
+        let destination = root.join("extracted");
+        extract(&archive_path, &destination).expect("extract CP437 entry");
+        assert_eq!(
+            fs::read(destination.join("Café.txt")).expect("read CP437 entry"),
+            b"hello"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    fn zip_with_raw_entry_name(root: &Path, raw_name: &[u8], content: &[u8]) -> PathBuf {
+        fs::create_dir_all(root).expect("create fixture root");
+        let archive_path = root.join("legacy.zip");
+        let placeholder = "x".repeat(raw_name.len());
+        let file = File::create(&archive_path).expect("create archive");
+        let mut writer = ZipWriter::new(file);
+        writer
+            .start_file(&placeholder, SimpleFileOptions::default())
+            .expect("start placeholder entry");
+        writer.write_all(content).expect("write entry");
+        writer.finish().expect("finish archive");
+
+        let original = fs::read(&archive_path).expect("read archive");
+        let mut patched = Vec::with_capacity(original.len());
+        let mut matches = 0;
+        let mut index = 0;
+        while index < original.len() {
+            if original[index..].starts_with(placeholder.as_bytes()) {
+                patched.extend_from_slice(raw_name);
+                index += placeholder.len();
+                matches += 1;
+            } else {
+                patched.push(original[index]);
+                index += 1;
+            }
+        }
+        assert!(
+            matches >= 2,
+            "local and central ZIP headers should contain the placeholder"
+        );
+        fs::write(&archive_path, patched).expect("write patched archive");
+        archive_path
     }
 
     #[test]
