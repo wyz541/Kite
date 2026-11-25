@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::Command;
 use std::thread;
@@ -109,6 +110,24 @@ fn handle_prompt(
                 }
             }));
         }
+        "flaky" => {
+            let marker = env::var("KITE_FIXTURE_STATE_FILE")
+                .unwrap_or_else(|_| ".kite-agent-fixture-flaky".to_string());
+            if fs::metadata(&marker).is_ok() {
+                send_chunk("retry recovered");
+                finish_prompt(id, "end_turn");
+            } else {
+                let _ = fs::write(marker, "failed-once");
+                write_json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": "fixture transient failure"
+                    }
+                }));
+            }
+        }
         "auth" => {
             write_json(&json!({
                 "jsonrpc": "2.0",
@@ -152,6 +171,20 @@ fn handle_prompt(
             for chunk in ["one ", "two ", "three"] {
                 send_chunk(chunk);
                 thread::sleep(Duration::from_millis(80));
+            }
+            finish_prompt(id, "end_turn");
+        }
+        "markdown" => {
+            send_chunk("## Fixture answer\n\n");
+            send_chunk("```rust\n");
+            send_chunk("println!(\"streaming markdown\");\n");
+            send_chunk("```\n");
+            finish_prompt(id, "end_turn");
+        }
+        "long" => {
+            let chunk = "0123456789abcdef".repeat(64);
+            for _ in 0..256 {
+                send_chunk(&chunk);
             }
             finish_prompt(id, "end_turn");
         }
@@ -215,6 +248,9 @@ fn handle_prompt(
                     .arg("sleeper")
                     .spawn()
             {
+                if let Ok(path) = env::var("KITE_AGENT_FIXTURE_CHILD_PID_FILE") {
+                    let _ = fs::write(path, child.id().to_string());
+                }
                 eprintln!("fixture-child-pid: {}", child.id());
             }
             send_chunk("waiting for cancel");

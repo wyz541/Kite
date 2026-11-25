@@ -174,7 +174,7 @@ cancel()
 shutdown()
 state()
 pid()
-subscribe(AgentEventCallback) -> AgentEventSubscription
+subscribe(AgentSessionEventCallback) -> AgentSessionEventSubscription
 ```
 
 事件包括：

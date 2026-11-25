@@ -14,8 +14,8 @@ use crate::agent::config::ValidatedSessionConfig;
 use crate::agent::events::EventDispatcher;
 use crate::agent::model::{
     ACP_PROTOCOL_VERSION, AcpCapabilities, AgentDiagnosticLevel, AgentError, AgentErrorKind,
-    AgentEvent, AgentFailure, AgentPermissionOption, AgentPermissionRequest, AgentPlanEntry,
-    AgentToolCall,
+    AgentFailure, AgentPlanEntry, AgentSessionEvent, AgentSessionPermissionOption,
+    AgentSessionPermissionRequest, AgentToolCall,
 };
 use crate::agent::process::{ProcessGuard, ProcessHandle};
 use crate::agent::redact::Redactor;
@@ -130,7 +130,7 @@ impl AcpStdioTransport {
             output_bytes,
         ));
 
-        events.emit(AgentEvent::ProcessStarted { pid });
+        events.emit(AgentSessionEvent::ProcessStarted { pid });
 
         let deadline = Instant::now() + timeout;
         match self.initialize(deadline) {
@@ -366,7 +366,7 @@ impl AcpStdioTransport {
         if let Some(events) = &self.events
             && let Some(redactor) = &self.redactor
         {
-            events.emit(AgentEvent::Diagnostic {
+            events.emit(AgentSessionEvent::Diagnostic {
                 level: AgentDiagnosticLevel::Error,
                 message: redactor.truncate(line, DIAGNOSTIC_DETAIL_CHARS),
             });
@@ -681,7 +681,7 @@ impl AcpStdioTransport {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
             option_ids.insert(option_id.to_string());
-            options.push(AgentPermissionOption {
+            options.push(AgentSessionPermissionOption {
                 option_id: option_id.to_string(),
                 name: name.to_string(),
                 kind: kind.to_string(),
@@ -703,7 +703,7 @@ impl AcpStdioTransport {
             },
         );
         Ok(TransportEvent::PermissionRequested(
-            AgentPermissionRequest {
+            AgentSessionPermissionRequest {
                 request_id: public_id,
                 tool_call_id,
                 title,
@@ -789,14 +789,14 @@ impl AcpStdioTransport {
                     .unwrap_or_default()
                     .to_string();
                 if kind == "agent_message_chunk" {
-                    events.emit(AgentEvent::MessageChunk { text, message_id });
+                    events.emit(AgentSessionEvent::MessageChunk { text, message_id });
                 } else {
-                    events.emit(AgentEvent::ThoughtChunk { text, message_id });
+                    events.emit(AgentSessionEvent::ThoughtChunk { text, message_id });
                 }
             }
             "tool_call" | "tool_call_update" => {
                 let tool_call = parse_tool_call(update)?;
-                events.emit(AgentEvent::ToolCallUpdated { tool_call });
+                events.emit(AgentSessionEvent::ToolCallUpdated { tool_call });
             }
             "plan" => {
                 let entries = update
@@ -821,7 +821,7 @@ impl AcpStdioTransport {
                             .collect()
                     })
                     .unwrap_or_default();
-                events.emit(AgentEvent::PlanUpdated { entries });
+                events.emit(AgentSessionEvent::PlanUpdated { entries });
             }
             _ => {}
         }

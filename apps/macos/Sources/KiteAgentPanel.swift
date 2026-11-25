@@ -88,6 +88,7 @@ struct KiteAgentContextPath: Identifiable, Hashable {
     }
 }
 
+@MainActor
 final class KiteAgentPanelModel: ObservableObject {
     @Published private(set) var contextPaths: [KiteAgentContextPath] = []
     @Published private(set) var primaryPath: String?
@@ -97,9 +98,77 @@ final class KiteAgentPanelModel: ObservableObject {
     @Published var prompt = ""
     @Published private(set) var presentationToken = 0
     @Published private(set) var notice: String?
+    @Published private(set) var profile: AgentProfile?
+    @Published private(set) var output = ""
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var permissionRequests: [AgentPermissionRequest] = []
+    @Published private(set) var canCancel = false
+
+    private let core = KiteCore()
+    private var runtime: AgentRuntime?
+    private var pollTask: Task<Void, Never>?
+    private var conversationId = ""
+    private var restoredMessages: [AgentMessage] = []
+    private var turnId: UInt64 = 0
+    private var sentPrompt = ""
+    private var savedTerminalSnapshot = false
+    private var windowWidth: UInt32 = 960
+    private var windowHeight: UInt32 = 760
+
+    init() {
+        conversationId = core.newAgentConversationId()
+        refreshProfile()
+        restoreConversation()
+    }
+
+    deinit {
+        pollTask?.cancel()
+        runtime?.shutdown()
+    }
 
     var hasContext: Bool {
         primaryPath != nil && !contextPaths.isEmpty
+    }
+    var profileName: String {
+        profile?.name ?? "未配置 Agent"
+    }
+
+    var modelLabel: String {
+        profile?.model ?? "Agent 默认模型"
+    }
+
+    var permissionLabel: String {
+        guard let mode = profile?.permission else { return "只读" }
+        switch mode {
+        case .readOnly: return "只读"
+        case .confirmWrites: return "写入前确认"
+        case .agentManaged: return "由 Agent 自身管理"
+        }
+    }
+
+    var canSend: Bool {
+        profile != nil && hasContext && phase != .loading && phase != .running
+    }
+
+    var hasConfiguredAgent: Bool {
+        profile != nil
+    }
+
+    func refreshAgentProfiles(core: KiteCore) {
+        let snapshot = core.agentConfig()
+        if let id = snapshot.defaultProfileId,
+           let profile = snapshot.profiles.first(where: { $0.id == id }) {
+            self.profile = profile
+        } else {
+            profile = snapshot.profiles.first
+        }
+        if phase == .unconfigured || phase == .ended {
+            phase = profile == nil ? .unconfigured : .ended
+        }
+    }
+
+    var preferredWindowSize: NSSize {
+        NSSize(width: CGFloat(windowWidth), height: CGFloat(windowHeight))
     }
 
     func present(
@@ -126,8 +195,17 @@ final class KiteAgentPanelModel: ObservableObject {
             fallback: workingDirectory
         )
         contextMode = .fixed
-        phase = .unconfigured
+        refreshProfile()
+        phase = profile == nil ? .unconfigured : .ended
         prompt = action.prompt
+        output = ""
+        errorMessage = nil
+        permissionRequests = []
+        savedTerminalSnapshot = false
+        sentPrompt = ""
+        conversationId = core.newAgentConversationId()
+        restoredMessages = []
+        turnId = 0
         notice = nil
         presentationToken += 1
     }
@@ -146,8 +224,17 @@ final class KiteAgentPanelModel: ObservableObject {
         primaryPath = path
         workingDirectory = path
         contextMode = .fixed
-        phase = .unconfigured
+        refreshProfile()
+        phase = profile == nil ? .unconfigured : .ended
         prompt = action.prompt
+        output = ""
+        errorMessage = nil
+        permissionRequests = []
+        savedTerminalSnapshot = false
+        sentPrompt = ""
+        conversationId = core.newAgentConversationId()
+        restoredMessages = []
+        turnId = 0
         notice = nil
         presentationToken += 1
     }
@@ -174,8 +261,8 @@ final class KiteAgentPanelModel: ObservableObject {
             return KiteAgentContextPath(path: path, isDirectory: isDirectory.boolValue)
         }
         if hasContext {
-            var existing = Set(contextPaths.map(\.path))
-            let unique = added.filter { existing.insert($0.path).inserted }
+            let existing = Set(contextPaths.map(\.path))
+            let unique = added.filter { !existing.contains($0.path) }
             contextPaths.append(contentsOf: unique)
             notice = unique.isEmpty ? "所选路径已在上下文中" : "已添加 \(unique.count) 个上下文路径"
         } else if let first = added.first {
@@ -211,6 +298,207 @@ final class KiteAgentPanelModel: ObservableObject {
         }
     }
 
+    func sendPrompt() {
+        guard let profile, hasContext else {
+            phase = .unconfigured
+            notice = "请先配置 Agent 并准备上下文"
+            return
+        }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            notice = "提示不能为空"
+            return
+        }
+        do {
+            turnId = UInt64(Date().timeIntervalSince1970 * 1_000)
+            let runtime = try AgentRuntime.start(
+                profile: profile,
+                workingDirectory: workingDirectory,
+                contextPaths: contextPaths.map(\.path),
+                restoredMessages: restoredMessages
+            )
+            self.runtime = runtime
+            sentPrompt = trimmed
+            output = ""
+            errorMessage = nil
+            permissionRequests = []
+            savedTerminalSnapshot = false
+            phase = .loading
+            notice = "Agent 已启动"
+            startPolling(runtime)
+        } catch {
+            phase = .error
+            errorMessage = error.localizedDescription
+            notice = error.localizedDescription
+        }
+    }
+
+    func cancelTask() {
+        do {
+            try runtime?.cancel()
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    func respondPermission(_ request: AgentPermissionRequest, decision: AgentPermissionDecision) {
+        do {
+            try runtime?.respondPermission(requestId: request.requestId, decision: decision)
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    func copyOutput() {
+        guard !output.isEmpty else { return }
+        KitePlatform.copyText(output)
+        notice = "已复制 Agent 回答"
+    }
+
+    private func startPolling(_ runtime: AgentRuntime) {
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                guard let self else { return }
+                let snapshot = runtime.snapshot()
+                self.apply(snapshot)
+                if self.phase == .ended || self.phase == .error {
+                    if !self.savedTerminalSnapshot {
+                        self.savedTerminalSnapshot = true
+                        self.persistConversation()
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    private func apply(_ snapshot: AgentRuntimeSnapshot) {
+        switch snapshot.state {
+        case .starting, .initializing:
+            phase = .loading
+        case .ready, .running, .waitingPermission, .cancelling:
+            phase = .running
+        case .completed, .cancelled, .closed:
+            phase = .ended
+        case .failed:
+            phase = .error
+        }
+        output = snapshot.output
+        errorMessage = snapshot.error
+        permissionRequests = snapshot.permissionRequests
+        canCancel = snapshot.state == .running || snapshot.state == .waitingPermission
+    }
+
+    private func refreshProfile() {
+        refreshAgentProfiles(core: core)
+    }
+
+    private func restoreConversation() {
+        let restore = core.agentSessionState()
+        refreshProfile()
+        guard let profile else { return }
+        let conversation = restore.store.conversations.first(where: {
+            $0.id == restore.store.activeConversationId
+                && $0.profileId == profile.id
+        }) ?? restore.store.conversations.first(where: {
+            $0.profileId == profile.id
+        })
+        guard let conversation else { return }
+        contextPaths = conversation.contextPaths.map { path in
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            return KiteAgentContextPath(path: path, isDirectory: isDirectory.boolValue)
+        }
+        primaryPath = conversation.contextPaths.first
+        workingDirectory = conversation.workingDirectory
+        contextMode = conversation.followSelection ? .followSelection : .fixed
+        prompt = conversation.draft
+        output = conversation.messages.last(where: { $0.role == .assistant })?.content ?? ""
+        conversationId = conversation.id
+        restoredMessages = conversation.messages
+        turnId = 0
+        windowWidth = conversation.windowWidth
+        windowHeight = conversation.windowHeight
+        if restore.workingDirectoryMissing || !restore.missingPaths.isEmpty {
+            phase = .error
+            errorMessage = "恢复的 Agent 上下文包含失效路径，请检查后重试"
+            notice = errorMessage
+        } else {
+            phase = .ended
+            notice = primaryPath == nil
+                ? "已恢复上次 Agent 会话；请重新选择上下文"
+                : "已恢复上次 Agent 会话"
+        }
+    }
+
+    private func persistConversation() {
+        guard let profile, hasContext else { return }
+        let now = UInt64(Date().timeIntervalSince1970 * 1_000)
+        let userMessageId = "\(conversationId):user:\(turnId)"
+        let assistantMessageId = "\(conversationId):assistant:\(turnId)"
+        var messages = restoredMessages.filter {
+            $0.id != userMessageId && $0.id != assistantMessageId
+        }
+        if !sentPrompt.isEmpty {
+            messages.append(
+                AgentMessage(
+                    id: userMessageId,
+                    role: .user,
+                    content: sentPrompt,
+                    unixMs: now,
+                    truncated: false
+                )
+            )
+        }
+        if !output.isEmpty {
+            messages.append(
+                AgentMessage(
+                    id: assistantMessageId,
+                    role: .assistant,
+                    content: output,
+                    unixMs: now,
+                    truncated: false
+                )
+            )
+        }
+        let conversation = AgentConversation(
+            id: conversationId,
+            title: String(sentPrompt.prefix(48)),
+            profileId: profile.id,
+            model: profile.model,
+            workingDirectory: workingDirectory,
+            contextPaths: contextPaths.map(\.path),
+            followSelection: contextMode == .followSelection,
+            messages: messages,
+            remoteSessionId: nil,
+            draft: prompt,
+            windowWidth: windowWidth,
+            windowHeight: windowHeight,
+            updatedUnixMs: now
+        )
+        _ = try? core.saveAgentConversation(conversation: conversation)
+        restoredMessages = messages
+    }
+
+    func persistWindowState(width: UInt32, height: UInt32) {
+        windowWidth = min(max(width, 680), 3_840)
+        windowHeight = min(max(height, 560), 2_160)
+        guard profile != nil, hasContext else { return }
+        let restore = core.agentSessionState()
+        if var conversation = restore.store.conversations.first(where: {
+            $0.id == conversationId
+        }) {
+            conversation.draft = prompt
+            conversation.windowWidth = windowWidth
+            conversation.windowHeight = windowHeight
+            conversation.updatedUnixMs = UInt64(Date().timeIntervalSince1970 * 1_000)
+            _ = try? core.saveAgentConversation(conversation: conversation)
+        } else {
+            persistConversation()
+        }
+    }
     private func normalizedPaths(
         primary: String,
         entries: [BrowserEntry]
@@ -348,8 +636,14 @@ private struct KiteAgentPanelContent: View {
                 if agent.phase == .unconfigured {
                     unconfiguredCard
                 }
-                if agent.phase != .unconfigured {
-                    phaseNoticeCard
+                if let error = agent.errorMessage {
+                    errorBanner(error)
+                }
+                if !agent.output.isEmpty {
+                    outputCard
+                }
+                if !agent.permissionRequests.isEmpty {
+                    permissionCards
                 }
                 promptCard
             } else if agent.phase == .error {
@@ -358,7 +652,6 @@ private struct KiteAgentPanelContent: View {
                 emptyState
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var statusCard: some View {
@@ -371,9 +664,9 @@ private struct KiteAgentPanelContent: View {
                     .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(statusTitle)
+                    Text(agent.profileName)
                         .font(.system(size: 12.5, weight: .semibold))
-                    Text(statusDetail)
+                    Text("\(agent.modelLabel) · \(agent.permissionLabel)")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 }
@@ -539,55 +832,6 @@ private struct KiteAgentPanelContent: View {
         .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    @ViewBuilder
-    private var phaseNoticeCard: some View {
-        if agent.phase == .error || agent.phase == .loading || agent.phase == .ended {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: agent.phase == .error ? "exclamationmark.triangle.fill" : "info.circle.fill")
-                    .font(.system(size: 12))
-                    .foregroundStyle(agent.phase == .error ? Color.red : Color.accentColor)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(agent.phase.label)
-                        .font(.system(size: 11.5, weight: .semibold))
-                    if let notice = agent.notice {
-                        Text(notice)
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-            .padding(10)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
-        }
-    }
-
-    private var statusTitle: String {
-        switch agent.phase {
-        case .empty: return "等待上下文"
-        case .unconfigured: return "未配置 Agent"
-        case .loading: return "正在连接 Agent"
-        case .running: return "Agent"
-        case .error: return "Agent 连接失败"
-        case .ended: return "Agent 已结束"
-        }
-    }
-
-    private var statusDetail: String {
-        switch agent.phase {
-        case .unconfigured, .empty:
-            return "模型 — · 只读 · Kite 宿主"
-        case .loading:
-            return "模型 — · 只读 · 正在握手"
-        case .running:
-            return "模型 — · 只读 · 会话运行中"
-        case .error:
-            return "模型 — · 只读 · 需要处理"
-        case .ended:
-            return "模型 — · 只读 · 会话已结束"
-        }
-    }
-
     private var promptCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("发送准备")
@@ -616,13 +860,21 @@ private struct KiteAgentPanelContent: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 Spacer()
-                Button("发送") {}
-                    .buttonStyle(.borderedProminent)
+                if agent.phase == .loading || agent.phase == .running {
+                    Button("停止") {
+                        agent.cancelTask()
+                    }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(true)
-                    .help("发送和流式输出由下一阶段接入")
+                }
+                Button("发送") {
+                    agent.sendPrompt()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!agent.canSend)
             }
-            Text("当前阶段只准备上下文和提示，不会启动外部 Agent。")
+            Text("发送前请确认 Agent、模型、工作目录和权限。Kite 不会自动执行命令或应用修改。")
                 .font(.system(size: 9.5))
                 .foregroundStyle(.secondary)
         }
@@ -630,6 +882,109 @@ private struct KiteAgentPanelContent: View {
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    private var outputCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("回答")
+                    .font(.system(size: 10, weight: .semibold))
+                Spacer()
+                Button {
+                    agent.copyOutput()
+                } label: {
+                    Label("复制", systemImage: "doc.on.doc")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+            }
+            ScrollView {
+                Group {
+                    if let rendered = try? AttributedString(
+                        markdown: agent.output,
+                        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                    ) {
+                        Text(rendered)
+                    } else {
+                        Text(agent.output)
+                    }
+                }
+                .font(.system(size: 11))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(minHeight: 80, maxHeight: 280)
+            .padding(8)
+            .background(
+                Color(nsColor: .controlBackgroundColor).opacity(0.30),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var permissionCards: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(agent.permissionRequests.enumerated()), id: \.offset) { _, request in
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(request.title.isEmpty ? "Agent 请求权限" : request.title)
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Text(request.description)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 7) {
+                        Button("仅本次允许") {
+                            agent.respondPermission(request, decision: .allowOnce)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        if request.options.contains(where: {
+                            $0.kind.contains("always") || $0.kind.contains("task")
+                        }) {
+                            Button("本任务允许") {
+                                agent.respondPermission(request, decision: .allowTask)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                        Button("拒绝") {
+                            agent.respondPermission(request, decision: .rejectOnce)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        Button("取消任务") {
+                            agent.respondPermission(request, decision: .cancel)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Color.orange.opacity(0.25), lineWidth: 0.6)
+                }
+            }
+        }
+    }
+
+    private func errorBanner(_ error: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            Text(error)
+                .font(.system(size: 10))
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+    }
     private var emptyState: some View {
         VStack(spacing: 10) {
             Image(systemName: "sparkles")
@@ -745,17 +1100,19 @@ final class KiteAgentWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func show(model: KiteModel, agent: KiteAgentPanelModel) {
-        if let current = self.agent, current !== agent {
-            window?.close()
-            window = nil
-        }
         self.model = model
         self.agent = agent
         if window == nil {
             let root = KiteAgentWindowView(model: model).environmentObject(agent)
             let hosting = NSHostingController(rootView: root)
+            let preferredSize = agent.preferredWindowSize
             let agentWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 520, height: 760),
+                contentRect: NSRect(
+                    x: 0,
+                    y: 0,
+                    width: preferredSize.width,
+                    height: preferredSize.height
+                ),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
@@ -776,5 +1133,12 @@ final class KiteAgentWindowController: NSWindowController, NSWindowDelegate {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        let width = UInt32(max(CGFloat(1), window.frame.width.rounded()))
+        let height = UInt32(max(CGFloat(1), window.frame.height.rounded()))
+        agent?.persistWindowState(width: width, height: height)
     }
 }

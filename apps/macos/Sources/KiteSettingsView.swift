@@ -236,7 +236,7 @@ struct KiteSettingsView: View {
                 case .fileHandling:
                     fileHandlingSettings
                 case .agent:
-                    agentSettings
+                    KiteAgentSettingsView(model: model)
                 case .updates:
                     updateSettings
                 case .about:
@@ -409,37 +409,6 @@ struct KiteSettingsView: View {
                 }
             } footer: {
                 Text("更改后，Finder 和 Kite 会继续处理各自负责的系统请求。")
-            }
-        }
-    }
-
-    private var agentSettings: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            settingsSection("Agent 配置") {
-                SettingsCard {
-                    SettingsRow(
-                        title: "尚未配置 Agent",
-                        detail: "右键文件或文件夹并选择“使用 Agent”，可在不发送任务的情况下检查上下文和提示。"
-                    ) {
-                        EmptyView()
-                    }
-                    SettingsDivider()
-                    SettingsRow(
-                        title: "接入配置与凭据",
-                        detail: "Kite 只保存最小接入信息；敏感凭据通过系统钥匙串引用，不写入普通配置。"
-                    ) {
-                        EmptyView()
-                    }
-                    SettingsDivider()
-                    SettingsRow(
-                        title: "权限边界",
-                        detail: "P0 默认只读。Kite 不会自动执行 Agent 建议的命令，也不会未经确认应用文件修改。"
-                    ) {
-                        EmptyView()
-                    }
-                }
-            } footer: {
-                Text("连接测试、默认 Agent 和 Profile 管理由 Agent 配置任务接入此页面。")
             }
         }
     }

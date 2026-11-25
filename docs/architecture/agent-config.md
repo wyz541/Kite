@@ -35,6 +35,7 @@
       "timeout_seconds": 600,
       "output_limit_bytes": 8388608,
       "credential_ref": "keychain:kite/agent/local",
+      "credential_env_var": null,
       "capabilities": {
         "read_selection": true,
         "read_workspace": false,
@@ -68,6 +69,7 @@ schema 1。高于当前版本的配置不会被覆盖；调用方会收到 `Unkn
 | `timeout_seconds` | 单次任务超时，范围 1 到 86400 秒 |
 | `output_limit_bytes` | 单次输出上限，范围 1 KiB 到 256 MiB |
 | `credential_ref` | 不透明凭据引用，不包含明文凭据 |
+| `credential_env_var` | 可选；启动进程时注入已保存凭据的环境变量名 |
 | `capabilities` | Agent 声明支持的读取、写入、命令、网络和权限请求能力 |
 
 `default_profile_id` 在存在 Profile 时始终指向一个有效 Profile。创建第一个 Profile 会将其设为
@@ -118,6 +120,9 @@ Core 在保存前统一校验并规范化字段：
 - `createProfile(profile:)`
 - `updateProfile(profile:)`
 - `deleteProfile(profileId:)`
+- `deleteProfileWithReplacement(profileId:replacementDefaultId:)`
+- `duplicateProfile(profileId:)`
+- `saveProfileWithCredential(profile:credential:clearCredential:)`
 - `setDefaultProfile(profileId:)`
 - `reset()`
 

@@ -1,49 +1,238 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::app::KiteApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::clipboard::Clipboard;
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use kite_core::agent_context::{
-    AgentContext, AgentContextMode, AgentLaunchRequest, AgentPath, AgentSessionPhase,
-    default_working_directory,
+use kite_core::agent::{
+    AgentContext, AgentContextMode, AgentConversation, AgentLaunchRequest, AgentMessage,
+    AgentMessageRole, AgentPath, AgentPermissionDecision, AgentProfile, AgentProfileSnapshot,
+    AgentProfileStore, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase,
+    default_working_directory, load_agent_sessions, new_agent_conversation_id,
+    save_agent_conversation,
 };
 
 pub(crate) struct AgentPanel {
     context: Option<AgentContext>,
     mode: AgentContextMode,
     phase: AgentSessionPhase,
-    prompt_input: Entity<InputState>,
+    profile: Option<AgentProfile>,
+    runtime: Option<Arc<AgentRuntime>>,
+    snapshot: AgentRuntimeSnapshot,
+    prompt_input: Entity<TextareaState>,
+    output_view: Entity<TextViewState>,
     main_app: Option<WeakEntity<KiteApp>>,
     notice: Option<SharedString>,
+    conversation_id: String,
+    history: Vec<AgentMessage>,
+    turn_id: u64,
+    sent_prompt: String,
+    saved_terminal_snapshot: bool,
+    window_size: (u32, u32),
+    poll_task: Task<()>,
 }
 
 impl AgentPanel {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        agent_profiles: AgentProfileSnapshot,
+    ) -> Self {
         let prompt_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("添加问题或指令。内容会先停留在 Kite 中。")
+            TextareaState::new(window, cx)
+                .placeholder("向 Agent 提问。发送前可检查工作目录、上下文和权限。")
+                .auto_grow(2, 6)
+                .submit_on_enter(false)
                 .clean_on_escape()
         });
-        Self {
+        let output_view = cx.new(|cx| TextViewState::markdown("", cx));
+        let profile = agent_profiles
+            .default_profile()
+            .cloned()
+            .or_else(default_agent_profile);
+        let phase = if profile.is_some() {
+            AgentSessionPhase::Ended
+        } else {
+            AgentSessionPhase::Unconfigured
+        };
+        let mut panel = Self {
             context: None,
             mode: AgentContextMode::Fixed,
-            phase: AgentSessionPhase::Empty,
+            phase,
+            profile,
+            runtime: None,
+            snapshot: AgentRuntimeSnapshot::default(),
             prompt_input,
+            output_view,
             main_app: None,
             notice: None,
+            conversation_id: new_agent_conversation_id(),
+            history: Vec::new(),
+            turn_id: 0,
+            sent_prompt: String::new(),
+            saved_terminal_snapshot: false,
+            window_size: (960, 760),
+            poll_task: Task::ready(()),
+        };
+        panel.restore_session(window, cx);
+        panel
+    }
+
+    fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let restore = load_agent_sessions();
+        let Some(profile_id) = self.profile.as_ref().map(|profile| profile.id.clone()) else {
+            return;
+        };
+        let Some(conversation) = restore
+            .store
+            .active_conversation_id
+            .as_ref()
+            .and_then(|id| {
+                restore
+                    .store
+                    .conversations
+                    .iter()
+                    .find(|item| &item.id == id)
+            })
+            .filter(|conversation| conversation.profile_id == profile_id)
+            .or_else(|| {
+                restore
+                    .store
+                    .conversations
+                    .iter()
+                    .find(|conversation| conversation.profile_id == profile_id)
+            })
+        else {
+            return;
+        };
+        self.window_size = (conversation.window_width, conversation.window_height);
+        self.history = conversation.messages.clone();
+        self.mode = if conversation.follow_selection {
+            AgentContextMode::FollowSelection
+        } else {
+            AgentContextMode::Fixed
+        };
+        self.conversation_id = conversation.id.clone();
+        self.prompt_input.update(cx, |input, cx| {
+            input.set_value(conversation.draft.clone(), window, cx);
+        });
+        self.set_output(
+            &conversation
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == AgentMessageRole::Assistant)
+                .map(|message| message.content.clone())
+                .unwrap_or_default(),
+            cx,
+        );
+        let missing_paths = restore.working_directory_missing || !restore.missing_paths.is_empty();
+        if conversation.context_paths.is_empty() {
+            self.context = None;
+            self.phase = if missing_paths {
+                AgentSessionPhase::Error
+            } else {
+                AgentSessionPhase::Ended
+            };
+            self.notice = Some(
+                if missing_paths {
+                    "恢复的 Agent 会话包含失效路径；可移除后重新选择"
+                } else {
+                    "已恢复上次 Agent 会话；请重新选择上下文"
+                }
+                .into(),
+            );
+            return;
+        }
+        let paths = conversation
+            .context_paths
+            .iter()
+            .map(|path| AgentPath::new(path.clone(), Path::new(path).is_dir()))
+            .collect::<Vec<_>>();
+        let primary_path = paths[0].path.clone();
+        match AgentContext::new(
+            &primary_path,
+            paths,
+            Some(PathBuf::from(&conversation.working_directory)),
+        ) {
+            Ok(context) => {
+                self.context = Some(context);
+                if missing_paths {
+                    self.phase = AgentSessionPhase::Error;
+                    self.notice = Some("恢复的 Agent 会话包含失效路径；可移除后重新选择".into());
+                } else {
+                    self.phase = AgentSessionPhase::Ended;
+                    self.notice = Some("已恢复上次 Agent 会话".into());
+                }
+            }
+            Err(error) => {
+                self.phase = AgentSessionPhase::Error;
+                self.notice = Some(error.into());
+            }
         }
     }
 
     pub(crate) fn set_main_app(&mut self, main_app: WeakEntity<KiteApp>) {
         self.main_app = Some(main_app);
+    }
+
+    pub(crate) fn apply_agent_profiles(
+        &mut self,
+        agent_profiles: AgentProfileSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile = agent_profiles
+            .default_profile()
+            .cloned()
+            .or_else(default_agent_profile);
+        if !matches!(
+            self.phase,
+            AgentSessionPhase::Loading | AgentSessionPhase::Running
+        ) {
+            self.phase = if self.profile.is_some() {
+                AgentSessionPhase::Ended
+            } else {
+                AgentSessionPhase::Unconfigured
+            };
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn window_size(&self) -> (u32, u32) {
+        self.window_size
+    }
+
+    pub(crate) fn draft_value(&self, cx: &App) -> String {
+        self.prompt_input.read(cx).value().to_string()
+    }
+
+    pub(crate) fn persist_window_state(&mut self, width: u32, height: u32, draft: String) {
+        self.window_size = (width.clamp(680, 3_840), height.clamp(560, 2_160));
+        let store = load_agent_sessions().store;
+        let Some(mut conversation) = store
+            .conversations
+            .into_iter()
+            .find(|conversation| conversation.id == self.conversation_id)
+        else {
+            self.persist_conversation(draft);
+            return;
+        };
+        conversation.window_width = self.window_size.0;
+        conversation.window_height = self.window_size.1;
+        conversation.draft = draft;
+        conversation.updated_unix_ms = now_unix_ms();
+        let _ = save_agent_conversation(conversation);
     }
 
     pub(crate) fn present(
@@ -52,13 +241,26 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.stop_runtime();
+        self.profile = default_agent_profile();
+        self.phase = if self.profile.is_some() {
+            AgentSessionPhase::Ended
+        } else {
+            AgentSessionPhase::Unconfigured
+        };
         self.mode = AgentContextMode::Fixed;
-        self.phase = AgentSessionPhase::Unconfigured;
+        self.context = Some(request.context);
+        self.sent_prompt.clear();
+        self.saved_terminal_snapshot = false;
+        self.notice = None;
+        self.snapshot = AgentRuntimeSnapshot::default();
+        self.conversation_id = new_agent_conversation_id();
+        self.history.clear();
+        self.turn_id = 0;
         self.prompt_input.update(cx, |input, cx| {
             input.set_value(request.prompt, window, cx);
         });
-        self.context = Some(request.context);
-        self.notice = None;
+        self.set_output("", cx);
         cx.notify();
     }
 
@@ -91,7 +293,7 @@ impl AgentPanel {
             Err(error) => {
                 self.context = None;
                 self.phase = AgentSessionPhase::Error;
-                self.notice = Some(error.into());
+                self.notice = Some(error.to_string().into());
             }
         }
         cx.notify();
@@ -118,12 +320,11 @@ impl AgentPanel {
             match AgentContext::new(&primary.path, paths, Some(working_directory)) {
                 Ok(context) => {
                     self.context = Some(context);
-                    self.phase = AgentSessionPhase::Unconfigured;
                     self.notice = Some("已添加上下文路径".into());
                 }
                 Err(error) => {
                     self.phase = AgentSessionPhase::Error;
-                    self.notice = Some(error.into());
+                    self.notice = Some(error.to_string().into());
                 }
             }
         }
@@ -204,16 +405,248 @@ impl AgentPanel {
         }
     }
 
+    fn show_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) {
+            main_app.update(cx, |app, cx| app.show_preview_panel(cx));
+        }
+    }
+
+    fn send_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.runtime.as_ref().is_some_and(|runtime| {
+            !runtime.is_closed()
+                && !matches!(
+                    runtime.snapshot().state,
+                    AgentRuntimeState::Completed
+                        | AgentRuntimeState::Failed
+                        | AgentRuntimeState::Cancelled
+                        | AgentRuntimeState::Closed
+                )
+        }) {
+            self.notice = Some("Agent 正在运行，请先停止或等待完成".into());
+            cx.notify();
+            return;
+        }
+        let Some(profile) = self.profile.clone() else {
+            self.phase = AgentSessionPhase::Unconfigured;
+            self.notice = Some("请先在设置中配置 Agent".into());
+            cx.notify();
+            return;
+        };
+        let Some(context) = self.context.clone() else {
+            self.notice = Some("请先选择文件或文件夹作为上下文".into());
+            cx.notify();
+            return;
+        };
+        let prompt = self.prompt_input.read(cx).value().trim().to_string();
+        if prompt.is_empty() {
+            self.notice = Some("提示不能为空".into());
+            cx.notify();
+            return;
+        }
+        let context_paths = context
+            .paths
+            .iter()
+            .map(|path| path.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        self.turn_id = now_unix_ms();
+        match AgentRuntime::start(
+            profile,
+            context.working_directory.to_string_lossy().into_owned(),
+            context_paths,
+            self.history.clone(),
+        ) {
+            Ok(runtime) => {
+                self.sent_prompt = prompt;
+                self.saved_terminal_snapshot = false;
+                self.snapshot = runtime.snapshot();
+                self.runtime = Some(runtime.clone());
+                self.phase = AgentSessionPhase::Loading;
+                self.notice = Some("Agent 已启动".into());
+                self.poll_runtime(runtime, cx);
+            }
+            Err(error) => {
+                self.phase = AgentSessionPhase::Error;
+                self.notice = Some(error.to_string().into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn poll_runtime(&mut self, runtime: Arc<AgentRuntime>, cx: &mut Context<Self>) {
+        self.poll_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(80))
+                    .await;
+                let snapshot = runtime.snapshot();
+                let terminal = matches!(
+                    snapshot.state,
+                    AgentRuntimeState::Completed
+                        | AgentRuntimeState::Failed
+                        | AgentRuntimeState::Cancelled
+                        | AgentRuntimeState::Closed
+                );
+                let output = snapshot.output.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_snapshot(snapshot, cx);
+                    if terminal && !this.saved_terminal_snapshot {
+                        this.saved_terminal_snapshot = true;
+                        let draft = this.prompt_input.read(cx).value().to_string();
+                        this.persist_conversation(draft);
+                    }
+                    let _ = &output;
+                    cx.notify();
+                });
+                if terminal {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn apply_snapshot(&mut self, snapshot: AgentRuntimeSnapshot, cx: &mut Context<Self>) {
+        self.phase = match snapshot.state {
+            AgentRuntimeState::Starting | AgentRuntimeState::Initializing => {
+                AgentSessionPhase::Loading
+            }
+            AgentRuntimeState::Ready
+            | AgentRuntimeState::Running
+            | AgentRuntimeState::WaitingPermission
+            | AgentRuntimeState::Cancelling => AgentSessionPhase::Running,
+            AgentRuntimeState::Completed
+            | AgentRuntimeState::Cancelled
+            | AgentRuntimeState::Closed => AgentSessionPhase::Ended,
+            AgentRuntimeState::Failed => AgentSessionPhase::Error,
+        };
+        let output = snapshot.output.clone();
+        self.snapshot = snapshot;
+        self.set_output(&output, cx);
+    }
+
+    fn set_output(&mut self, output: &str, cx: &mut Context<Self>) {
+        let output = output.to_string();
+        self.output_view
+            .update(cx, |view, cx| view.set_text(&output, cx));
+    }
+
+    fn persist_conversation(&mut self, draft: String) {
+        let Some(profile) = self.profile.as_ref() else {
+            return;
+        };
+        let Some(context) = self.context.as_ref() else {
+            return;
+        };
+        let now = now_unix_ms();
+        let mut messages = self.history.clone();
+        let user_message_id = format!("{}:user:{}", self.conversation_id, self.turn_id);
+        let assistant_message_id = format!("{}:assistant:{}", self.conversation_id, self.turn_id);
+        messages
+            .retain(|message| message.id != user_message_id && message.id != assistant_message_id);
+        if !self.sent_prompt.trim().is_empty() {
+            messages.push(AgentMessage {
+                id: user_message_id,
+                role: AgentMessageRole::User,
+                content: self.sent_prompt.clone(),
+                unix_ms: now,
+                truncated: false,
+            });
+        }
+        if !self.snapshot.output.trim().is_empty() {
+            messages.push(AgentMessage {
+                id: assistant_message_id,
+                role: AgentMessageRole::Assistant,
+                content: self.snapshot.output.clone(),
+                unix_ms: now,
+                truncated: self.snapshot.output_truncated,
+            });
+        }
+        let title = self
+            .sent_prompt
+            .lines()
+            .next()
+            .unwrap_or("新的 Agent 对话")
+            .chars()
+            .take(48)
+            .collect::<String>();
+        self.history = messages.clone();
+        let conversation = AgentConversation {
+            id: self.conversation_id.clone(),
+            title,
+            profile_id: profile.id.clone(),
+            model: profile.model.clone(),
+            working_directory: context.working_directory.to_string_lossy().into_owned(),
+            context_paths: context
+                .paths
+                .iter()
+                .map(|path| path.path.to_string_lossy().into_owned())
+                .collect(),
+            follow_selection: self.follows_selection(),
+            messages,
+            remote_session_id: None,
+            draft,
+            window_width: self.window_size.0,
+            window_height: self.window_size.1,
+            updated_unix_ms: now,
+        };
+        let _ = save_agent_conversation(conversation);
+    }
+
+    fn stop_runtime(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            let _ = runtime.cancel();
+            runtime.shutdown();
+        }
+        self.phase = AgentSessionPhase::Ended;
+    }
+
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(runtime) = self.runtime.as_ref()
+            && let Err(error) = runtime.cancel()
+        {
+            self.notice = Some(error.to_string().into());
+        }
+        cx.notify();
+    }
+
+    fn respond_permission(
+        &mut self,
+        request_id: String,
+        decision: AgentPermissionDecision,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(runtime) = self.runtime.as_ref()
+            && let Err(error) = runtime.respond_permission(request_id, decision)
+        {
+            self.notice = Some(error.to_string().into());
+        }
+        cx.notify();
+    }
+
     fn render_status(&self, cx: &App) -> AnyElement {
         let (status_color, connection_label) = match self.phase {
             AgentSessionPhase::Empty | AgentSessionPhase::Unconfigured => {
                 (cx.theme().muted_foreground, "未连接")
             }
             AgentSessionPhase::Loading => (cx.theme().primary, "正在连接"),
-            AgentSessionPhase::Running => (cx.theme().success, "已连接"),
-            AgentSessionPhase::Error => (cx.theme().danger, "连接失败"),
-            AgentSessionPhase::Ended => (cx.theme().muted_foreground, "已结束"),
+            AgentSessionPhase::Running => (cx.theme().success, "运行中"),
+            AgentSessionPhase::Error => (cx.theme().danger, "失败"),
+            AgentSessionPhase::Ended => (cx.theme().muted_foreground, "就绪"),
         };
+        let profile_name = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "未配置 Agent".to_string());
+        let model = self
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.model.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let permission = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.permission.label().to_string())
+            .unwrap_or_else(|| "只读".to_string());
         let working_directory = self
             .context
             .as_ref()
@@ -252,12 +685,12 @@ impl AgentPanel {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().font_semibold().child("未配置 Agent"))
+                            .child(div().text_sm().font_semibold().child(profile_name))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("模型 — · 只读 · Kite 宿主"),
+                                    .child(format!("{model} · {permission}")),
                             ),
                     )
                     .child(
@@ -290,6 +723,9 @@ impl AgentPanel {
                             .child(working_directory),
                     ),
             )
+            .when_some(self.snapshot.error.clone(), |this, error| {
+                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+            })
             .when_some(self.notice.clone(), |this, notice| {
                 this.child(
                     div()
@@ -298,6 +734,51 @@ impl AgentPanel {
                         .child(notice),
                 )
             })
+            .into_any_element()
+    }
+}
+
+impl AgentPanel {
+    fn open_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(main_app) = self.main_app.as_ref().and_then(|entity| entity.upgrade()) {
+            main_app.update(cx, |app, cx| app.open_agent_window(window, cx));
+        }
+    }
+
+    fn render_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .id("agent-panel-header")
+            .w_full()
+            .h(px(32.))
+            .px_2()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Icon::new(IconName::Sparkles)
+                    .size_3p5()
+                    .text_color(cx.theme().primary),
+            )
+            .child(div().text_xs().font_medium().child("Agent"))
+            .child(div().flex_1())
+            .child(
+                Button::new("agent-show-preview")
+                    .ghost()
+                    .compact()
+                    .label("预览")
+                    .tooltip("切换回文件预览")
+                    .on_click(cx.listener(|this, _, _, cx| this.show_preview(cx))),
+            )
+            .child(
+                Button::new("agent-popout")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Maximize2)
+                    .tooltip("在独立窗口中打开 Agent")
+                    .accessibility_label("在独立窗口中打开 Agent")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_window(window, cx))),
+            )
             .into_any_element()
     }
 
@@ -421,7 +902,7 @@ impl AgentPanel {
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(if self.follows_selection() {
-                                        "切换目录或选择时，先更新这份上下文；发送前仍需确认。"
+                                        "切换目录或选择时更新这份上下文；发送前仍可检查。"
                                     } else {
                                         "这份快照不会因切换目录而改变。"
                                     }),
@@ -439,17 +920,184 @@ impl AgentPanel {
             .into_any_element()
     }
 
+    fn render_output(&self, cx: &App) -> AnyElement {
+        let output_empty = self.snapshot.output.trim().is_empty();
+        v_flex()
+            .id("agent-output")
+            .w_full()
+            .gap_2()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_xs().font_semibold().child("回答"))
+                    .child(div().flex_1())
+                    .when(!output_empty, |this| {
+                        this.child(
+                            Clipboard::new("agent-copy-output")
+                                .value(self.snapshot.output.clone())
+                                .tooltip("复制 Agent 回答")
+                                .accessibility_label("复制 Agent 回答"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("agent-output-scroll")
+                    .w_full()
+                    .min_h(px(160.))
+                    .max_h(px(360.))
+                    .overflow_y_scroll()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().muted.opacity(0.18))
+                    .p_3()
+                    .when(output_empty, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if self.phase == AgentSessionPhase::Running {
+                                    "Agent 正在处理…"
+                                } else {
+                                    "发送后会在这里显示流式回答。"
+                                }),
+                        )
+                    })
+                    .when(!output_empty, |this| {
+                        this.child(
+                            TextView::new(&self.output_view)
+                                .w_full()
+                                .text_sm()
+                                .selectable(true)
+                                .scrollable(false),
+                        )
+                    }),
+            )
+            .when(self.snapshot.output_truncated, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child("输出超过上限，当前内容已截断。"),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_permissions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let requests = self.snapshot.permission_requests.clone();
+        if requests.is_empty() {
+            return div().into_any_element();
+        }
+        let mut cards = Vec::new();
+        for request in requests {
+            let request_id = request.request_id.clone();
+            let allow_id = request_id.clone();
+            let reject_id = request_id.clone();
+            let cancel_id = request_id.clone();
+            let can_allow_task = request
+                .options
+                .iter()
+                .any(|option| option.kind.contains("always") || option.kind.contains("task"));
+            cards.push(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().warning.opacity(0.42))
+                    .bg(cx.theme().warning.opacity(0.08))
+                    .p_3()
+                    .child(div().text_sm().font_medium().child(request.title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(request.description),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                Button::new(format!("agent-permission-allow-{}", allow_id))
+                                    .small()
+                                    .primary()
+                                    .label("仅本次允许")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            allow_id.clone(),
+                                            AgentPermissionDecision::AllowOnce,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                            .when(can_allow_task, |this| {
+                                this.child(
+                                    Button::new(format!("agent-permission-task-{}", request_id))
+                                        .small()
+                                        .outline()
+                                        .label("本任务允许")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.respond_permission(
+                                                request_id.clone(),
+                                                AgentPermissionDecision::AllowTask,
+                                                cx,
+                                            )
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new(format!("agent-permission-reject-{}", reject_id))
+                                    .small()
+                                    .outline()
+                                    .label("拒绝")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            reject_id.clone(),
+                                            AgentPermissionDecision::RejectOnce,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("agent-permission-cancel-{}", cancel_id))
+                                    .ghost()
+                                    .compact()
+                                    .label("取消任务")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            cancel_id.clone(),
+                                            AgentPermissionDecision::Cancel,
+                                            cx,
+                                        )
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        v_flex().w_full().gap_2().children(cards).into_any_element()
+    }
+
     fn render_prompt(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let active =
+            self.phase == AgentSessionPhase::Loading || self.phase == AgentSessionPhase::Running;
+        let configured = self.profile.is_some();
         v_flex()
             .id("agent-prompt")
             .w_full()
             .gap_2()
             .child(div().text_xs().font_semibold().child("发送准备"))
             .child(
-                Input::new(&self.prompt_input)
-                    .aria_label("Agent 问题或指令")
-                    .cleanable(true)
-                    .w_full(),
+                Textarea::new(&self.prompt_input)
+                    .h(px(92.))
+                    .w_full()
+                    .appearance(true)
+                    .bordered(true),
             )
             .child(
                 h_flex()
@@ -477,20 +1125,23 @@ impl AgentPanel {
                                 cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
                             ),
                     )
+                    .when(active, |this| {
+                        this.child(
+                            Button::new("agent-stop")
+                                .small()
+                                .outline()
+                                .label("停止")
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                        )
+                    })
                     .child(
                         Button::new("agent-send")
                             .small()
                             .primary()
                             .label("发送")
-                            .disabled(true)
-                            .tooltip("发送和流式输出由下一阶段接入"),
+                            .disabled(!configured || self.context.is_none() || active)
+                            .on_click(cx.listener(|this, _, _, cx| this.send_prompt(cx))),
                     ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("当前阶段只准备上下文和提示，不会启动外部 Agent。"),
             )
             .into_any_element()
     }
@@ -556,63 +1207,58 @@ impl AgentPanel {
 
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let header = self.render_header(cx);
         let content = if self.context.is_none() {
             self.render_empty(cx)
         } else {
             let status = self.render_status(cx);
             let context = self.render_context_section(window, cx);
+            let output = self.render_output(cx);
+            let permissions = self.render_permissions(cx);
             let prompt = self.render_prompt(cx);
-            let phase = self.phase;
             v_flex()
                 .id("agent-panel-content")
                 .w_full()
                 .gap_3()
                 .child(status)
                 .child(context)
-                .when(phase == AgentSessionPhase::Unconfigured, |this| {
-                    this.child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().primary.opacity(0.06))
-                            .p_3()
-                            .child(
-                                Icon::new(IconName::Info)
-                                    .size_4()
-                                    .text_color(cx.theme().primary),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .gap_1()
-                                    .child(div().text_sm().font_medium().child("尚未配置 Agent"))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("上下文和提示已经准备好。打开设置接入 Agent 后，发送流程会在下一阶段启用。"),
-                                    ),
-                            ),
-                    )
-                })
+                .child(output)
+                .child(permissions)
                 .child(prompt)
                 .into_any_element()
         };
-
         v_flex()
             .id("agent-panel")
             .size_full()
+            .overflow_hidden()
+            .rounded_lg()
+            .bg(cx.theme().title_bar)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(header)
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .overflow_y_scrollbar()
+                    .p(px(6.))
                     .child(content),
             )
-            .into_any_element()
     }
+}
+
+fn default_agent_profile() -> Option<AgentProfile> {
+    let store = AgentProfileStore::new();
+    store
+        .default_profile()
+        .ok()
+        .flatten()
+        .or_else(|| store.list_profiles().ok()?.into_iter().next())
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }

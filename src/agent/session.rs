@@ -7,10 +7,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::agent::config::ValidatedSessionConfig;
-use crate::agent::events::{AgentEventSubscription, EventDispatcher};
+use crate::agent::events::{AgentSessionEventSubscription, EventDispatcher};
 use crate::agent::model::{
-    AgentDiagnosticLevel, AgentError, AgentErrorKind, AgentEvent, AgentEventCallback,
-    AgentSessionConfig, AgentSessionState, AgentStopReason,
+    AgentDiagnosticLevel, AgentError, AgentErrorKind, AgentSessionConfig, AgentSessionEvent,
+    AgentSessionEventCallback, AgentSessionState, AgentStopReason,
 };
 use crate::agent::process::ProcessHandle;
 use crate::agent::transport::{AgentPrompt as TransportPrompt, TransportEvent, transport_for};
@@ -125,7 +125,7 @@ impl AgentSession {
             }
             *state = AgentSessionState::Starting;
         }
-        self.dispatcher.emit(AgentEvent::StateChanged {
+        self.dispatcher.emit(AgentSessionEvent::StateChanged {
             state: AgentSessionState::Starting,
         });
         if let Err(error) = self.send_command(SessionCommand::Start) {
@@ -167,7 +167,7 @@ impl AgentSession {
                 }
             }
         }
-        self.dispatcher.emit(AgentEvent::StateChanged {
+        self.dispatcher.emit(AgentSessionEvent::StateChanged {
             state: AgentSessionState::Running,
         });
         if let Err(error) = self.send_command(SessionCommand::Prompt(prompt)) {
@@ -222,7 +222,7 @@ impl AgentSession {
                 }
             }
         }
-        self.dispatcher.emit(AgentEvent::StateChanged {
+        self.dispatcher.emit(AgentSessionEvent::StateChanged {
             state: AgentSessionState::Cancelling,
         });
         if let Err(error) = self.send_command(SessionCommand::Cancel) {
@@ -243,7 +243,7 @@ impl AgentSession {
             if *state != AgentSessionState::Closed {
                 *state = AgentSessionState::Closed;
                 drop(state);
-                self.dispatcher.emit(AgentEvent::StateChanged {
+                self.dispatcher.emit(AgentSessionEvent::StateChanged {
                     state: AgentSessionState::Closed,
                 });
             }
@@ -262,7 +262,10 @@ impl AgentSession {
         self.process_slot.get().map(|process| process.pid())
     }
 
-    pub fn subscribe(&self, callback: Box<dyn AgentEventCallback>) -> Arc<AgentEventSubscription> {
+    pub fn subscribe(
+        &self,
+        callback: Box<dyn AgentSessionEventCallback>,
+    ) -> Arc<AgentSessionEventSubscription> {
         self.dispatcher.subscribe(callback)
     }
 }
@@ -311,7 +314,7 @@ fn run_worker(
             if let Some(agent) = active.as_mut()
                 && let Some(status) = agent.transport.try_wait()
             {
-                dispatcher.emit(AgentEvent::ProcessExited {
+                dispatcher.emit(AgentSessionEvent::ProcessExited {
                     exit_code: status.code(),
                 });
                 let error = process_exit_error(status.code());
@@ -361,12 +364,12 @@ fn run_worker(
                         stop_reason,
                         duration_ms,
                     } => {
-                        dispatcher.emit(AgentEvent::TurnCompleted {
+                        dispatcher.emit(AgentSessionEvent::TurnCompleted {
                             stop_reason,
                             duration_ms,
                         });
                         if let Some(status) = agent.transport.try_wait() {
-                            dispatcher.emit(AgentEvent::ProcessExited {
+                            dispatcher.emit(AgentSessionEvent::ProcessExited {
                                 exit_code: status.code(),
                             });
                             set_state(&state, &dispatcher, &closed, AgentSessionState::Failed);
@@ -378,10 +381,10 @@ fn run_worker(
                         duration_ms,
                         forced,
                     } => {
-                        dispatcher.emit(AgentEvent::TurnCancelled { duration_ms });
+                        dispatcher.emit(AgentSessionEvent::TurnCancelled { duration_ms });
                         let exited = agent.transport.try_wait();
                         if let Some(status) = exited {
-                            dispatcher.emit(AgentEvent::ProcessExited {
+                            dispatcher.emit(AgentSessionEvent::ProcessExited {
                                 exit_code: status.code(),
                             });
                         }
@@ -455,7 +458,7 @@ fn start_agent(
         process_slot,
         config.startup_timeout,
     )?;
-    dispatcher.emit(AgentEvent::ProtocolReady {
+    dispatcher.emit(AgentSessionEvent::ProtocolReady {
         protocol_version: handshake.protocol_version,
         agent_name: handshake.agent_name,
         agent_version: handshake.agent_version,
@@ -473,7 +476,7 @@ fn start_agent(
         &config.additional_directories,
         remaining,
     )?;
-    dispatcher.emit(AgentEvent::SessionCreated {
+    dispatcher.emit(AgentSessionEvent::SessionCreated {
         protocol_session_id: session_id.clone(),
     });
     Ok(ActiveAgent {
@@ -598,7 +601,7 @@ fn run_turn(
             Ok(Some(TransportEvent::PermissionRequested(request))) => {
                 pending_permissions.insert(request.request_id.clone());
                 last_activity = Instant::now();
-                dispatcher.emit(AgentEvent::PermissionRequested { request });
+                dispatcher.emit(AgentSessionEvent::PermissionRequested { request });
             }
             Ok(Some(TransportEvent::PromptCompleted(stop_reason))) => {
                 let duration_ms = elapsed_ms(started);
@@ -614,7 +617,7 @@ fn run_turn(
                 };
             }
             Ok(Some(TransportEvent::ProcessExited(exit_code))) => {
-                dispatcher.emit(AgentEvent::ProcessExited { exit_code });
+                dispatcher.emit(AgentSessionEvent::ProcessExited { exit_code });
                 let error = process_exit_error(exit_code);
                 if cancel_started.is_some() {
                     return TurnOutcome::Cancelled {
@@ -703,18 +706,18 @@ fn set_state(
     }
     *state = next;
     drop(state);
-    dispatcher.emit(AgentEvent::StateChanged { state: next });
+    dispatcher.emit(AgentSessionEvent::StateChanged { state: next });
     true
 }
 
 fn emit_error(dispatcher: &EventDispatcher, error: &AgentError) {
-    dispatcher.emit(AgentEvent::Error {
+    dispatcher.emit(AgentSessionEvent::Error {
         failure: error.as_failure(),
     });
 }
 
 fn emit_diagnostic(dispatcher: &EventDispatcher, level: AgentDiagnosticLevel, message: &str) {
-    dispatcher.emit(AgentEvent::Diagnostic {
+    dispatcher.emit(AgentSessionEvent::Diagnostic {
         level,
         message: message.to_string(),
     });

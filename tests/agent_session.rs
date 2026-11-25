@@ -4,9 +4,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use kite_core::agent::{
-    AgentEnvironmentVariable, AgentErrorKind, AgentEvent, AgentEventCallback,
-    AgentEventSubscription, AgentFailure, AgentPermissionRequest, AgentSession, AgentSessionConfig,
-    AgentSessionState, AgentStopReason,
+    AgentEnvironmentVariable, AgentErrorKind, AgentFailure, AgentSession, AgentSessionConfig,
+    AgentSessionEvent, AgentSessionEventCallback, AgentSessionEventSubscription,
+    AgentSessionPermissionRequest, AgentSessionState, AgentStopReason,
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -14,9 +14,9 @@ const SECRET: &str = "fixture-super-secret-token";
 
 struct Harness {
     session: Arc<AgentSession>,
-    events: Receiver<AgentEvent>,
-    subscription: Arc<AgentEventSubscription>,
-    early_events: Vec<AgentEvent>,
+    events: Receiver<AgentSessionEvent>,
+    subscription: Arc<AgentSessionEventSubscription>,
+    early_events: Vec<AgentSessionEvent>,
 }
 
 impl Drop for Harness {
@@ -27,11 +27,11 @@ impl Drop for Harness {
 }
 
 struct Collector {
-    sender: Sender<AgentEvent>,
+    sender: Sender<AgentSessionEvent>,
 }
 
-impl AgentEventCallback for Collector {
-    fn on_event(&self, event: AgentEvent) {
+impl AgentSessionEventCallback for Collector {
+    fn on_event(&self, event: AgentSessionEvent) {
         let _ = self.sender.send(event);
     }
 }
@@ -44,14 +44,14 @@ fn start_session(config: AgentSessionConfig) -> Harness {
     let early_events = collect_until(&events, Duration::from_secs(5), |event| {
         matches!(
             event,
-            AgentEvent::StateChanged {
+            AgentSessionEvent::StateChanged {
                 state: AgentSessionState::Ready
-            } | AgentEvent::Error { .. }
+            } | AgentSessionEvent::Error { .. }
         )
     });
-    if let Some(AgentEvent::Error { failure }) = early_events
+    if let Some(AgentSessionEvent::Error { failure }) = early_events
         .iter()
-        .find(|event| matches!(event, AgentEvent::Error { .. }))
+        .find(|event| matches!(event, AgentSessionEvent::Error { .. }))
     {
         panic!("session failed during startup: {failure:?}");
     }
@@ -69,12 +69,12 @@ fn start_error(config: AgentSessionConfig) -> AgentFailure {
     let subscription = session.subscribe(Box::new(Collector { sender }));
     session.start().expect("start request");
     let seen = collect_until(&events, Duration::from_secs(6), |event| {
-        matches!(event, AgentEvent::Error { .. })
+        matches!(event, AgentSessionEvent::Error { .. })
     });
     let failure = seen
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Error { failure } => Some(failure.clone()),
+            AgentSessionEvent::Error { failure } => Some(failure.clone()),
             _ => None,
         })
         .expect("startup error");
@@ -102,10 +102,10 @@ fn fixture_config(scenario: &str) -> AgentSessionConfig {
 }
 
 fn collect_until(
-    events: &Receiver<AgentEvent>,
+    events: &Receiver<AgentSessionEvent>,
     timeout: Duration,
-    predicate: impl Fn(&AgentEvent) -> bool,
-) -> Vec<AgentEvent> {
+    predicate: impl Fn(&AgentSessionEvent) -> bool,
+) -> Vec<AgentSessionEvent> {
     let deadline = Instant::now() + timeout;
     let mut seen = Vec::new();
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
@@ -123,32 +123,32 @@ fn collect_until(
     panic!("timed out waiting for Agent event; saw {seen:#?}");
 }
 
-fn collect_turn(events: &Receiver<AgentEvent>) -> Vec<AgentEvent> {
+fn collect_turn(events: &Receiver<AgentSessionEvent>) -> Vec<AgentSessionEvent> {
     collect_until(events, Duration::from_secs(5), |event| {
         matches!(
             event,
-            AgentEvent::TurnCompleted { .. }
-                | AgentEvent::TurnCancelled { .. }
-                | AgentEvent::Error { .. }
+            AgentSessionEvent::TurnCompleted { .. }
+                | AgentSessionEvent::TurnCancelled { .. }
+                | AgentSessionEvent::Error { .. }
         )
     })
 }
 
-fn message_text(events: &[AgentEvent]) -> String {
+fn message_text(events: &[AgentSessionEvent]) -> String {
     events
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::MessageChunk { text, .. } => Some(text.as_str()),
+            AgentSessionEvent::MessageChunk { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<String>()
 }
 
-fn permission_request(events: &[AgentEvent]) -> AgentPermissionRequest {
+fn permission_request(events: &[AgentSessionEvent]) -> AgentSessionPermissionRequest {
     events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::PermissionRequested { request } => Some(request.clone()),
+            AgentSessionEvent::PermissionRequested { request } => Some(request.clone()),
             _ => None,
         })
         .expect("permission request event")
@@ -176,7 +176,7 @@ fn streams_normal_output_and_completes() {
     assert_eq!(message_text(&events), "hello world");
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::TurnCompleted {
+        AgentSessionEvent::TurnCompleted {
             stop_reason: AgentStopReason::EndTurn,
             ..
         }
@@ -186,7 +186,7 @@ fn streams_normal_output_and_completes() {
         .iter()
         .chain(events.iter())
         .find_map(|event| match event {
-            AgentEvent::Diagnostic { message, .. } => Some(message.clone()),
+            AgentSessionEvent::Diagnostic { message, .. } => Some(message.clone()),
             _ => None,
         })
         .expect("stderr diagnostic");
@@ -203,7 +203,7 @@ fn permission_request_requires_explicit_response() {
         .send_prompt("write a file".to_string(), Vec::new())
         .expect("prompt");
     let request_events = collect_until(&harness.events, Duration::from_secs(5), |event| {
-        matches!(event, AgentEvent::PermissionRequested { .. })
+        matches!(event, AgentSessionEvent::PermissionRequested { .. })
     });
     let request = permission_request(&request_events);
     assert_eq!(request.tool_call_id, "fixture-tool-1");
@@ -218,7 +218,7 @@ fn permission_request_requires_explicit_response() {
     assert!(message_text(&events).contains("approved: allow"));
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::TurnCompleted {
+        AgentSessionEvent::TurnCompleted {
             stop_reason: AgentStopReason::EndTurn,
             ..
         }
@@ -235,7 +235,7 @@ fn cancel_returns_cancelled_and_keeps_session_reusable() {
     let started = collect_until(
         &harness.events,
         Duration::from_secs(5),
-        |event| matches!(event, AgentEvent::MessageChunk { text, .. } if text.contains("waiting")),
+        |event| matches!(event, AgentSessionEvent::MessageChunk { text, .. } if text.contains("waiting")),
     );
     assert!(message_text(&started).contains("waiting for cancel"));
     harness.session.cancel().expect("cancel");
@@ -243,7 +243,7 @@ fn cancel_returns_cancelled_and_keeps_session_reusable() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCancelled { .. }))
+            .any(|event| matches!(event, AgentSessionEvent::TurnCancelled { .. }))
     );
     wait_for_state(&harness.session, AgentSessionState::Ready);
 }
@@ -259,7 +259,7 @@ fn idle_timeout_is_structured() {
     let error = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Error { failure } => Some(failure),
+            AgentSessionEvent::Error { failure } => Some(failure),
             _ => None,
         })
         .expect("timeout error");
@@ -281,7 +281,7 @@ fn output_limit_is_structured() {
     let error = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Error { failure } => Some(failure),
+            AgentSessionEvent::Error { failure } => Some(failure),
             _ => None,
         })
         .expect("output limit error");
@@ -298,12 +298,12 @@ fn authentication_and_rpc_errors_are_structured_and_redacted() {
     }));
     auth_session.start().expect("auth start request");
     let auth_seen = collect_until(&auth_events, Duration::from_secs(5), |event| {
-        matches!(event, AgentEvent::Error { .. })
+        matches!(event, AgentSessionEvent::Error { .. })
     });
     let auth_failure = auth_seen
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Error { failure } => Some(failure),
+            AgentSessionEvent::Error { failure } => Some(failure),
             _ => None,
         })
         .expect("authentication failure");
@@ -320,7 +320,7 @@ fn authentication_and_rpc_errors_are_structured_and_redacted() {
     let failure = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Error { failure } => Some(failure.clone()),
+            AgentSessionEvent::Error { failure } => Some(failure.clone()),
             _ => None,
         })
         .expect("RPC error");
@@ -351,12 +351,12 @@ fn cancellation_cleans_up_the_process_tree() {
     let child_events = collect_until(
         &harness.events,
         Duration::from_secs(5),
-        |event| matches!(event, AgentEvent::Diagnostic { message, .. } if message.contains("fixture-child-pid:")),
+        |event| matches!(event, AgentSessionEvent::Diagnostic { message, .. } if message.contains("fixture-child-pid:")),
     );
     let child_pid = child_events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Diagnostic { message, .. } => message
+            AgentSessionEvent::Diagnostic { message, .. } => message
                 .strip_prefix("fixture-child-pid: ")
                 .and_then(|pid| pid.trim().parse::<u32>().ok()),
             _ => None,
@@ -368,7 +368,7 @@ fn cancellation_cleans_up_the_process_tree() {
         started.extend(collect_until(
             &harness.events,
             Duration::from_secs(5),
-            |event| matches!(event, AgentEvent::MessageChunk { text, .. } if text.contains("waiting")),
+            |event| matches!(event, AgentSessionEvent::MessageChunk { text, .. } if text.contains("waiting")),
         ));
     }
     assert!(message_text(&started).contains("waiting for cancel"));
@@ -377,7 +377,7 @@ fn cancellation_cleans_up_the_process_tree() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCancelled { .. }))
+            .any(|event| matches!(event, AgentSessionEvent::TurnCancelled { .. }))
     );
     harness.session.shutdown();
     wait_until(Duration::from_secs(5), || !process_exists(child_pid));
@@ -426,7 +426,7 @@ fn total_turn_timeout_is_structured() {
     let failure = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Error { failure } => Some(failure),
+            AgentSessionEvent::Error { failure } => Some(failure),
             _ => None,
         })
         .expect("turn timeout");
@@ -444,7 +444,7 @@ fn malformed_protocol_output_is_structured() {
     let failure = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::Error { failure } => Some(failure),
+            AgentSessionEvent::Error { failure } => Some(failure),
             _ => None,
         })
         .expect("protocol error");

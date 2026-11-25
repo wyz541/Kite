@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::*;
-use kite_core::agent_context::AgentMenuCommand;
+use kite_core::agent::AgentMenuCommand;
 
 actions!(
     kite,

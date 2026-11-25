@@ -27,17 +27,20 @@ kite_core
   platform paths
   command model
   session store
+  agent profiles and ACP session
   agent session / ACP transport
   UniFFI interface
 
 Windows frontend
   GPUI views
   GPUI tabs
+  Agent panel and window
   Windows Shell bridge
 
 macOS frontend
   SwiftUI views
   SwiftUI tabs
+  Agent panel and window
   AppKit menu and workspace
   UniFFI Swift bindings
 ```
@@ -60,9 +63,11 @@ Core 负责以下能力：
 - 稳定命令标识。
 - 跨语言数据记录。
 - 会话保存和恢复。
-- 外部 Agent 会话、ACP/JSON-RPC 传输和进程树清理。
 - GitHub Release 检查和版本比较。
 - 平台更新资产选择和 SHA-256 校验。
+- Agent profile、上下文快照和 ACP 会话生命周期。
+- 外部 Agent 会话、JSON-RPC 传输和进程树清理。
+- Agent 诊断脱敏和可选会话恢复。
 
 Rust Core 输出 `rlib`、`staticlib` 和 `cdylib`。
 Swift 通过 UniFFI 生成绑定。
@@ -87,7 +92,7 @@ Windows 前端负责以下能力：
 - `IContextMenu` Shell 扩展菜单。
 - WPD/MTP 设备展示。
 - WPD/MTP Shell 命名空间浏览和写入。
-- 右侧 Agent 栏、上下文 chip 和独立 Agent 窗口。
+- Agent 侧栏、独立窗口、右键入口和任务控制。
 
 Windows 专属代码只在 `cfg(target_os = "windows")` 下编译。
 
@@ -128,7 +133,6 @@ SwiftUI 负责以下能力：
 - 状态栏。
 - App commands。
 - 窗口关闭和退出时的会话保存。
-- 右侧 Agent 栏、上下文 chip 和独立 Agent 窗口。
 
 AppKit 负责以下能力：
 
@@ -196,15 +200,6 @@ Agent 会话的协议、超时、错误和清理边界见 [Agent 会话与 ACP �
 - AppKit 服务菜单提供系统服务。
 - macOS UI 按 HIG 隐藏不可用项。
 - macOS 菜单控制分组和子菜单深度。
-
-## Agent 表面
-
-Agent 表面不是模型运行时。
-Kite 负责可见上下文、工作目录、权限摘要和窗口路由。
-Windows 与 macOS 都使用右侧“预览 / Agent”切换，并支持弹出独立窗口。
-固定上下文默认不随导航变化；跟随当前选择必须显式开启。
-本阶段只准备上下文和提示，不发送任务。
-详细规则见 [Agent 表面架构](agent-surface.md)。
 
 ## 导航入口
 

@@ -8,7 +8,7 @@ use crate::agent::acp::AcpStdioTransport;
 use crate::agent::config::ValidatedSessionConfig;
 use crate::agent::events::EventDispatcher;
 use crate::agent::model::{
-    AcpCapabilities, AgentError, AgentErrorKind, AgentPermissionRequest, AgentStopReason,
+    AcpCapabilities, AgentError, AgentErrorKind, AgentSessionPermissionRequest, AgentStopReason,
 };
 use crate::agent::process::ProcessHandle;
 
@@ -29,7 +29,7 @@ pub(crate) struct AgentPrompt {
 #[derive(Debug)]
 pub(crate) enum TransportEvent {
     Activity,
-    PermissionRequested(AgentPermissionRequest),
+    PermissionRequested(AgentSessionPermissionRequest),
     PromptCompleted(AgentStopReason),
     ProcessExited(Option<i32>),
 }

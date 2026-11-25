@@ -1,6 +1,6 @@
 [package]
 name = "kite-explorer"
-version = "0.6.93"
+version = "0.6.94"
 edition = "2024"
 description = "A fast, native cross-platform file manager with a shared Rust Core, Windows GPUI UI, and native macOS SwiftUI UI with Liquid Glass"
 license = "MIT"
@@ -21,9 +21,12 @@ path = "src/main.rs"
 required-features = ["windows-ui"]
 
 [[bin]]
+name = "kite-agent-perf"
+path = "src/bin/kite-agent-perf.rs"
+
+[[bin]]
 name = "kite-agent-fixture"
 path = "src/bin/kite-agent-fixture.rs"
-required-features = ["agent-fixture"]
 
 [[bin]]
 name = "kite-perf"
@@ -73,6 +76,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 futures-channel = "0.3"
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 libloading = "0.8.9"
 gpui-kit = { version = "0.8.0", optional = true, features = ["syntect"] }
 raw-window-handle = { version = "0.6.2", optional = true }
@@ -105,12 +109,15 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
 markdown = "1.0.0"
 
 [[test]]

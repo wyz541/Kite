@@ -75,5 +75,8 @@ jobs:
       - name: Run core tests
         run: cargo test --locked --lib
 
+      - name: Run Agent fixture contract tests
+        run: cargo test --locked --test agent_fixture_protocol
+
       - name: Run Agent session integration tests
         run: cargo test --locked --features agent-fixture --test agent_session

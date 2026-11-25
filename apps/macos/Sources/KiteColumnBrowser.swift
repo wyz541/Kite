@@ -1863,24 +1863,29 @@ private struct KiteEntryMenu: View {
             Button("询问 Agent…") {
                 beginAgentAction(.ask)
             }
+            .disabled(!agent.hasConfiguredAgent)
             if KitePlatform.isEditableTextFile(entry.path) {
                 Button("解释此文件…") {
                     beginAgentAction(.explainFile)
                 }
+                .disabled(!agent.hasConfiguredAgent)
             }
             if entry.isDirectory {
                 Button("总结此文件夹…") {
                     beginAgentAction(.summarizeFolder)
                 }
+                .disabled(!agent.hasConfiguredAgent)
             }
             if model.isGitAvailable(forEntryPath: entry.path) {
                 Divider()
                 Button("审查选中变更…") {
                     beginAgentAction(.reviewChanges)
                 }
+                .disabled(!agent.hasConfiguredAgent)
                 Button("生成提交说明…") {
                     beginAgentAction(.generateCommitMessage)
                 }
+                .disabled(!agent.hasConfiguredAgent)
             }
             Divider()
             Button("配置 Agent…") {
@@ -2148,17 +2153,21 @@ private struct KiteDirectoryMenu: View {
             Button("询问 Agent…") {
                 agent.presentDirectory(column.path, action: .ask)
             }
+            .disabled(!agent.hasConfiguredAgent)
             Button("总结此文件夹…") {
                 agent.presentDirectory(column.path, action: .summarizeFolder)
             }
+            .disabled(!agent.hasConfiguredAgent)
             if column.gitAvailable {
                 Divider()
                 Button("审查选中变更…") {
                     agent.presentDirectory(column.path, action: .reviewChanges)
                 }
+                .disabled(!agent.hasConfiguredAgent)
                 Button("生成提交说明…") {
                     agent.presentDirectory(column.path, action: .generateCommitMessage)
                 }
+                .disabled(!agent.hasConfiguredAgent)
             }
             Divider()
             Button("配置 Agent…") {

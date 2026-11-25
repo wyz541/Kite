@@ -9,6 +9,7 @@
 当前 macOS 启动基线：[v0.6.61 启动与首内容](startup-macos-v0.6.61.md)。
 当前跨平台启动 CI 基线：[v0.6.61 Windows 与 macOS](startup-ci-v0.6.61.md)。
 当前 Git 提交历史基准：[100,000 提交分页与提交图](git-log-v0.6.88.md)。
+当前 Agent ACP 基准：[启动、内存、吞吐与长输出](agent-v0.6.94.md)。
 
 ## 1. 目标
 
@@ -21,6 +22,16 @@
 性能报告比较同一平台、同一配置和同一数据规模。Kite 不生成跨平台总分。
 
 ## 2. 快速运行
+
+运行 Agent 基准：
+
+```bash
+cargo run --locked --release --bin kite-agent-perf -- \
+  --scenario long \
+  --output target/performance/agent.json
+```
+
+`kite-agent-perf` 自动查找同目录下的 `kite-agent-fixture`，也可以使用 `--fixture` 指定路径。
 
 运行短基准：
 

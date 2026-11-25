@@ -18,6 +18,10 @@ on:
       - "src/text_editor.rs"
       - "src/updater.rs"
       - "src/vcs.rs"
+      - "src/agent/**"
+      - "src/bin/kite-agent-fixture.rs"
+      - "src/bin/kite-agent-perf.rs"
+      - "tests/agent_*.rs"
       - "scripts/performance/**"
       - "src/usn_journal.rs"
       - ".github/workflows/performance.yml"
@@ -77,6 +81,9 @@ jobs:
 
       - name: Test performance harness
         run: cargo test --locked --features performance --bin kite-perf
+
+      - name: Test Agent fixture contract
+        run: cargo test --locked --test agent_fixture_protocol
 
       - name: Run performance benchmark on Windows
         if: runner.os == 'Windows'
@@ -146,6 +153,20 @@ jobs:
             --output "target/performance/${{ matrix.platform }}-aggregate.json" \
             --markdown "target/performance/${{ matrix.platform }}-aggregate.md"
 
+      - name: Build Agent benchmark binaries
+        shell: bash
+        run: |
+          cargo build --locked --release \
+            --bin kite-agent-fixture \
+            --bin kite-agent-perf
+
+      - name: Run Agent benchmark
+        shell: bash
+        run: |
+          cargo run --locked --release --bin kite-agent-perf -- \
+            --scenario long \
+            --output "target/performance/agent-${{ matrix.platform }}.json"
+
       - name: Upload performance results
         if: always()
         uses: actions/upload-artifact@v4
@@ -156,4 +177,5 @@ jobs:
             target/performance/${{ matrix.platform }}-run-*.md
             target/performance/${{ matrix.platform }}-aggregate.json
             target/performance/${{ matrix.platform }}-aggregate.md
+            target/performance/agent-${{ matrix.platform }}.json
           if-no-files-found: error

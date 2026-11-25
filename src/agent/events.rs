@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::agent::model::{AgentEvent, AgentEventCallback};
+use crate::agent::model::{AgentSessionEvent, AgentSessionEventCallback};
 
 pub(crate) struct EventDispatcher {
     next_id: AtomicU64,
-    listeners: RwLock<BTreeMap<u64, Arc<dyn AgentEventCallback>>>,
+    listeners: RwLock<BTreeMap<u64, Arc<dyn AgentSessionEventCallback>>>,
 }
 
 impl EventDispatcher {
@@ -21,21 +21,21 @@ impl EventDispatcher {
 
     pub(crate) fn subscribe(
         self: &Arc<Self>,
-        callback: Box<dyn AgentEventCallback>,
-    ) -> Arc<AgentEventSubscription> {
+        callback: Box<dyn AgentSessionEventCallback>,
+    ) -> Arc<AgentSessionEventSubscription> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let callback: Arc<dyn AgentEventCallback> = Arc::from(callback);
+        let callback: Arc<dyn AgentSessionEventCallback> = Arc::from(callback);
         if let Ok(mut listeners) = self.listeners.write() {
             listeners.insert(id, callback);
         }
-        Arc::new(AgentEventSubscription {
+        Arc::new(AgentSessionEventSubscription {
             dispatcher: self.clone(),
             id,
             active: AtomicBool::new(true),
         })
     }
 
-    pub(crate) fn emit(&self, event: AgentEvent) {
+    pub(crate) fn emit(&self, event: AgentSessionEvent) {
         let listeners = self
             .listeners
             .read()
@@ -55,14 +55,14 @@ impl EventDispatcher {
 }
 
 #[derive(uniffi::Object)]
-pub struct AgentEventSubscription {
+pub struct AgentSessionEventSubscription {
     dispatcher: Arc<EventDispatcher>,
     id: u64,
     active: AtomicBool,
 }
 
 #[uniffi::export]
-impl AgentEventSubscription {
+impl AgentSessionEventSubscription {
     pub fn unsubscribe(&self) {
         if self.active.swap(false, Ordering::AcqRel) {
             self.dispatcher.unsubscribe(self.id);
@@ -70,7 +70,7 @@ impl AgentEventSubscription {
     }
 }
 
-impl Drop for AgentEventSubscription {
+impl Drop for AgentSessionEventSubscription {
     fn drop(&mut self) {
         self.unsubscribe();
     }

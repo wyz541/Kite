@@ -186,19 +186,19 @@ pub struct AgentPlanEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct AgentPermissionOption {
+pub struct AgentSessionPermissionOption {
     pub option_id: String,
     pub name: String,
     pub kind: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct AgentPermissionRequest {
+pub struct AgentSessionPermissionRequest {
     pub request_id: String,
     pub tool_call_id: String,
     pub title: Option<String>,
     pub kind: Option<String>,
-    pub options: Vec<AgentPermissionOption>,
+    pub options: Vec<AgentSessionPermissionOption>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -273,7 +273,7 @@ impl AgentFailure {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum AgentEvent {
+pub enum AgentSessionEvent {
     StateChanged {
         state: AgentSessionState,
     },
@@ -304,7 +304,7 @@ pub enum AgentEvent {
         entries: Vec<AgentPlanEntry>,
     },
     PermissionRequested {
-        request: AgentPermissionRequest,
+        request: AgentSessionPermissionRequest,
     },
     Diagnostic {
         level: AgentDiagnosticLevel,
@@ -403,8 +403,8 @@ impl AgentError {
 }
 
 #[uniffi::export(callback_interface)]
-pub trait AgentEventCallback: Send + Sync {
-    fn on_event(&self, event: AgentEvent);
+pub trait AgentSessionEventCallback: Send + Sync {
+    fn on_event(&self, event: AgentSessionEvent);
 }
 
 #[cfg(test)]
