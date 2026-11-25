@@ -4,6 +4,7 @@ pub mod agent;
 pub mod agent_review;
 pub mod archive;
 pub mod content_search;
+pub mod control;
 pub mod devices;
 pub mod diff;
 pub mod favorites;

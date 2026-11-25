@@ -29,6 +29,14 @@ name = "kite-agent-fixture"
 path = "src/bin/kite-agent-fixture.rs"
 
 [[bin]]
+name = "kite-cli"
+path = "src/bin/kite-cli.rs"
+
+[[bin]]
+name = "kite-mcp"
+path = "src/bin/kite-mcp.rs"
+
+[[bin]]
 name = "kite-perf"
 path = "src/bin/kite-perf.rs"
 required-features = ["performance"]

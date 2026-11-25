@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use super::process::build_agent_command;
 use super::{AgentProfile, AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, credentials};
 
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
@@ -275,14 +276,10 @@ fn test_acp_stdio(
     credential: Option<&str>,
     started: Instant,
 ) -> Result<AgentConnectionResult, ConnectionFailure> {
-    let executable_text = profile.executable.as_deref().ok_or_else(|| {
-        ConnectionFailure::new(AgentConnectionStatus::InvalidProfile, "缺少可执行文件")
-    })?;
-    let executable = resolve_executable(executable_text)?;
     let working_directory = profile_working_directory(profile)?;
-    let mut command = Command::new(&executable);
+    let (mut command, _) = build_agent_command(profile, &working_directory)
+        .map_err(|error| ConnectionFailure::new(AgentConnectionStatus::Io, error))?;
     command
-        .args(&profile.arguments)
         .current_dir(&working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -494,14 +491,10 @@ fn test_generic_cli(
     credential: Option<&str>,
     started: Instant,
 ) -> Result<AgentConnectionResult, ConnectionFailure> {
-    let executable_text = profile.executable.as_deref().ok_or_else(|| {
-        ConnectionFailure::new(AgentConnectionStatus::InvalidProfile, "缺少可执行文件")
-    })?;
-    let executable = resolve_executable(executable_text)?;
     let working_directory = profile_working_directory(profile)?;
-    let mut command = Command::new(&executable);
+    let (mut command, _) = build_agent_command(profile, &working_directory)
+        .map_err(|error| ConnectionFailure::new(AgentConnectionStatus::Io, error))?;
     command
-        .args(&profile.arguments)
         .arg("--version")
         .current_dir(&working_directory)
         .stdin(Stdio::null())
@@ -580,72 +573,6 @@ fn test_generic_cli(
         auth_methods: Vec::new(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
-}
-
-fn resolve_executable(command: &str) -> Result<PathBuf, ConnectionFailure> {
-    let requested = Path::new(command);
-    if requested.is_absolute() {
-        return validate_executable_path(requested.to_path_buf());
-    }
-    if command.contains('/') || command.contains('\\') || requested.components().count() > 1 {
-        return Err(ConnectionFailure::new(
-            AgentConnectionStatus::NotInstalled,
-            "可执行文件请使用绝对路径，或只填写 PATH 中的命令名称",
-        ));
-    }
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let extensions = executable_extensions();
-    for directory in std::env::split_paths(&path) {
-        let direct = directory.join(command);
-        if let Ok(path) = validate_executable_path(direct) {
-            return Ok(path);
-        }
-        for extension in &extensions {
-            let candidate = directory.join(format!("{command}{extension}"));
-            if let Ok(path) = validate_executable_path(candidate) {
-                return Ok(path);
-            }
-        }
-    }
-    Err(ConnectionFailure::new(
-        AgentConnectionStatus::NotInstalled,
-        format!("找不到可执行文件：{command}"),
-    ))
-}
-
-fn validate_executable_path(path: PathBuf) -> Result<PathBuf, ConnectionFailure> {
-    let metadata = std::fs::metadata(&path).map_err(|_| {
-        ConnectionFailure::new(
-            AgentConnectionStatus::NotInstalled,
-            format!("找不到可执行文件：{}", path.display()),
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(ConnectionFailure::new(
-            AgentConnectionStatus::NotInstalled,
-            format!("可执行路径不是文件：{}", path.display()),
-        ));
-    }
-    Ok(path)
-}
-
-fn executable_extensions() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let extensions =
-            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        let mut values = extensions
-            .split(';')
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        values.push(String::new());
-        values
-    }
-    #[cfg(not(windows))]
-    {
-        vec![String::new()]
-    }
 }
 
 fn apply_environment(command: &mut Command, profile: &AgentProfile, credential: Option<&str>) {
@@ -971,7 +898,7 @@ mod tests {
     #[test]
     #[ignore = "requires the local ACP fixture interpreter"]
     fn probes_an_acp_fixture_without_saving_credentials() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("scripts")
             .join("agent-fixtures")
             .join("acp_probe.py");
