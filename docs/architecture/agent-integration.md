@@ -4,6 +4,8 @@
 
 Kite 是 Agent 宿主和文件上下文桥，不是模型运行时。
 
+Agent 的 UI、CLI 和 MCP 入口统一通过 [Core API 与多端外壳](core-api.md) 的 `CoreApi` 边界调用业务逻辑。
+
 - 外部 Agent 负责模型推理、认证和自身工具执行。
 - Kite 负责配置、上下文快照、ACP 会话、权限确认、结果阅读和本地审计。
 - Windows 与 macOS 共享 Rust Core 的配置与会话语义，各自实现原生界面。

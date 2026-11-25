@@ -215,7 +215,7 @@ impl AgentProfile {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
 pub struct AgentProfileSnapshot {
     pub schema_version: u32,
     pub profiles: Vec<AgentProfile>,
@@ -232,7 +232,8 @@ impl AgentProfileSnapshot {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentConfigWarning {
     CorruptConfig { message: String },
     UnknownSchemaVersion { found: u32, supported: u32 },

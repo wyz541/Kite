@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use crate::agent::AgentProfile;
 use crate::agent::model::{AgentError, AgentErrorKind};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+
 const SAFE_ENV_NAMES: &[&str] = &[
     "PATH",
     "Path",
@@ -36,6 +39,29 @@ const SAFE_ENV_NAMES: &[&str] = &[
     "PROCESSOR_ARCHITECTURE",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
+    // Standard Windows OS variables needed by runtimes, certificate discovery,
+    // and child process launchers. Secrets remain excluded and must come from
+    // the profile environment or the credential store.
+    "SYSTEMDRIVE",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOGONSERVER",
+    "OS",
+    "COMPUTERNAME",
+    "USERNAME",
+    "USERDOMAIN",
+    "SESSIONNAME",
+    "PROCESSOR_IDENTIFIER",
+    "PSModulePath",
 ];
 
 pub(crate) fn resolve_agent_command(profile: &AgentProfile, cwd: &Path) -> Result<PathBuf, String> {
@@ -72,24 +98,35 @@ pub(crate) fn resolve_agent_command(profile: &AgentProfile, cwd: &Path) -> Resul
     Err(format!("在 PATH 中找不到 Agent 命令：{command}"))
 }
 
-pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<Child, String> {
-    if !cwd.is_dir() {
-        return Err(format!("Agent 工作目录不存在：{}", cwd.display()));
-    }
+pub(crate) fn build_agent_command(
+    profile: &AgentProfile,
+    cwd: &Path,
+) -> Result<(Command, PathBuf), String> {
     let executable = resolve_agent_command(profile, cwd)?;
-    let mut command = if is_windows_batch(&executable) {
+    let command = if is_windows_batch(&executable) {
         let mut command = Command::new("cmd.exe");
-        command
-            .arg("/D")
-            .arg("/S")
-            .arg("/C")
-            .arg(batch_command_line(&executable, &profile.arguments));
+        command.arg("/D").arg("/S").arg("/C");
+        #[cfg(windows)]
+        command.raw_arg(format!(
+            "\"{}\"",
+            batch_command_line(&executable, &profile.arguments)
+        ));
+        #[cfg(not(windows))]
+        command.arg(batch_command_line(&executable, &profile.arguments));
         command
     } else {
         let mut command = Command::new(&executable);
         command.args(&profile.arguments);
         command
     };
+    Ok((command, executable))
+}
+
+pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<Child, String> {
+    if !cwd.is_dir() {
+        return Err(format!("Agent 工作目录不存在：{}", cwd.display()));
+    }
+    let (mut command, executable) = build_agent_command(profile, cwd)?;
 
     command
         .current_dir(cwd)
@@ -110,7 +147,6 @@ pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt as _;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
@@ -460,5 +496,36 @@ mod tests {
         };
         let cwd = env::current_dir().expect("cwd");
         let _ = resolve_agent_command(&profile, &cwd);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawns_batch_wrappers_from_paths_with_spaces() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "kite agent scripts {}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create batch directory");
+        let script = directory.join("echo argument.cmd");
+        fs::write(&script, b"@echo off\r\necho %~1\r\n").expect("write batch script");
+        let profile = AgentProfile {
+            executable: Some(script.to_string_lossy().into_owned()),
+            arguments: vec!["hello world".to_string()],
+            ..AgentProfile::default()
+        };
+
+        let child = spawn_agent_process(&profile, &directory).expect("spawn batch script");
+        let output = child.wait_with_output().expect("batch output");
+
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hello world"));
+        let _ = fs::remove_dir_all(directory);
     }
 }

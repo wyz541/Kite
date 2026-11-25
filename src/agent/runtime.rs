@@ -6,19 +6,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::agent::diagnostics::{record_agent_event, redact_agent_text};
 use crate::agent::process::{spawn_agent_process, terminate_agent_process};
 use crate::agent::restore::{AgentMessage, AgentMessageRole};
-use crate::agent::{AgentProfile, AgentTransport, validate_and_normalize_profile};
+use crate::agent::{
+    AgentEnvironmentVariable, AgentProfile, AgentTransport, validate_and_normalize_profile,
+};
 
 const MAX_ACP_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RUNTIME_EVENTS: usize = 4_096;
 const MAX_RESTORED_CONTEXT_BYTES: usize = 128 * 1024;
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentRuntimeState {
     #[default]
     Starting,
@@ -33,7 +37,8 @@ pub enum AgentRuntimeState {
     Closed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentEventKind {
     Status,
     Output,
@@ -44,7 +49,7 @@ pub enum AgentEventKind {
     Cancelled,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
 pub struct AgentEvent {
     pub sequence: u64,
     pub kind: AgentEventKind,
@@ -53,14 +58,14 @@ pub struct AgentEvent {
     pub state: Option<AgentRuntimeState>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
 pub struct AgentPermissionOption {
     pub option_id: String,
     pub name: String,
     pub kind: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
 pub struct AgentPermissionRequest {
     pub request_id: String,
     pub title: String,
@@ -68,7 +73,8 @@ pub struct AgentPermissionRequest {
     pub options: Vec<AgentPermissionOption>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentPermissionDecision {
     AllowOnce,
     AllowTask,
@@ -76,7 +82,7 @@ pub enum AgentPermissionDecision {
     Cancel,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, uniffi::Record)]
 pub struct AgentRuntimeSnapshot {
     pub state: AgentRuntimeState,
     pub agent_name: Option<String>,
@@ -429,6 +435,28 @@ struct RuntimeWorker {
     shutdown_requested: bool,
 }
 
+fn runtime_profile_with_credential(profile: &AgentProfile) -> Result<AgentProfile, String> {
+    let mut runtime_profile = profile.clone();
+    if profile.credential_ref.is_none() {
+        return Ok(runtime_profile);
+    }
+
+    let secret = crate::agent::credentials::load_secret(&profile.id)?
+        .ok_or_else(|| "Agent 配置引用了系统钥匙串凭据，但找不到该条目".to_string())?;
+    let name = profile
+        .credential_env_var
+        .as_deref()
+        .unwrap_or("KITE_AGENT_TOKEN");
+    runtime_profile
+        .environment
+        .retain(|entry| entry.name != name);
+    runtime_profile.environment.push(AgentEnvironmentVariable {
+        name: name.to_string(),
+        value: secret,
+    });
+    Ok(runtime_profile)
+}
+
 impl RuntimeWorker {
     fn new(
         shared: Arc<RuntimeShared>,
@@ -524,7 +552,8 @@ impl RuntimeWorker {
     }
 
     fn start_process(&mut self) -> Result<(), String> {
-        let mut child = spawn_agent_process(&self.profile, &self.cwd)?;
+        let runtime_profile = runtime_profile_with_credential(&self.profile)?;
+        let mut child = spawn_agent_process(&runtime_profile, &self.cwd)?;
         let stdin = child
             .stdin
             .take()
@@ -1399,5 +1428,39 @@ mod tests {
     fn file_uris_are_well_formed() {
         let uri = path_to_uri(Path::new("/tmp/example.txt"));
         assert_eq!(uri, "file:///tmp/example.txt");
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    #[ignore = "writes a temporary entry to the local system keychain"]
+    fn runtime_profile_injects_keychain_credential_into_configured_env() {
+        let profile_id = format!(
+            "agent-runtime-keychain-test-{}-{}",
+            std::process::id(),
+            unix_ms()
+        );
+        let credential_ref = crate::agent::credentials::save_secret(&profile_id, "runtime-secret")
+            .expect("save secret");
+        let profile = AgentProfile {
+            id: profile_id.clone(),
+            credential_ref: Some(credential_ref),
+            credential_env_var: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+            environment: vec![AgentEnvironmentVariable {
+                name: "ANTHROPIC_AUTH_TOKEN".to_string(),
+                value: "stale-value".to_string(),
+            }],
+            ..AgentProfile::default()
+        };
+
+        let runtime_profile = runtime_profile_with_credential(&profile).expect("runtime profile");
+        let credential = runtime_profile
+            .environment
+            .iter()
+            .filter(|entry| entry.name == "ANTHROPIC_AUTH_TOKEN")
+            .collect::<Vec<_>>();
+
+        assert_eq!(credential.len(), 1);
+        assert_eq!(credential[0].value, "runtime-secret");
+        crate::agent::credentials::remove_secret(&profile_id).expect("remove secret");
     }
 }
