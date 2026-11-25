@@ -70,12 +70,15 @@ impl Batch {
     }
 
     fn request(&mut self, tool: &str, arguments: Value) -> Value {
-        writeln!(
-            self.stdin,
-            "{}",
-            json!({ "tool": tool, "arguments": arguments })
-        )
-        .expect("write request");
+        self.request_with_context(tool, arguments, Value::Null)
+    }
+
+    fn request_with_context(&mut self, tool: &str, arguments: Value, context: Value) -> Value {
+        let mut request = json!({ "tool": tool, "arguments": arguments });
+        if !context.is_null() {
+            request["context"] = context;
+        }
+        writeln!(self.stdin, "{request}").expect("write request");
         self.stdin.flush().expect("flush request");
         let mut line = String::new();
         self.stdout.read_line(&mut line).expect("read response");
@@ -98,7 +101,7 @@ fn cli_batch_keeps_an_agent_session_alive_between_commands() {
         json!({ "profile_id": "fixture", "working_directory": std::env::temp_dir() }),
     );
     assert_eq!(started["ok"], true, "start response: {started}");
-    let session_id = started["result"]["session_id"]
+    let session_id = started["result"]["data"]["session_id"]
         .as_str()
         .expect("session id")
         .to_string();
@@ -114,8 +117,10 @@ fn cli_batch_keeps_an_agent_session_alive_between_commands() {
         json!({ "session_id": session_id, "timeout_ms": 10_000 }),
     );
     assert_eq!(waited["ok"], true, "wait response: {waited}");
-    assert_eq!(waited["result"]["snapshot"]["state"], "completed");
-    let events = waited["result"]["events"].as_array().expect("events");
+    assert_eq!(waited["result"]["data"]["snapshot"]["state"], "completed");
+    let events = waited["result"]["data"]["events"]
+        .as_array()
+        .expect("events");
     assert!(events.iter().any(|event| {
         event["text"]
             .as_str()
@@ -124,9 +129,16 @@ fn cli_batch_keeps_an_agent_session_alive_between_commands() {
 
     let status = batch.request("agent_session_status", json!({ "session_id": session_id }));
     assert_eq!(status["ok"], true);
-    assert_eq!(status["result"]["profile_id"], "fixture");
+    assert_eq!(status["result"]["data"]["profile_id"], "fixture");
 
-    let closed = batch.request("agent_session_close", json!({ "session_id": session_id }));
+    let closed = batch.request_with_context(
+        "agent_session_close",
+        json!({ "session_id": session_id }),
+        json!({ "confirmed": true }),
+    );
     assert_eq!(closed["ok"], true, "close response: {closed}");
-    assert_eq!(closed["result"]["closed"], true, "close response: {closed}");
+    assert_eq!(
+        closed["result"]["data"]["closed"], true,
+        "close response: {closed}"
+    );
 }

@@ -178,14 +178,14 @@ macOS 可与 Finder 共享文件剪贴板。
 - 可选恢复 Agent、工作目录、上下文、对话草稿和独立窗口大小；路径失效时给出可恢复提示，不阻塞 Kite 启动。
 - Agent 诊断区显示配置路径、日志位置、连接测试结果和脱敏后的最近错误。
 - P0 默认只读；Agent 请求写入、命令执行或其他高风险操作时由用户显式确认。
-- 提供 `kite-cli` 与 `kite-mcp` 两个 headless adapter；Agent 配置、连接、会话、事件和诊断都可以不启动 UI 直接调试。
+- 提供 UI 无关的 Core API；Windows Agent 面板、`kite-cli` 与 `kite-mcp` 都通过同一接口调用 Agent 业务能力。
 
-### Headless Agent 调试
+### Core API 与多端接入
 
 - `kite-cli agent run` 可在终端完成真实 ACP Agent 的启动、提示、流式事件和关闭。
 - `kite-cli batch` 以 JSONL 保持长期 Agent session，适合脚本和回归测试。
-- `kite-mcp` 通过 stdio MCP 暴露同一工具注册表，供外部 Agent 或 IDE 调用。
-- 详细架构和命令见 [Headless Control Plane](docs/architecture/control-plane.md)。
+- `kite-mcp` 通过 stdio MCP 暴露 Tools、Resources 和 Prompts，并支持只读模式与高危操作确认。
+- 详细架构和命令见 [Core API 与多端外壳](docs/architecture/core-api.md)。
 
 ### 原生平台集成
 
@@ -369,7 +369,7 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [平台边界](docs/architecture/platforms.md)
 - [右键菜单架构](docs/architecture/context-menu.md)
 - [Agent 集成架构](docs/architecture/agent-integration.md)
-- [Headless Control Plane](docs/architecture/control-plane.md)
+- [Core API 与多端外壳](docs/architecture/core-api.md)
 - [Agent 表面架构](docs/architecture/agent-surface.md)
 - [压缩与解压实现](docs/architecture/context-menu.md#压缩菜单)
 - [默认文件管理器](docs/architecture/default-file-manager.md)

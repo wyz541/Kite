@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::app::KiteApp;
@@ -18,17 +17,19 @@ use gpui_kit::*;
 use kite_core::agent::{
     AgentContext, AgentContextMode, AgentConversation, AgentLaunchRequest, AgentMessage,
     AgentMessageRole, AgentPath, AgentPermissionDecision, AgentProfile, AgentProfileSnapshot,
-    AgentProfileStore, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase,
+    AgentProfileStore, AgentRuntimeSnapshot, AgentRuntimeState, AgentSessionPhase,
     default_working_directory, load_agent_sessions, new_agent_conversation_id,
     save_agent_conversation,
 };
+use kite_core::core_api::{CoreClient, CoreRequest};
 
 pub(crate) struct AgentPanel {
     context: Option<AgentContext>,
     mode: AgentContextMode,
     phase: AgentSessionPhase,
     profile: Option<AgentProfile>,
-    runtime: Option<Arc<AgentRuntime>>,
+    core_client: CoreClient,
+    session_id: Option<String>,
     snapshot: AgentRuntimeSnapshot,
     prompt_input: Entity<TextareaState>,
     output_view: Entity<TextViewState>,
@@ -83,7 +84,8 @@ impl AgentPanel {
             mode: AgentContextMode::Fixed,
             phase,
             profile,
-            runtime: None,
+            core_client: CoreClient::new(),
+            session_id: None,
             snapshot: AgentRuntimeSnapshot::default(),
             prompt_input,
             output_view,
@@ -450,19 +452,22 @@ impl AgentPanel {
     }
 
     fn start_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
-        if self.runtime.as_ref().is_some_and(|runtime| {
-            !runtime.is_closed()
-                && !matches!(
-                    runtime.snapshot().state,
-                    AgentRuntimeState::Completed
-                        | AgentRuntimeState::Failed
-                        | AgentRuntimeState::Cancelled
-                        | AgentRuntimeState::Closed
-                )
-        }) {
+        if let Some(session_id) = self.session_id.clone()
+            && let Ok(snapshot) = self.core_client.session_snapshot(&session_id)
+            && !matches!(
+                snapshot.state,
+                AgentRuntimeState::Completed
+                    | AgentRuntimeState::Failed
+                    | AgentRuntimeState::Cancelled
+                    | AgentRuntimeState::Closed
+            )
+        {
             self.notice = Some("Agent 正在运行，请先停止或等待完成".into());
             cx.notify();
             return;
+        }
+        if self.session_id.is_some() {
+            self.stop_runtime();
         }
         let Some(profile) = self.profile.clone() else {
             self.phase = AgentSessionPhase::Unconfigured;
@@ -486,21 +491,36 @@ impl AgentPanel {
             .map(|path| path.path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         self.turn_id = now_unix_ms();
-        match AgentRuntime::start(
-            profile,
-            context.working_directory.to_string_lossy().into_owned(),
+        let request = CoreRequest::AgentSessionStart {
+            profile_id: Some(profile.id),
+            working_directory: Some(context.working_directory.to_string_lossy().into_owned()),
             context_paths,
-            self.history.clone(),
-        ) {
-            Ok(runtime) => {
+            restored_messages: self.history.clone(),
+        };
+        match self.core_client.invoke_request(request) {
+            Ok(result) => {
+                let Some(session_id) = result
+                    .data
+                    .get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                else {
+                    self.phase = AgentSessionPhase::Error;
+                    self.notice = Some("Core API 未返回 Agent session id".into());
+                    cx.notify();
+                    return;
+                };
                 self.sent_prompt = prompt;
                 self.auto_follow_output = true;
                 self.saved_terminal_snapshot = false;
-                self.snapshot = runtime.snapshot();
-                self.runtime = Some(runtime.clone());
+                self.snapshot = self
+                    .core_client
+                    .session_snapshot(&session_id)
+                    .unwrap_or_else(|_| AgentRuntimeSnapshot::default());
+                self.session_id = Some(session_id.clone());
                 self.phase = AgentSessionPhase::Loading;
                 self.notice = Some("Agent 已启动".into());
-                self.poll_runtime(runtime, cx);
+                self.poll_session(session_id, cx);
             }
             Err(error) => {
                 self.phase = AgentSessionPhase::Error;
@@ -510,13 +530,24 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn poll_runtime(&mut self, runtime: Arc<AgentRuntime>, cx: &mut Context<Self>) {
+    fn poll_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let core_client = self.core_client.clone();
         self.poll_task = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(80))
                     .await;
-                let snapshot = runtime.snapshot();
+                let snapshot = match core_client.session_snapshot(&session_id) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.phase = AgentSessionPhase::Error;
+                            this.notice = Some(error.to_string().into());
+                            cx.notify();
+                        });
+                        break;
+                    }
+                };
                 let terminal = matches!(
                     snapshot.state,
                     AgentRuntimeState::Completed
@@ -524,13 +555,21 @@ impl AgentPanel {
                         | AgentRuntimeState::Cancelled
                         | AgentRuntimeState::Closed
                 );
+                if terminal {
+                    let _ = core_client.invoke_request(CoreRequest::AgentSessionClose {
+                        session_id: session_id.clone(),
+                    });
+                }
                 let output = snapshot.output.clone();
                 let _ = this.update(cx, |this, cx| {
                     this.apply_snapshot(snapshot, cx);
-                    if terminal && !this.saved_terminal_snapshot {
-                        this.saved_terminal_snapshot = true;
-                        let draft = this.prompt_input.read(cx).value().to_string();
-                        this.persist_conversation(draft);
+                    if terminal {
+                        this.session_id = None;
+                        if !this.saved_terminal_snapshot {
+                            this.saved_terminal_snapshot = true;
+                            let draft = this.prompt_input.read(cx).value().to_string();
+                            this.persist_conversation(draft);
+                        }
                     }
                     let _ = &output;
                     cx.notify();
@@ -639,16 +678,21 @@ impl AgentPanel {
     }
 
     fn stop_runtime(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            let _ = runtime.cancel();
-            runtime.shutdown();
+        if let Some(session_id) = self.session_id.take() {
+            let _ = self
+                .core_client
+                .invoke_request(CoreRequest::AgentSessionClose { session_id });
         }
         self.phase = AgentSessionPhase::Ended;
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        if let Some(runtime) = self.runtime.as_ref()
-            && let Err(error) = runtime.cancel()
+        if let Some(session_id) = self.session_id.as_ref()
+            && let Err(error) = self
+                .core_client
+                .invoke_request(CoreRequest::AgentSessionCancel {
+                    session_id: session_id.clone(),
+                })
         {
             self.notice = Some(error.to_string().into());
         }
@@ -661,16 +705,29 @@ impl AgentPanel {
         decision: AgentPermissionDecision,
         cx: &mut Context<Self>,
     ) {
-        if let Some(runtime) = self.runtime.as_ref()
-            && let Err(error) = runtime.respond_permission(request_id, decision)
-        {
-            self.notice = Some(error.to_string().into());
+        if let Some(session_id) = self.session_id.as_ref() {
+            let decision = match decision {
+                AgentPermissionDecision::AllowOnce => "allow_once",
+                AgentPermissionDecision::AllowTask => "allow_task",
+                AgentPermissionDecision::RejectOnce => "reject_once",
+                AgentPermissionDecision::Cancel => "cancel",
+            };
+            if let Err(error) =
+                self.core_client
+                    .invoke_request(CoreRequest::AgentSessionPermission {
+                        session_id: session_id.clone(),
+                        request_id,
+                        decision: decision.to_string(),
+                    })
+            {
+                self.notice = Some(error.to_string().into());
+            }
         }
         cx.notify();
     }
 
     fn render_status(&self, cx: &App) -> AnyElement {
-        let (status_color, connection_label) = if self.runtime.is_some() {
+        let (status_color, connection_label) = if self.session_id.is_some() {
             match self.snapshot.state {
                 AgentRuntimeState::Starting => (cx.theme().primary, "启动中"),
                 AgentRuntimeState::Initializing => (cx.theme().primary, "握手中"),
