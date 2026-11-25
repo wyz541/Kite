@@ -950,6 +950,23 @@ mod tests {
     }
 
     #[test]
+    fn zip_unicode_path_extra_field_takes_precedence() {
+        let root = temporary_root("unicode-path-extra");
+        let raw_name = b"legacy.txt";
+        let unicode_name = "中文目录/说明.txt";
+        let archive_path = zip_with_unicode_path_extra(&root, raw_name, unicode_name, b"hello");
+
+        let destination = root.join("extracted");
+        extract(&archive_path, &destination).expect("extract Unicode Path entry");
+        assert_eq!(
+            fs::read(destination.join(unicode_name)).expect("read Unicode Path entry"),
+            b"hello"
+        );
+        assert!(!destination.join("legacy.txt").exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn extracts_utf8_zip_names_without_utf8_flag() {
         let root = temporary_root("unflagged-utf8");
         let name = "中文目录/说明.txt";
@@ -1004,11 +1021,95 @@ mod tests {
                 index += 1;
             }
         }
-        assert!(
-            matches >= 2,
+        assert_eq!(
+            matches, 2,
             "local and central ZIP headers should contain the placeholder"
         );
         fs::write(&archive_path, patched).expect("write patched archive");
+        archive_path
+    }
+
+    fn crc32_ieee(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 0 {
+                    crc >> 1
+                } else {
+                    (crc >> 1) ^ 0xEDB8_8320
+                };
+            }
+        }
+        !crc
+    }
+
+    fn zip_with_unicode_path_extra(
+        root: &Path,
+        raw_name: &[u8],
+        unicode_name: &str,
+        content: &[u8],
+    ) -> PathBuf {
+        fs::create_dir_all(root).expect("create fixture root");
+        let archive_path = root.join("unicode-path.zip");
+        let content_crc = crc32_ieee(content);
+        let mut unicode_path = vec![1];
+        unicode_path.extend_from_slice(&crc32_ieee(raw_name).to_le_bytes());
+        unicode_path.extend_from_slice(unicode_name.as_bytes());
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x7075u16.to_le_bytes());
+        extra.extend_from_slice(&(unicode_path.len() as u16).to_le_bytes());
+        extra.extend_from_slice(&unicode_path);
+
+        let mut local = Vec::new();
+        local.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        local.extend_from_slice(&20u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&content_crc.to_le_bytes());
+        local.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        local.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        local.extend_from_slice(&(raw_name.len() as u16).to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(raw_name);
+        local.extend_from_slice(content);
+
+        let central_offset = local.len() as u32;
+        let mut central = Vec::new();
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&content_crc.to_le_bytes());
+        central.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(raw_name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(raw_name);
+        central.extend_from_slice(&extra);
+
+        let central_size = central.len() as u32;
+        let mut archive = local;
+        archive.extend_from_slice(&central);
+        archive.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&1u16.to_le_bytes());
+        archive.extend_from_slice(&1u16.to_le_bytes());
+        archive.extend_from_slice(&central_size.to_le_bytes());
+        archive.extend_from_slice(&central_offset.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        fs::write(&archive_path, archive).expect("write Unicode Path archive");
         archive_path
     }
 
