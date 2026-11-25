@@ -12,6 +12,7 @@ cargo-check.log
 !assets/kite-icon-master.png
 !assets/kite-icon-preview.png
 !docs/images/kite-product-preview-sidebar.png
+!docs/images/agent-acceptance-v0.6.94/*.png
 /docs/screenshots/
 
 __pycache__/

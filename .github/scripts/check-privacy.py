@@ -21,6 +21,16 @@ ALLOWED_IMAGES = {
     "assets/kite-icon-master.png",
     "assets/kite-icon-preview.png",
     "docs/images/kite-product-preview-sidebar.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-empty.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-ready.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-streaming.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-completed.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-cancelled.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-narrow.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-diagnostics.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-settings.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-popout.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-connection-test.png",
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ALLOWED_WINDOWS_USERS = {"Example", "Kite", "Public", "runner", "runneradmin", "<name>"}

@@ -11,6 +11,7 @@
 - Optionally restore the Agent, model, working directory, context snapshot, conversation, draft, and independent window size. Missing paths expose a repair path and never block Kite startup.
 - Add a diagnostics view for command resolution, version, ACP protocol, capabilities, recent errors, configuration paths, and redacted logs.
 - Add cross-platform ACP fixtures and automated coverage for streaming output, permission requests, cancellation, timeout, oversized output, retry, process-tree cleanup, and credential redaction.
+- Windows acceptance fixes: submit the session prompt after ACP readiness, keep terminal status text aligned with completed/cancelled/failed/closed states, and defer opening the shared Agent popout until the panel update has finished so close-and-reopen no longer double-leases the panel.
 
 ## Security boundary
 

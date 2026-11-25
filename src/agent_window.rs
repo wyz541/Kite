@@ -69,9 +69,10 @@ impl Render for AgentWindow {
 
 pub(crate) fn open_agent_window(
     panel: Entity<AgentPanel>,
+    window_size: (u32, u32),
     cx: &mut App,
 ) -> Result<AnyWindowHandle, String> {
-    let (width, height) = panel.read(cx).window_size();
+    let (width, height) = window_size;
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some("Kite Agent".into()),
