@@ -17,9 +17,11 @@ use crate::agent::model::{
     AgentFailure, AgentPlanEntry, AgentSessionEvent, AgentSessionPermissionOption,
     AgentSessionPermissionRequest, AgentToolCall,
 };
+use crate::agent::permissions::{evaluate_permission_request, exact_option_id};
 use crate::agent::process::{ProcessGuard, ProcessHandle};
 use crate::agent::redact::{Redactor, StreamingRedactor};
 use crate::agent::transport::{AgentHandshake, AgentPrompt, AgentTransport, TransportEvent};
+use crate::agent::{AgentCapabilities, AgentPermissionOption, PermissionPolicy};
 
 const DIAGNOSTIC_DETAIL_CHARS: usize = 2048;
 const PROTOCOL_PREVIEW_CHARS: usize = 240;
@@ -28,6 +30,7 @@ const PROTOCOL_PREVIEW_CHARS: usize = 240;
 struct PendingPermission {
     wire_id: Value,
     option_ids: HashSet<String>,
+    allowed_option_ids: HashSet<String>,
 }
 
 enum Incoming {
@@ -57,6 +60,8 @@ pub(crate) struct AcpStdioTransport {
     shutdown_timeout: Duration,
     reader_threads: Vec<JoinHandle<()>>,
     process_handle: Option<Arc<ProcessHandle>>,
+    permission_policy: PermissionPolicy,
+    capabilities: AgentCapabilities,
 }
 
 impl AcpStdioTransport {
@@ -80,6 +85,8 @@ impl AcpStdioTransport {
             shutdown_timeout: Duration::from_secs(2),
             reader_threads: Vec::new(),
             process_handle: None,
+            permission_policy: PermissionPolicy::default(),
+            capabilities: AgentCapabilities::default(),
         }
     }
 
@@ -114,6 +121,8 @@ impl AcpStdioTransport {
         self.thought_stream = Some(StreamingRedactor::new(config.redactor.clone()));
         self.max_output_bytes = config.max_output_bytes;
         self.shutdown_timeout = config.shutdown_timeout;
+        self.permission_policy = config.permission_policy;
+        self.capabilities = config.capabilities.clone();
         self.output_bytes.store(0, Ordering::Release);
         self.process_handle = Some(spawned.handle);
 
@@ -740,12 +749,34 @@ impl AcpStdioTransport {
             ));
         }
 
+        let permission_options = options
+            .iter()
+            .map(|option| AgentPermissionOption {
+                option_id: option.option_id.clone(),
+                name: option.name.clone(),
+                kind: option.kind.clone(),
+            })
+            .collect::<Vec<_>>();
+        let evaluation = evaluate_permission_request(
+            self.permission_policy,
+            &self.capabilities,
+            kind.as_deref(),
+            &permission_options,
+        );
+        let allowed_option_ids = evaluation
+            .allowed_decisions
+            .iter()
+            .filter_map(|decision| exact_option_id(&permission_options, *decision))
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+
         let public_id = request_id_string(&wire_id);
         self.pending_permissions.insert(
             public_id.clone(),
             PendingPermission {
                 wire_id,
                 option_ids,
+                allowed_option_ids,
             },
         );
         Ok(TransportEvent::PermissionRequested(
@@ -773,6 +804,15 @@ impl AcpStdioTransport {
             self.pending_permissions
                 .insert(request_id.to_string(), pending);
             return Err(AgentError::invalid_configuration("Agent 权限选项不存在。"));
+        }
+        if let Some(option_id) = option_id
+            && !pending.allowed_option_ids.contains(option_id)
+        {
+            self.pending_permissions
+                .insert(request_id.to_string(), pending);
+            return Err(AgentError::invalid_configuration(
+                "当前 Profile 权限策略不允许此授权选项。",
+            ));
         }
         let outcome = if let Some(option_id) = option_id {
             json!({

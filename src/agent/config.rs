@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::agent::model::{AgentError, AgentErrorKind, AgentSessionConfig};
 use crate::agent::redact::{Redactor, is_sensitive_environment_key};
-use crate::agent::{AgentEnvironmentVariable, AgentTransport};
+use crate::agent::{AgentCapabilities, AgentEnvironmentVariable, AgentTransport, PermissionPolicy};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ValidatedSessionConfig {
@@ -22,6 +22,8 @@ pub(crate) struct ValidatedSessionConfig {
     pub shutdown_timeout: Duration,
     pub max_frame_bytes: usize,
     pub max_output_bytes: u64,
+    pub permission_policy: PermissionPolicy,
+    pub capabilities: AgentCapabilities,
     pub redactor: Arc<Redactor>,
 }
 
@@ -102,6 +104,8 @@ impl ValidatedSessionConfig {
             shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
             max_frame_bytes,
             max_output_bytes: config.max_output_bytes,
+            permission_policy: config.permission_policy,
+            capabilities: config.capabilities,
             redactor,
         })
     }

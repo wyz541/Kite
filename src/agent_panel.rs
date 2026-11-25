@@ -21,6 +21,7 @@ use kite_core::agent::{
     default_working_directory, load_agent_sessions, new_agent_conversation_id,
     save_agent_conversation,
 };
+use kite_core::agent_permission_ui::{permission_action_enabled, permission_action_label};
 use kite_core::core_api::{CoreClient, CoreRequest};
 
 pub(crate) struct AgentPanel {
@@ -753,6 +754,7 @@ impl AgentPanel {
                 AgentPermissionDecision::AllowOnce => "allow_once",
                 AgentPermissionDecision::AllowTask => "allow_task",
                 AgentPermissionDecision::RejectOnce => "reject_once",
+                AgentPermissionDecision::RejectAlways => "reject_always",
                 AgentPermissionDecision::Cancel => "cancel",
             };
             if let Err(error) =
@@ -1186,14 +1188,36 @@ impl AgentPanel {
         }
         let mut cards = Vec::new();
         for request in requests {
-            let request_id = request.request_id.clone();
-            let allow_id = request_id.clone();
-            let reject_id = request_id.clone();
-            let cancel_id = request_id.clone();
-            let can_allow_task = request
-                .options
-                .iter()
-                .any(|option| option.kind.contains("always") || option.kind.contains("task"));
+            let allow_once_id = request.request_id.clone();
+            let allow_always_id = request.request_id.clone();
+            let reject_once_id = request.request_id.clone();
+            let reject_always_id = request.request_id.clone();
+            let cancel_id = request.request_id.clone();
+            let allow_once_enabled = permission_action_enabled(
+                &request,
+                AgentPermissionDecision::AllowOnce,
+                Some("allow_once"),
+            );
+            let allow_always_enabled = permission_action_enabled(
+                &request,
+                AgentPermissionDecision::AllowTask,
+                Some("allow_always"),
+            );
+            let reject_once_enabled = permission_action_enabled(
+                &request,
+                AgentPermissionDecision::RejectOnce,
+                Some("reject_once"),
+            );
+            let reject_always_enabled = permission_action_enabled(
+                &request,
+                AgentPermissionDecision::RejectAlways,
+                Some("reject_always"),
+            );
+            let allow_once_label = permission_action_label(&request, "allow_once", "仅本次允许");
+            let allow_always_label = permission_action_label(&request, "allow_always", "始终允许");
+            let reject_once_label = permission_action_label(&request, "reject_once", "仅本次拒绝");
+            let reject_always_label =
+                permission_action_label(&request, "reject_always", "始终拒绝");
             cards.push(
                 v_flex()
                     .w_full()
@@ -1210,50 +1234,88 @@ impl AgentPanel {
                             .text_color(cx.theme().muted_foreground)
                             .child(request.description),
                     )
+                    .when_some(request.policy_notice.clone(), |this, notice| {
+                        this.child(div().text_xs().text_color(cx.theme().warning).child(notice))
+                    })
                     .child(
                         h_flex()
                             .gap_2()
                             .flex_wrap()
                             .child(
-                                Button::new(format!("agent-permission-allow-{}", allow_id))
-                                    .small()
-                                    .primary()
-                                    .label("仅本次允许")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                Button::new(format!(
+                                    "agent-permission-allow-once-{}",
+                                    allow_once_id
+                                ))
+                                .small()
+                                .primary()
+                                .label(allow_once_label)
+                                .disabled(!allow_once_enabled)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.respond_permission(
-                                            allow_id.clone(),
+                                            allow_once_id.clone(),
                                             AgentPermissionDecision::AllowOnce,
                                             cx,
                                         )
-                                    })),
+                                    },
+                                )),
                             )
-                            .when(can_allow_task, |this| {
-                                this.child(
-                                    Button::new(format!("agent-permission-task-{}", request_id))
-                                        .small()
-                                        .outline()
-                                        .label("本任务允许")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.respond_permission(
-                                                request_id.clone(),
-                                                AgentPermissionDecision::AllowTask,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                            })
                             .child(
-                                Button::new(format!("agent-permission-reject-{}", reject_id))
-                                    .small()
-                                    .outline()
-                                    .label("拒绝")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                Button::new(format!(
+                                    "agent-permission-allow-always-{}",
+                                    allow_always_id
+                                ))
+                                .small()
+                                .outline()
+                                .label(allow_always_label)
+                                .disabled(!allow_always_enabled)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.respond_permission(
-                                            reject_id.clone(),
+                                            allow_always_id.clone(),
+                                            AgentPermissionDecision::AllowTask,
+                                            cx,
+                                        )
+                                    },
+                                )),
+                            )
+                            .child(
+                                Button::new(format!(
+                                    "agent-permission-reject-once-{}",
+                                    reject_once_id
+                                ))
+                                .small()
+                                .outline()
+                                .label(reject_once_label)
+                                .disabled(!reject_once_enabled)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            reject_once_id.clone(),
                                             AgentPermissionDecision::RejectOnce,
                                             cx,
                                         )
-                                    })),
+                                    },
+                                )),
+                            )
+                            .child(
+                                Button::new(format!(
+                                    "agent-permission-reject-always-{}",
+                                    reject_always_id
+                                ))
+                                .small()
+                                .ghost()
+                                .label(reject_always_label)
+                                .disabled(!reject_always_enabled)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.respond_permission(
+                                            reject_always_id.clone(),
+                                            AgentPermissionDecision::RejectAlways,
+                                            cx,
+                                        )
+                                    },
+                                )),
                             )
                             .child(
                                 Button::new(format!("agent-permission-cancel-{}", cancel_id))

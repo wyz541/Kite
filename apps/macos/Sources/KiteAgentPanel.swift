@@ -1055,32 +1055,36 @@ private struct KiteAgentPanelContent: View {
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 7) {
-                        Button("仅本次允许") {
-                            agent.respondPermission(request, decision: .allowOnce)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        if request.options.contains(where: {
-                            $0.kind.contains("always") || $0.kind.contains("task")
-                        }) {
-                            Button("本任务允许") {
-                                agent.respondPermission(request, decision: .allowTask)
+                    if let notice = request.policyNotice, !notice.isEmpty {
+                        Text(notice)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 82), spacing: 7)],
+                        alignment: .leading,
+                        spacing: 7
+                    ) {
+                        ForEach(KiteAgentPermissionPresentation.actions(for: request)) { action in
+                            if action.isPrimary {
+                                Button(action.title) {
+                                    agent.respondPermission(request, decision: action.decision)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(!action.enabled)
+                                .accessibilityIdentifier("agent-permission-\(action.id)")
+                            } else {
+                                Button(action.title) {
+                                    agent.respondPermission(request, decision: action.decision)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(!action.enabled)
+                                .accessibilityIdentifier("agent-permission-\(action.id)")
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
-                        Button("拒绝") {
-                            agent.respondPermission(request, decision: .rejectOnce)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        Button("取消任务") {
-                            agent.respondPermission(request, decision: .cancel)
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
                     }
                 }
                 .padding(10)

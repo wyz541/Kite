@@ -204,7 +204,7 @@ fn permission_request_waits_for_a_structured_response() {
         }
         value.get("id").and_then(Value::as_u64) == Some(3)
     });
-    assert!(text.contains("approved: allow"));
+    assert!(text.contains("permission selected: allow"));
     assert_eq!(response["result"]["stopReason"], "end_turn");
 }
 

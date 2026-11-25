@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kite_core::agent::{
-    AgentEnvironmentVariable, AgentPermissionDecision, AgentProfile, AgentRuntime,
-    AgentRuntimeSnapshot, AgentRuntimeState,
+    AgentCapabilities, AgentEnvironmentVariable, AgentPermissionDecision, AgentProfile,
+    AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState, PermissionPolicy,
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -23,6 +23,18 @@ fn fixture_profile(scenario: &str) -> AgentProfile {
         timeout_seconds: 20,
         output_limit_bytes: 256 * 1024,
         ..AgentProfile::default()
+    }
+}
+
+fn permission_profile(
+    scenario: &str,
+    policy: PermissionPolicy,
+    capabilities: AgentCapabilities,
+) -> AgentProfile {
+    AgentProfile {
+        permission: policy,
+        capabilities,
+        ..fixture_profile(scenario)
     }
 }
 
@@ -86,8 +98,12 @@ fn normal_stream_completes() {
 }
 
 #[test]
-fn permission_request_requires_explicit_response() {
-    let runtime = start(fixture_profile("permission"));
+fn permission_request_requires_an_exact_returned_option() {
+    let runtime = start(permission_profile(
+        "permission",
+        PermissionPolicy::AgentManaged,
+        AgentCapabilities::default(),
+    ));
     runtime
         .send_prompt("fixture prompt".to_string(), Vec::new())
         .expect("send prompt");
@@ -97,13 +113,328 @@ fn permission_request_requires_explicit_response() {
     });
     let request = waiting.permission_requests[0].clone();
     assert_eq!(request.request_id, "900");
+    assert!(
+        !request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowTask)
+    );
+    assert!(
+        runtime
+            .respond_permission(
+                request.request_id.clone(),
+                AgentPermissionDecision::AllowTask,
+            )
+            .is_err()
+    );
+    let still_waiting = runtime.snapshot();
+    assert_eq!(still_waiting.state, AgentRuntimeState::WaitingPermission);
+    assert_eq!(still_waiting.permission_requests.len(), 1);
     runtime
         .respond_permission(request.request_id, AgentPermissionDecision::AllowOnce)
         .expect("allow permission");
     let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
         snapshot.state == AgentRuntimeState::Completed
     });
-    assert!(snapshot.output.contains("approved: allow"));
+    assert!(snapshot.output.contains("permission selected: allow"));
+    runtime.shutdown();
+}
+
+#[test]
+fn read_only_profile_cannot_allow_write_requests() {
+    let runtime = start(permission_profile(
+        "permission-write",
+        PermissionPolicy::ReadOnly,
+        AgentCapabilities {
+            write_files: true,
+            execute_commands: true,
+            network: true,
+            ..AgentCapabilities::default()
+        },
+    ));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let waiting = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && !snapshot.permission_requests.is_empty()
+    });
+    let request = waiting.permission_requests[0].clone();
+    assert_eq!(request.kind, "edit");
+    assert!(
+        !request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowOnce)
+    );
+    assert!(
+        !request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowTask)
+    );
+    assert!(
+        request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::RejectOnce)
+    );
+    assert!(
+        request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::RejectAlways)
+    );
+    assert!(
+        request
+            .policy_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("只读策略"))
+    );
+
+    assert!(
+        runtime
+            .respond_permission(
+                request.request_id.clone(),
+                AgentPermissionDecision::AllowOnce,
+            )
+            .is_err()
+    );
+    assert!(
+        runtime
+            .respond_permission(
+                request.request_id.clone(),
+                AgentPermissionDecision::AllowTask,
+            )
+            .is_err()
+    );
+    assert_eq!(
+        runtime.snapshot().state,
+        AgentRuntimeState::WaitingPermission
+    );
+
+    runtime
+        .respond_permission(request.request_id, AgentPermissionDecision::RejectOnce)
+        .expect("reject write permission");
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Completed
+    });
+    assert!(snapshot.output.contains("permission selected: reject-once"));
+    runtime.shutdown();
+}
+
+#[test]
+fn read_only_profile_cannot_allow_command_requests() {
+    let runtime = start(permission_profile(
+        "permission-command",
+        PermissionPolicy::ReadOnly,
+        AgentCapabilities {
+            execute_commands: true,
+            ..AgentCapabilities::default()
+        },
+    ));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let waiting = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && !snapshot.permission_requests.is_empty()
+    });
+    let request = waiting.permission_requests[0].clone();
+    assert_eq!(request.kind, "execute");
+    assert!(
+        !request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowOnce)
+    );
+    assert!(
+        !request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowTask)
+    );
+
+    runtime.cancel().expect("cancel blocked permission request");
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Cancelled
+    });
+    assert!(snapshot.permission_requests.is_empty());
+    runtime.shutdown();
+}
+
+#[test]
+fn confirm_writes_uses_the_declared_write_capability() {
+    let blocked = start(permission_profile(
+        "permission-write",
+        PermissionPolicy::ConfirmWrites,
+        AgentCapabilities::default(),
+    ));
+    blocked
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send blocked prompt");
+    let waiting = wait_for(&blocked, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && !snapshot.permission_requests.is_empty()
+    });
+    let blocked_request = waiting.permission_requests[0].clone();
+    assert!(
+        !blocked_request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowOnce)
+    );
+    blocked
+        .respond_permission(
+            blocked_request.request_id,
+            AgentPermissionDecision::RejectOnce,
+        )
+        .expect("reject undeclared write");
+    wait_for(&blocked, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Completed
+    });
+    blocked.shutdown();
+
+    let allowed = start(permission_profile(
+        "permission-write",
+        PermissionPolicy::ConfirmWrites,
+        AgentCapabilities {
+            write_files: true,
+            ..AgentCapabilities::default()
+        },
+    ));
+    allowed
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send allowed prompt");
+    let waiting = wait_for(&allowed, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && !snapshot.permission_requests.is_empty()
+    });
+    let allowed_request = waiting.permission_requests[0].clone();
+    assert!(
+        allowed_request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowOnce)
+    );
+    assert!(
+        allowed_request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowTask)
+    );
+    allowed
+        .respond_permission(
+            allowed_request.request_id,
+            AgentPermissionDecision::AllowOnce,
+        )
+        .expect("allow declared write");
+    let snapshot = wait_for(&allowed, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Completed
+    });
+    assert!(snapshot.output.contains("permission selected: allow-once"));
+    allowed.shutdown();
+}
+
+#[test]
+fn only_allow_always_does_not_enable_allow_once() {
+    let runtime = start(permission_profile(
+        "permission-always",
+        PermissionPolicy::AgentManaged,
+        AgentCapabilities::default(),
+    ));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let waiting = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && !snapshot.permission_requests.is_empty()
+    });
+    let request = waiting.permission_requests[0].clone();
+    assert!(
+        !request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowOnce)
+    );
+    assert!(
+        request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowTask)
+    );
+    assert!(
+        runtime
+            .respond_permission(
+                request.request_id.clone(),
+                AgentPermissionDecision::AllowOnce,
+            )
+            .is_err()
+    );
+    assert_eq!(
+        runtime.snapshot().state,
+        AgentRuntimeState::WaitingPermission
+    );
+
+    runtime
+        .respond_permission(request.request_id, AgentPermissionDecision::AllowTask)
+        .expect("allow always");
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Completed
+    });
+    assert!(
+        snapshot
+            .output
+            .contains("permission selected: allow-always")
+    );
+    runtime.shutdown();
+}
+
+#[test]
+fn repeated_permission_requests_are_checked_independently() {
+    let runtime = start(permission_profile(
+        "permission-repeat",
+        PermissionPolicy::ReadOnly,
+        AgentCapabilities::default(),
+    ));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let first = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && snapshot
+                .permission_requests
+                .iter()
+                .any(|request| request.request_id == "900")
+    });
+    let first_request = first.permission_requests[0].clone();
+    assert!(
+        !first_request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowOnce)
+    );
+    runtime
+        .respond_permission(
+            first_request.request_id,
+            AgentPermissionDecision::RejectOnce,
+        )
+        .expect("reject first request");
+
+    let second = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+            && snapshot
+                .permission_requests
+                .iter()
+                .any(|request| request.request_id == "901")
+    });
+    let second_request = second.permission_requests[0].clone();
+    assert!(
+        !second_request
+            .allowed_decisions
+            .contains(&AgentPermissionDecision::AllowOnce)
+    );
+    runtime
+        .respond_permission(
+            second_request.request_id,
+            AgentPermissionDecision::RejectOnce,
+        )
+        .expect("reject second request");
+
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Completed
+    });
+    assert_eq!(
+        snapshot.output.matches("permission selected: deny").count(),
+        2
+    );
     runtime.shutdown();
 }
 

@@ -234,57 +234,9 @@ fn handle_prompt(
             }
             finish_prompt(id, "end_turn");
         }
-        "permission" => {
-            send_chunk("waiting for permission");
-            write_json(&json!({
-                "jsonrpc": "2.0",
-                "id": 900,
-                "method": "session/request_permission",
-                "params": {
-                    "sessionId": "fixture-session",
-                    "toolCall": {
-                        "toolCallId": "fixture-tool-1",
-                        "title": "Fixture write",
-                        "kind": "edit",
-                        "status": "pending"
-                    },
-                    "options": [
-                        {
-                            "optionId": "allow",
-                            "name": "Allow",
-                            "kind": "allow_once"
-                        },
-                        {
-                            "optionId": "deny",
-                            "name": "Deny",
-                            "kind": "reject_once"
-                        }
-                    ]
-                }
-            }));
-            loop {
-                let Some(Ok(line)) = lines.next() else {
-                    return;
-                };
-                let Ok(response) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if response.get("id").and_then(Value::as_u64) == Some(900) {
-                    let outcome = &response["result"]["outcome"];
-                    let selected = outcome
-                        .get("optionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or("cancelled");
-                    send_chunk(&format!("approved: {selected}"));
-                    finish_prompt(id, "end_turn");
-                    return;
-                }
-                if response.get("method").and_then(Value::as_str) == Some("session/cancel") {
-                    send_chunk("permission cancelled");
-                    finish_prompt(id, "cancelled");
-                    return;
-                }
-            }
+        "permission" | "permission-write" | "permission-command" | "permission-always"
+        | "permission-repeat" => {
+            handle_permission_scenario(scenario, id, lines);
         }
         "cancel" | "spawn-tree" => {
             if scenario == "spawn-tree"
@@ -326,6 +278,123 @@ fn fixture_secret() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn handle_permission_scenario(
+    scenario: &str,
+    prompt_id: Value,
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+) {
+    send_chunk("waiting for permission");
+    let request_ids: &[u64] = if scenario == "permission-repeat" {
+        &[900, 901]
+    } else {
+        &[900]
+    };
+
+    for request_id in request_ids {
+        let tool_kind = if scenario == "permission-command" {
+            "execute"
+        } else {
+            "edit"
+        };
+        let title = if scenario == "permission-command" {
+            "Fixture command"
+        } else {
+            "Fixture write"
+        };
+        let tool_call_id = if *request_id == 900 {
+            "fixture-tool-1"
+        } else {
+            "fixture-tool-2"
+        };
+        write_json(&json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "fixture-session",
+                "toolCall": {
+                    "toolCallId": tool_call_id,
+                    "title": title,
+                    "kind": tool_kind,
+                    "status": "pending"
+                },
+                "options": permission_options(scenario)
+            }
+        }));
+
+        match read_permission_outcome(lines, *request_id) {
+            PermissionFixtureOutcome::Selected(selected) => {
+                send_chunk(&format!("permission selected: {selected}"));
+            }
+            PermissionFixtureOutcome::Cancelled => {
+                send_chunk("permission cancelled");
+                finish_prompt(prompt_id, "cancelled");
+                return;
+            }
+        }
+    }
+    finish_prompt(prompt_id, "end_turn");
+}
+
+fn permission_options(scenario: &str) -> Value {
+    match scenario {
+        "permission" | "permission-repeat" => json!([
+            { "optionId": "allow", "name": "Allow once", "kind": "allow_once" },
+            { "optionId": "deny", "name": "Reject once", "kind": "reject_once" }
+        ]),
+        "permission-write" => json!([
+            { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+            { "optionId": "allow-always", "name": "Always allow", "kind": "allow_always" },
+            { "optionId": "reject-once", "name": "Reject once", "kind": "reject_once" },
+            { "optionId": "reject-always", "name": "Always reject", "kind": "reject_always" }
+        ]),
+        "permission-command" => json!([
+            { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+            { "optionId": "allow-always", "name": "Always allow", "kind": "allow_always" },
+            { "optionId": "reject-once", "name": "Reject once", "kind": "reject_once" }
+        ]),
+        "permission-always" => json!([
+            { "optionId": "allow-always", "name": "Always allow", "kind": "allow_always" },
+            { "optionId": "reject-once", "name": "Reject once", "kind": "reject_once" }
+        ]),
+        _ => json!([]),
+    }
+}
+
+enum PermissionFixtureOutcome {
+    Selected(String),
+    Cancelled,
+}
+
+fn read_permission_outcome(
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+    request_id: u64,
+) -> PermissionFixtureOutcome {
+    loop {
+        let Some(Ok(line)) = lines.next() else {
+            return PermissionFixtureOutcome::Cancelled;
+        };
+        let Ok(response) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if response.get("id").and_then(Value::as_u64) == Some(request_id) {
+            let outcome = &response["result"]["outcome"];
+            if outcome.get("outcome").and_then(Value::as_str) != Some("selected") {
+                return PermissionFixtureOutcome::Cancelled;
+            }
+            let selected = outcome
+                .get("optionId")
+                .and_then(Value::as_str)
+                .unwrap_or("cancelled")
+                .to_string();
+            return PermissionFixtureOutcome::Selected(selected);
+        }
+        if response.get("method").and_then(Value::as_str) == Some("session/cancel") {
+            return PermissionFixtureOutcome::Cancelled;
+        }
+    }
 }
 
 fn scenario() -> String {

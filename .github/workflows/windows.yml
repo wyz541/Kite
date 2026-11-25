@@ -49,7 +49,7 @@ jobs:
     # PRs run the full build only when the ci:full label is added.
     if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -69,6 +69,9 @@ jobs:
 
       - name: Run Agent session integration tests
         run: cargo test --locked --features agent-fixture --test agent_session -- --test-threads=1
+
+      - name: Run Agent permission UI tests
+        run: cargo test --locked --lib agent_permission_ui::tests
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --features windows-ui,agent-fixture -- -D warnings

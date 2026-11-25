@@ -15,6 +15,7 @@ pub mod connection;
 mod context;
 pub mod credentials;
 mod diagnostics;
+mod permissions;
 pub mod preset_adapter;
 pub mod presets;
 mod process;
@@ -214,9 +215,9 @@ impl PermissionPolicy {
 
     pub const fn summary(self) -> &'static str {
         match self {
-            Self::ReadOnly => "Kite 仅提供文件上下文；不自动写入或执行命令。",
-            Self::ConfirmWrites => "写入和命令执行需要用户确认。",
-            Self::AgentManaged => "权限由 Agent 自身管理；Kite 不声称已沙箱化。",
+            Self::ReadOnly => "Kite 拒绝写入、命令和网络授权请求；不沙箱化外部 Agent。",
+            Self::ConfirmWrites => "仅对 Profile 声明的能力逐次确认；始终允许由 Agent 解释。",
+            Self::AgentManaged => "Kite 不强制限制；能力声明仅供展示，实际边界由 Agent 管理。",
         }
     }
 }
@@ -859,6 +860,9 @@ pub use diagnostics::{
     agent_log_path, clear_agent_diagnostics, diagnose_agents, probe_agent_connection,
     record_agent_event, redact_agent_text,
 };
+pub use permissions::{
+    AgentPermissionDecision, AgentPermissionOption, AgentPermissionRequest, AgentPermissionRisk,
+};
 pub use preset_adapter::{apply_preset_to_existing, preset_profile};
 pub use presets::{
     AgentPreset, AgentPresetPermission, AgentPresetSpec, AgentPresetTransport, agent_presets,
@@ -871,8 +875,7 @@ pub use restore::{
     save_agent_conversation, save_agent_sessions_at,
 };
 pub use runtime::{
-    AgentEvent, AgentEventKind, AgentPermissionDecision, AgentPermissionOption,
-    AgentPermissionRequest, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState,
+    AgentEvent, AgentEventKind, AgentRuntime, AgentRuntimeSnapshot, AgentRuntimeState,
 };
 pub use ui_compat::{
     AgentStoreLoad, agent_config_path, default_agent_profile_id, load_agent_profiles,

@@ -70,7 +70,7 @@ schema 1。高于当前版本的配置不会被覆盖；调用方会收到 `Unkn
 | `output_limit_bytes` | 单次输出上限，范围 1 KiB 到 256 MiB |
 | `credential_ref` | 不透明凭据引用，不包含明文凭据 |
 | `credential_env_var` | 可选；启动进程时注入已保存凭据的环境变量名 |
-| `capabilities` | Agent 声明支持的读取、写入、命令、网络和权限请求能力 |
+| `capabilities` | 声明读取、写入、命令、网络和权限请求能力；`ReadOnly` / `ConfirmWrites` 下参与权限请求过滤，`AgentManaged` 下仅作声明 |
 
 `default_profile_id` 只指向可启动会话的 Profile（当前仅有 `acp_stdio`）。创建第一个可运行
 Profile 会将其设为默认值；删除默认 Profile 后优先选择剩余的可运行 Profile，若没有则为

@@ -4,9 +4,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use kite_core::agent::{
-    AgentEnvironmentVariable, AgentErrorKind, AgentFailure, AgentSession, AgentSessionConfig,
-    AgentSessionEvent, AgentSessionEventCallback, AgentSessionEventSubscription,
-    AgentSessionPermissionRequest, AgentSessionState, AgentStopReason,
+    AgentCapabilities, AgentEnvironmentVariable, AgentErrorKind, AgentFailure, AgentSession,
+    AgentSessionConfig, AgentSessionEvent, AgentSessionEventCallback,
+    AgentSessionEventSubscription, AgentSessionPermissionRequest, AgentSessionState,
+    AgentStopReason, PermissionPolicy,
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -97,6 +98,7 @@ fn fixture_config(scenario: &str) -> AgentSessionConfig {
         shutdown_timeout_ms: 800,
         max_frame_bytes: 8 * 1024,
         max_output_bytes: 512 * 1024,
+        permission_policy: PermissionPolicy::AgentManaged,
         ..AgentSessionConfig::default()
     }
 }
@@ -234,14 +236,14 @@ fn permission_request_requires_explicit_response() {
     let request = permission_request(&request_events);
     assert_eq!(request.tool_call_id, "fixture-tool-1");
     assert_eq!(request.options.len(), 2);
-    assert!(!message_text(&request_events).contains("approved:"));
+    assert!(!message_text(&request_events).contains("permission selected:"));
 
     harness
         .session
         .respond_permission(request.request_id, Some("allow".to_string()))
         .expect("permission response");
     let events = collect_turn(&harness.events);
-    assert!(message_text(&events).contains("approved: allow"));
+    assert!(message_text(&events).contains("permission selected: allow"));
     assert!(events.iter().any(|event| matches!(
         event,
         AgentSessionEvent::TurnCompleted {
@@ -249,6 +251,47 @@ fn permission_request_requires_explicit_response() {
             ..
         }
     )));
+}
+
+#[test]
+fn read_only_session_rejects_write_option_without_losing_pending_request() {
+    let mut config = fixture_config("permission-write");
+    config.permission_policy = PermissionPolicy::ReadOnly;
+    config.capabilities = AgentCapabilities {
+        write_files: true,
+        execute_commands: true,
+        network: true,
+        ..AgentCapabilities::default()
+    };
+    let harness = start_session(config);
+    harness
+        .session
+        .send_prompt("write a file".to_string(), Vec::new())
+        .expect("prompt");
+    let request_events = collect_until(&harness.events, Duration::from_secs(5), |event| {
+        matches!(event, AgentSessionEvent::PermissionRequested { .. })
+    });
+    let request = permission_request(&request_events);
+    let request_id = request.request_id;
+
+    harness
+        .session
+        .respond_permission(request_id.clone(), Some("allow-once".to_string()))
+        .expect("send blocked permission response");
+    collect_until(&harness.events, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            AgentSessionEvent::Diagnostic { message, .. }
+                if message.contains("当前 Profile 权限策略不允许")
+        )
+    });
+
+    harness
+        .session
+        .respond_permission(request_id, Some("reject-once".to_string()))
+        .expect("reject pending permission");
+    let events = collect_turn(&harness.events);
+    assert!(message_text(&events).contains("permission selected: reject-once"));
 }
 
 #[test]
