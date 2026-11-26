@@ -2,9 +2,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use kite_core::agent::{
+    AgentEnvironmentVariable, AgentProfile, AgentTransport, test_agent_connection,
+};
 use serde_json::{Value, json};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 struct Fixture {
     child: Child,
@@ -319,4 +324,76 @@ fn fixture_emits_redaction_inputs_but_never_asserts_them_as_answers() {
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("fixture did not emit its diagnostic redaction input");
+}
+
+#[test]
+fn connection_probe_terminates_descendants_before_joining_output_threads() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let pid_path = std::env::temp_dir().join(format!(
+        "kite-agent-connection-child-{}-{unique}.pid",
+        std::process::id()
+    ));
+    let profile = AgentProfile {
+        id: "connection-child".to_string(),
+        name: "Connection child fixture".to_string(),
+        transport: AgentTransport::AcpStdio,
+        executable: Some(env!("CARGO_BIN_EXE_kite-agent-fixture").to_string()),
+        arguments: vec!["--scenario".to_string(), "connection-child".to_string()],
+        environment: vec![AgentEnvironmentVariable {
+            name: "KITE_AGENT_FIXTURE_CHILD_PID_FILE".to_string(),
+            value: pid_path.to_string_lossy().into_owned(),
+        }],
+        timeout_seconds: 5,
+        output_limit_bytes: 256 * 1024,
+        ..AgentProfile::default()
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(test_agent_connection(profile, None));
+    });
+    let result = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("connection probe must not wait for inherited child pipes");
+    assert!(result.success, "{}", result.message);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(value) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = value.trim().parse()
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture child pid was not written"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !process_exists(pid) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "connection probe left descendant process {pid} alive"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _ = std::fs::remove_file(pid_path);
+}
+
+fn process_exists(pid: u32) -> bool {
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).is_some()
 }

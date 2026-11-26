@@ -35,6 +35,20 @@ ALLOWED_IMAGES = {
     "docs/images/agent-acceptance-v0.6.94/windows-agent-settings.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-popout.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-connection-test.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-empty.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-ready.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-streaming.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-permission.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-error.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-repair.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-diagnostics.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-narrow.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-cancelled.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-popout.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-settings.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-connection-test.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-unconfigured.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-codex-completed.png",
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ALLOWED_WINDOWS_USERS = {"Example", "Kite", "Public", "runner", "runneradmin", "<name>"}

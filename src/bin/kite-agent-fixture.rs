@@ -22,6 +22,10 @@ fn main() {
         return;
     }
 
+    if scenario == "connection-child" {
+        spawn_sleeper_child();
+    }
+
     if scenario != "auth" && scenario != "idle" {
         if let Some(secret) = fixture_secret() {
             eprintln!(
@@ -188,6 +192,15 @@ fn handle_prompt(
             send_chunk("```\n");
             finish_prompt(id, "end_turn");
         }
+        "token-patterns" => {
+            send_chunk("Authorization: Bear");
+            send_chunk("er abc.def done\n");
+            send_chunk("value sk");
+            send_chunk("-proj-secret done\n");
+            send_chunk("token=");
+            send_chunk("abc123 done");
+            finish_prompt(id, "end_turn");
+        }
         "secret-stream" => {
             let Some(secret) = fixture_secret() else {
                 write_json(&json!({
@@ -207,7 +220,7 @@ fn handle_prompt(
             finish_prompt(id, "end_turn");
         }
         "secret-error" => {
-            let Some(secret) = fixture_secret() else {
+            if !send_secret_prefix_tail() {
                 write_json(&json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -216,6 +229,9 @@ fn handle_prompt(
                         "message": "fixture credential is missing"
                     }
                 }));
+                return;
+            }
+            let Some(secret) = fixture_secret() else {
                 return;
             };
             write_json(&json!({
@@ -240,7 +256,7 @@ fn handle_prompt(
             finish_prompt(id, "end_turn");
         }
         "permission" | "permission-write" | "permission-command" | "permission-always"
-        | "permission-repeat" => {
+        | "permission-repeat" | "permission-error" => {
             handle_permission_scenario(scenario, id, lines);
         }
         "cancel" | "spawn-tree" => {
@@ -270,6 +286,31 @@ fn handle_prompt(
                 }
             }
         }
+        "cancel-tail" => {
+            if !send_secret_prefix_tail() {
+                write_json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": "fixture credential is missing"
+                    }
+                }));
+                return;
+            }
+            loop {
+                let Some(Ok(line)) = lines.next() else {
+                    return;
+                };
+                let Ok(response) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if response.get("method").and_then(Value::as_str) == Some("session/cancel") {
+                    finish_prompt(id, "cancelled");
+                    return;
+                }
+            }
+        }
         _ => {
             send_chunk("hello");
             send_chunk(" world");
@@ -283,6 +324,20 @@ fn fixture_secret() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn send_secret_prefix_tail() -> bool {
+    let Some(secret) = fixture_secret() else {
+        return false;
+    };
+    send_chunk("tail ");
+    let split = secret
+        .char_indices()
+        .nth(5)
+        .map(|(index, _)| index)
+        .unwrap_or(secret.len());
+    send_chunk(&secret[..split]);
+    true
 }
 
 fn handle_permission_scenario(
@@ -331,6 +386,19 @@ fn handle_permission_scenario(
 
         match read_permission_outcome(lines, *request_id) {
             PermissionFixtureOutcome::Selected(selected) => {
+                if scenario == "permission-error"
+                    && (selected == "deny" || selected.starts_with("reject"))
+                {
+                    write_json(&json!({
+                        "jsonrpc": "2.0",
+                        "id": prompt_id,
+                        "error": {
+                            "code": -32603,
+                            "message": "Internal error: stop_reason=tool_use"
+                        }
+                    }));
+                    return;
+                }
                 send_chunk(&format!("permission selected: {selected}"));
             }
             PermissionFixtureOutcome::Cancelled => {
@@ -345,7 +413,7 @@ fn handle_permission_scenario(
 
 fn permission_options(scenario: &str) -> Value {
     match scenario {
-        "permission" | "permission-repeat" => json!([
+        "permission" | "permission-repeat" | "permission-error" => json!([
             { "optionId": "allow", "name": "Allow once", "kind": "allow_once" },
             { "optionId": "deny", "name": "Reject once", "kind": "reject_once" }
         ]),
@@ -400,6 +468,23 @@ fn read_permission_outcome(
             return PermissionFixtureOutcome::Cancelled;
         }
     }
+}
+
+fn spawn_sleeper_child() {
+    let Ok(executable) = env::current_exe() else {
+        return;
+    };
+    let Ok(child) = Command::new(executable)
+        .arg("--scenario")
+        .arg("sleeper")
+        .spawn()
+    else {
+        return;
+    };
+    if let Ok(path) = env::var("KITE_AGENT_FIXTURE_CHILD_PID_FILE") {
+        let _ = fs::write(path, child.id().to_string());
+    }
+    eprintln!("fixture-child-pid: {}", child.id());
 }
 
 fn scenario() -> String {

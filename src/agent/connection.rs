@@ -1,13 +1,12 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::process::build_agent_command;
+use super::process::spawn_agent_process_guard;
 use super::{AgentProfile, AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, credentials};
 
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
@@ -166,14 +165,16 @@ fn resolve_credential(
     ephemeral_credential: Option<String>,
 ) -> Result<Option<String>, String> {
     if let Some(credential) = ephemeral_credential {
-        let credential = credential.trim().to_string();
-        if !credential.is_empty() {
-            return Ok(Some(credential));
+        if credential.trim().is_empty() {
+            return Ok(None);
         }
+        return credentials::validate_secret(&credential).map(|value| Some(value.to_string()));
     }
     if profile.credential_ref.is_some() {
         match credentials::load_secret(&profile.id) {
-            Ok(Some(secret)) => Ok(Some(secret)),
+            Ok(Some(secret)) => {
+                credentials::validate_secret(&secret).map(|value| Some(value.to_string()))
+            }
             Ok(None) => Err("Agent 配置引用了钥匙串凭据，但系统中找不到该条目".to_string()),
             Err(error) => Err(error),
         }
@@ -292,26 +293,12 @@ fn test_acp_stdio(
     started: Instant,
 ) -> Result<AgentConnectionResult, ConnectionFailure> {
     let working_directory = profile_working_directory(profile)?;
-    let (mut command, _) = build_agent_command(profile, &working_directory)
-        .map_err(|error| ConnectionFailure::new(AgentConnectionStatus::Io, error))?;
-    command
-        .current_dir(&working_directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_environment(&mut command, profile, credential);
-    apply_no_window(&mut command);
-
-    let mut child = command.spawn().map_err(classify_spawn_error)?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        ConnectionFailure::new(AgentConnectionStatus::Io, "无法写入 Agent 标准输入")
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        ConnectionFailure::new(AgentConnectionStatus::Io, "无法读取 Agent 标准输出")
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        ConnectionFailure::new(AgentConnectionStatus::Io, "无法读取 Agent 错误输出")
-    })?;
+    let spawned = spawn_agent_process_guard(profile, &working_directory, credential)
+        .map_err(classify_spawn_message)?;
+    let mut guard = spawned.guard;
+    let mut stdin = spawned.stdin;
+    let stdout = spawned.stdout;
+    let stderr = spawned.stderr;
     let (frame_tx, frame_rx) = mpsc::channel();
     let stdout_thread = thread::spawn(move || read_frames(stdout, frame_tx));
     let (stderr_tx, stderr_rx) = mpsc::channel();
@@ -369,11 +356,7 @@ fn test_acp_stdio(
                 break parse_initialize_response(value, profile, started);
             }
             Ok(FrameRead::Eof) | Err(RecvTimeoutError::Disconnected) => {
-                let exit = child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .and_then(|status| status.code());
+                let exit = guard.try_wait().and_then(|status| status.code());
                 let stderr_text = stderr_rx
                     .recv_timeout(Duration::from_millis(120))
                     .unwrap_or_default();
@@ -410,7 +393,7 @@ fn test_acp_stdio(
     };
 
     drop(stdin);
-    terminate_child(&mut child);
+    guard.terminate_tree(Duration::from_millis(350));
     let _ = stderr_thread.join();
     let _ = stdout_thread.join();
     response
@@ -509,46 +492,29 @@ fn test_generic_cli(
     started: Instant,
 ) -> Result<AgentConnectionResult, ConnectionFailure> {
     let working_directory = profile_working_directory(profile)?;
-    let (mut command, _) = build_agent_command(profile, &working_directory)
-        .map_err(|error| ConnectionFailure::new(AgentConnectionStatus::Io, error))?;
-    command
-        .arg("--version")
-        .current_dir(&working_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_environment(&mut command, profile, credential);
-    apply_no_window(&mut command);
-    let mut child = command.spawn().map_err(classify_spawn_error)?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let mut profile = profile.clone();
+    profile.arguments.push("--version".to_string());
+    let spawned = spawn_agent_process_guard(&profile, &working_directory, credential)
+        .map_err(classify_spawn_message)?;
+    let mut guard = spawned.guard;
+    drop(spawned.stdin);
+    let stdout = spawned.stdout;
+    let stderr = spawned.stderr;
     let output_limit = profile.output_limit_bytes;
-    let stdout_thread = stdout.map(|stream| {
-        thread::spawn(move || {
-            let (bytes, exceeded) = read_limited(stream, output_limit);
-            (bytes, exceeded)
-        })
+    let stdout_thread = thread::spawn(move || {
+        let (bytes, exceeded) = read_limited(stdout, output_limit);
+        (bytes, exceeded)
     });
-    let stderr_thread =
-        stderr.map(|stream| thread::spawn(move || read_limited(stream, MAX_STDERR_BYTES).0));
+    let stderr_thread = thread::spawn(move || read_limited(stderr, MAX_STDERR_BYTES).0);
     let deadline = Instant::now() + Duration::from_secs(u64::from(profile.timeout_seconds));
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(|error| {
-            ConnectionFailure::new(
-                AgentConnectionStatus::Io,
-                format!("无法读取 CLI 状态：{error}"),
-            )
-        })? {
+        if let Some(status) = guard.try_wait() {
             break status;
         }
         if Instant::now() >= deadline {
-            terminate_child(&mut child);
-            if let Some(handle) = stdout_thread {
-                let _ = handle.join();
-            }
-            if let Some(handle) = stderr_thread {
-                let _ = handle.join();
-            }
+            guard.terminate_tree(Duration::from_millis(350));
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
             return Err(ConnectionFailure::new(
                 AgentConnectionStatus::Timeout,
                 "CLI 在超时前没有退出",
@@ -556,12 +522,9 @@ fn test_generic_cli(
         }
         thread::sleep(Duration::from_millis(20));
     };
-    let (stdout, output_exceeded) = stdout_thread
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_thread
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
+    guard.terminate_tree(Duration::from_millis(350));
+    let (stdout, output_exceeded) = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
     if output_exceeded {
         return Err(ConnectionFailure::new(
             AgentConnectionStatus::OutputTooLarge,
@@ -593,28 +556,6 @@ fn test_generic_cli(
         profile_save_supported: false,
     })
 }
-
-fn apply_environment(command: &mut Command, profile: &AgentProfile, credential: Option<&str>) {
-    for entry in &profile.environment {
-        command.env(&entry.name, &entry.value);
-    }
-    if let Some(credential) = credential {
-        let key = profile
-            .credential_env_var
-            .as_deref()
-            .unwrap_or("KITE_AGENT_TOKEN");
-        command.env(key, credential);
-    }
-}
-
-#[cfg(windows)]
-fn apply_no_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0800_0000);
-}
-
-#[cfg(not(windows))]
-fn apply_no_window(_command: &mut Command) {}
 
 fn read_limited<R: Read>(mut stream: R, limit: u64) -> (Vec<u8>, bool) {
     let keep = limit.saturating_add(1) as usize;
@@ -673,21 +614,15 @@ fn read_frames<R: Read>(stream: R, sender: mpsc::Sender<FrameRead>) {
     }
 }
 
-fn terminate_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-}
-
-fn classify_spawn_error(error: std::io::Error) -> ConnectionFailure {
-    use std::io::ErrorKind;
-    let status = match error.kind() {
-        ErrorKind::NotFound => AgentConnectionStatus::NotInstalled,
-        ErrorKind::PermissionDenied => AgentConnectionStatus::PermissionDenied,
-        _ => AgentConnectionStatus::Io,
+fn classify_spawn_message(message: String) -> ConnectionFailure {
+    let status = if message.contains("找不到 Agent") || message.contains("PATH 中找不到") {
+        AgentConnectionStatus::NotInstalled
+    } else if message.contains("权限") || message.contains("permission denied") {
+        AgentConnectionStatus::PermissionDenied
+    } else {
+        AgentConnectionStatus::Io
     };
-    ConnectionFailure::new(status, format!("无法启动 Agent：{error}"))
+    ConnectionFailure::new(status, message)
 }
 
 fn classify_failure_text(text: &str) -> AgentConnectionStatus {

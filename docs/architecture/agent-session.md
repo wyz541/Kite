@@ -164,7 +164,14 @@ Profile 中显式配置的环境变量会覆盖白名单值。
 - 名称包含 token、secret、password、credential、authorization 或 private key 的环境变量值。
 - URL 中的用户名和密码。
 - Bearer token。
+- 独立 `sk-*` token。
 - JSON 或 `key=value` 形式的 token、password、secret、API key 和 authorization。
+
+凭据在保存或运行时解析时必须至少包含 4 个字符；更短的值会被拒绝，避免短字符串被迫用于大范围文本替换或漏过精确脱敏。
+
+流式输出同时保护精确凭据和正则模式的前缀。`Bearer`、`sk-*`、敏感键值、JSON 凭据和 URL 凭据即使被拆成多个 Agent chunk，也会延迟输出直到可安全判定或流结束。
+
+`Completed`、`Cancelled` 和 `Failed` 终态都会 flush 流式脱敏器尾部，保证最后一段安全文本可见且不会重复追加事件。
 
 ## 输出限制
 

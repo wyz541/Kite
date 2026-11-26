@@ -116,6 +116,9 @@ final class KiteAgentPanelModel: ObservableObject {
     private var restoredMessages: [AgentMessage] = []
     private var turnId: UInt64 = 0
     private var sentPrompt = ""
+    private var pendingPrompt: String?
+    private var pendingPromptContextPaths: [String] = []
+    private var promptSent = false
     private var selectedWorkingDirectory: String?
     private var savedTerminalSnapshot = false
     private var windowWidth: UInt32 = 960
@@ -431,6 +434,9 @@ final class KiteAgentPanelModel: ObservableObject {
             self.runtime = runtime
             runtimeState = .starting
             sentPrompt = trimmed
+            pendingPrompt = trimmed
+            pendingPromptContextPaths = contextPaths.map(\.path)
+            promptSent = false
             output = ""
             autoFollow = true
             errorMessage = nil
@@ -492,7 +498,23 @@ final class KiteAgentPanelModel: ObservableObject {
                 guard let self else { return }
                 let snapshot = runtime.snapshot()
                 self.apply(snapshot)
+                if snapshot.state == .ready,
+                   !self.promptSent,
+                   let prompt = self.pendingPrompt {
+                    do {
+                        try runtime.sendPrompt(prompt: prompt, contextPaths: self.pendingPromptContextPaths)
+                        self.promptSent = true
+                        self.pendingPrompt = nil
+                        self.notice = "Agent 运行中"
+                    } catch {
+                        self.phase = .error
+                        self.runtimeState = .failed
+                        self.errorMessage = error.localizedDescription
+                        self.notice = error.localizedDescription
+                    }
+                }
                 if self.phase == .ended || self.phase == .error {
+                    runtime.shutdown()
                     if !self.savedTerminalSnapshot {
                         self.savedTerminalSnapshot = true
                         self.persistConversation()
@@ -519,6 +541,20 @@ final class KiteAgentPanelModel: ObservableObject {
         errorMessage = snapshot.error
         permissionRequests = snapshot.permissionRequests
         canCancel = snapshot.state == .running || snapshot.state == .waitingPermission
+        switch snapshot.state {
+        case .completed:
+            notice = "Agent 已完成"
+        case .cancelled:
+            notice = "Agent 已取消"
+        case .failed:
+            notice = snapshot.error ?? "Agent 失败"
+        case .closed:
+            notice = "Agent 已关闭"
+        case .starting, .initializing, .ready, .running, .waitingPermission, .cancelling:
+            break
+        @unknown default:
+            break
+        }
     }
 
     private func refreshProfile() {
@@ -1031,6 +1067,7 @@ private struct KiteAgentPanelContent: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .keyboardShortcut(".", modifiers: .command)
                 } else if agent.canRetry {
                     Button("重试") {
                         agent.retryPrompt()
