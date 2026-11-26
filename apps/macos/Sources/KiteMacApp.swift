@@ -201,11 +201,6 @@ struct KiteMacApp: App {
                     model.presentAgentReviewFile()
                 }
             }
-            CommandMenu("Git") {
-                Button("交互式 Rebase…") {
-                    KiteGitRebaseWindowController.show(path: model.currentPath, model: model)
-                }
-            }
             CommandMenu("导航") {
 
                 Divider()
@@ -228,6 +223,12 @@ struct KiteMacApp: App {
                 .keyboardShortcut("r", modifiers: [.command])
             }
             CommandMenu("Git") {
+                Button("交互式 Rebase…") {
+                    KiteGitRebaseWindowController.show(path: model.currentPath, model: model)
+                }
+
+                Divider()
+
                 Button("打开 Git 客户端…") {
                     KiteGitClientWindowController.show(model: model, repositoryPath: model.currentPath)
                 }
