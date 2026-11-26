@@ -31,6 +31,10 @@
 - Retry transient GitHub asset `403` responses with a fresh release download redirect.
 - Record download failures in the updater diagnostic log so Settings can expose actionable troubleshooting information.
 
+## Archive compatibility
+
+- Restore legacy GBK/CP936 file and directory names when extracting ZIP archives that omit the UTF-8 filename flag, while preserving UTF-8, Unicode Path extra-field, ASCII, and ordinary CP437 names.
+
 ## Known limitations
 
 - Kite does not bundle, download, or log in an Agent. Users must install and authenticate the external Agent first.
