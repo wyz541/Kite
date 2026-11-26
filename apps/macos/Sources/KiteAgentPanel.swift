@@ -1067,6 +1067,7 @@ private struct KiteAgentPanelContent: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .keyboardShortcut(".", modifiers: .command)
                 } else if agent.canRetry {
                     Button("重试") {
                         agent.retryPrompt()
