@@ -646,7 +646,7 @@ struct KiteAgentSettingsView: View {
                 HStack(alignment: .top, spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Agent 诊断日志").font(.system(size: 12.5, weight: .medium))
-                        Text(diagnostics.logPath)
+                        Text(agentDiagnosticsDisplayPath(diagnostics.logPath))
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -708,6 +708,13 @@ struct KiteAgentSettingsView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
+
+
+private func agentDiagnosticsDisplayPath(_ path: String) -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    guard path == home || path.hasPrefix(home + "/") else { return path }
+    return "~" + path.dropFirst(home.count)
+}
 
     private func addPreset(_ preset: AgentPreset) {
         guard let profile = core.agentPresetProfile(presetId: preset.id) else {

@@ -541,6 +541,20 @@ final class KiteAgentPanelModel: ObservableObject {
         errorMessage = snapshot.error
         permissionRequests = snapshot.permissionRequests
         canCancel = snapshot.state == .running || snapshot.state == .waitingPermission
+        switch snapshot.state {
+        case .completed:
+            notice = "Agent 已完成"
+        case .cancelled:
+            notice = "Agent 已取消"
+        case .failed:
+            notice = snapshot.error ?? "Agent 失败"
+        case .closed:
+            notice = "Agent 已关闭"
+        case .starting, .initializing, .ready, .running, .waitingPermission, .cancelling:
+            break
+        @unknown default:
+            break
+        }
     }
 
     private func refreshProfile() {

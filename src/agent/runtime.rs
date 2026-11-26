@@ -543,6 +543,7 @@ struct RuntimeWorker {
     output_limit_sent: bool,
     received_any_output: bool,
     shutdown_requested: bool,
+    permission_rejected: bool,
 }
 
 fn runtime_profile_with_credential(
@@ -610,6 +611,7 @@ impl RuntimeWorker {
             output_limit_sent: false,
             received_any_output: false,
             shutdown_requested: false,
+            permission_rejected: false,
         }
     }
 
@@ -775,6 +777,7 @@ impl RuntimeWorker {
         self.last_activity = Instant::now();
         self.output_limit_sent = false;
         self.received_any_output = false;
+        self.permission_rejected = false;
         self.shared.begin_turn();
         self.context_paths = context_paths;
         let mut prompt_blocks = Vec::new();
@@ -941,6 +944,10 @@ impl RuntimeWorker {
                 .to_string();
             if kind == PendingRequest::Prompt && code == -32800 {
                 self.complete(AgentRuntimeState::Cancelled, "提示已取消".to_string());
+                return Ok(());
+            }
+            if kind == PendingRequest::Prompt && self.permission_rejected {
+                self.complete(AgentRuntimeState::Failed, "权限请求已拒绝".to_string());
                 return Ok(());
             }
             return Err(message);
@@ -1206,6 +1213,10 @@ impl RuntimeWorker {
             "id": pending.request_id,
             "result": result
         }))?;
+        self.permission_rejected = matches!(
+            decision,
+            AgentPermissionDecision::RejectOnce | AgentPermissionDecision::RejectAlways
+        );
         self.pending_permissions.remove(request_id);
         self.shared.remove_permission(request_id);
         Ok(())

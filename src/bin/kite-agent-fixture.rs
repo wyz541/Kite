@@ -22,6 +22,10 @@ fn main() {
         return;
     }
 
+    if scenario == "connection-child" {
+        spawn_sleeper_child();
+    }
+
     if scenario != "auth" && scenario != "idle" {
         if let Some(secret) = fixture_secret() {
             eprintln!(
@@ -252,7 +256,7 @@ fn handle_prompt(
             finish_prompt(id, "end_turn");
         }
         "permission" | "permission-write" | "permission-command" | "permission-always"
-        | "permission-repeat" => {
+        | "permission-repeat" | "permission-error" => {
             handle_permission_scenario(scenario, id, lines);
         }
         "cancel" | "spawn-tree" => {
@@ -382,6 +386,19 @@ fn handle_permission_scenario(
 
         match read_permission_outcome(lines, *request_id) {
             PermissionFixtureOutcome::Selected(selected) => {
+                if scenario == "permission-error"
+                    && (selected == "deny" || selected.starts_with("reject"))
+                {
+                    write_json(&json!({
+                        "jsonrpc": "2.0",
+                        "id": prompt_id,
+                        "error": {
+                            "code": -32603,
+                            "message": "Internal error: stop_reason=tool_use"
+                        }
+                    }));
+                    return;
+                }
                 send_chunk(&format!("permission selected: {selected}"));
             }
             PermissionFixtureOutcome::Cancelled => {
@@ -396,7 +413,7 @@ fn handle_permission_scenario(
 
 fn permission_options(scenario: &str) -> Value {
     match scenario {
-        "permission" | "permission-repeat" => json!([
+        "permission" | "permission-repeat" | "permission-error" => json!([
             { "optionId": "allow", "name": "Allow once", "kind": "allow_once" },
             { "optionId": "deny", "name": "Reject once", "kind": "reject_once" }
         ]),
@@ -451,6 +468,23 @@ fn read_permission_outcome(
             return PermissionFixtureOutcome::Cancelled;
         }
     }
+}
+
+fn spawn_sleeper_child() {
+    let Ok(executable) = env::current_exe() else {
+        return;
+    };
+    let Ok(child) = Command::new(executable)
+        .arg("--scenario")
+        .arg("sleeper")
+        .spawn()
+    else {
+        return;
+    };
+    if let Ok(path) = env::var("KITE_AGENT_FIXTURE_CHILD_PID_FILE") {
+        let _ = fs::write(path, child.id().to_string());
+    }
+    eprintln!("fixture-child-pid: {}", child.id());
 }
 
 fn scenario() -> String {

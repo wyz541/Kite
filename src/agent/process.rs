@@ -123,6 +123,26 @@ pub(crate) fn build_agent_command(
 }
 
 pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<Child, String> {
+    let (mut command, executable) = prepare_agent_command(profile, cwd, None)?;
+    command
+        .spawn()
+        .map_err(|error| format!("无法启动 Agent {}：{error}", executable.display()))
+}
+
+pub(crate) fn spawn_agent_process_guard(
+    profile: &AgentProfile,
+    cwd: &Path,
+    credential: Option<&str>,
+) -> Result<SpawnedProcess, String> {
+    let (command, _) = prepare_agent_command(profile, cwd, credential)?;
+    ProcessGuard::spawn(command).map_err(|error| error.to_string())
+}
+
+fn prepare_agent_command(
+    profile: &AgentProfile,
+    cwd: &Path,
+    credential: Option<&str>,
+) -> Result<(Command, PathBuf), String> {
     if !cwd.is_dir() {
         return Err(format!("Agent 工作目录不存在：{}", cwd.display()));
     }
@@ -144,6 +164,13 @@ pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<
             command.env(variable.name.trim(), &variable.value);
         }
     }
+    if let Some(credential) = credential {
+        let name = profile
+            .credential_env_var
+            .as_deref()
+            .unwrap_or("KITE_AGENT_TOKEN");
+        command.env(name, credential);
+    }
 
     #[cfg(windows)]
     {
@@ -156,9 +183,7 @@ pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<
         command.process_group(0);
     }
 
-    command
-        .spawn()
-        .map_err(|error| format!("无法启动 Agent {}：{error}", executable.display()))
+    Ok((command, executable))
 }
 
 pub(crate) fn terminate_agent_process(child: &mut Child) {

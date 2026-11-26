@@ -277,6 +277,32 @@ fn read_only_profile_cannot_allow_write_requests() {
 }
 
 #[test]
+fn rejected_permission_with_upstream_error_is_classified_cleanly() {
+    let runtime = start(fixture_profile("permission-error"));
+    runtime
+        .send_prompt("fixture prompt".to_string(), Vec::new())
+        .expect("send prompt");
+    let waiting = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::WaitingPermission
+    });
+    let request = waiting.permission_requests[0].clone();
+    runtime
+        .respond_permission(request.request_id, AgentPermissionDecision::RejectOnce)
+        .expect("reject permission");
+    let snapshot = wait_for(&runtime, TURN_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Failed
+    });
+    assert_eq!(snapshot.error.as_deref(), Some("权限请求已拒绝"));
+    assert!(
+        !snapshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Internal error"))
+    );
+    runtime.shutdown();
+}
+
+#[test]
 fn read_only_profile_cannot_allow_command_requests() {
     let runtime = start(permission_profile(
         "permission-command",
