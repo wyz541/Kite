@@ -32,6 +32,29 @@ private struct MindmapLayout {
 }
 
 @MainActor
+private struct MindmapOutlineRow: Identifiable {
+    let id: String
+    let title: String
+    let depth: Int
+    let childCount: Int
+    let isCollapsed: Bool
+}
+
+@MainActor
+private struct MindmapSnapshot {
+    let contentJson: String
+    let sourceSha256: String
+}
+
+@MainActor
+private enum MindmapMoveDirection {
+    case up
+    case down
+    case left
+    case right
+}
+
+@MainActor
 private final class MindmapEditorModel: ObservableObject {
     private(set) var path: String
     @Published private(set) var document: MindmapDocumentDto
@@ -41,6 +64,9 @@ private final class MindmapEditorModel: ObservableObject {
     @Published var selectedID: String?
     @Published var collapsedIDs: Set<String> = []
     @Published var titleDraft = ""
+    @Published var editingID: String?
+    @Published var inlineTitle = ""
+    @Published var textInputFocused = false
     @Published var zoom: CGFloat = 0.82
     @Published var pan = CGSize.zero
     @Published var status = "正在加载…"
@@ -50,6 +76,8 @@ private final class MindmapEditorModel: ObservableObject {
 
     private var viewportSize = CGSize(width: 1_000, height: 700)
     private var didFit = false
+    private var undoStack: [MindmapSnapshot] = []
+    private var redoStack: [MindmapSnapshot] = []
 
     init(path: String) throws {
         self.path = URL(fileURLWithPath: path).standardizedFileURL.path
@@ -66,22 +94,133 @@ private final class MindmapEditorModel: ObservableObject {
         URL(fileURLWithPath: path).lastPathComponent
     }
 
-    var filteredTopicIDs: [String] {
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
+    var undoDepth: Int { undoStack.count }
+    var redoDepth: Int { redoStack.count }
+
+    var outlineRows: [MindmapOutlineRow] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return [] }
-        return topics.values
-            .filter { topic in
-                topic.title.localizedCaseInsensitiveContains(query)
-                    || topic.id.localizedCaseInsensitiveContains(query)
+        if !query.isEmpty {
+            return topics.values
+                .filter { topic in
+                    topic.title.localizedCaseInsensitiveContains(query)
+                        || topic.id.localizedCaseInsensitiveContains(query)
+                }
+                .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+                .prefix(40)
+                .map {
+                    MindmapOutlineRow(
+                        id: $0.id,
+                        title: $0.title,
+                        depth: $0.depth,
+                        childCount: $0.childIDs.count,
+                        isCollapsed: collapsedIDs.contains($0.id)
+                    )
+                }
+        }
+
+        guard let rootID else { return [] }
+        var rows: [MindmapOutlineRow] = []
+        func append(_ id: String, depth: Int) {
+            guard let topic = topics[id] else { return }
+            rows.append(
+                MindmapOutlineRow(
+                    id: id,
+                    title: topic.title,
+                    depth: depth,
+                    childCount: topic.childIDs.count,
+                    isCollapsed: collapsedIDs.contains(id)
+                )
+            )
+            guard !collapsedIDs.contains(id) else { return }
+            for childID in topic.childIDs {
+                append(childID, depth: depth + 1)
             }
-            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-            .prefix(40)
-            .map(\.id)
+        }
+        append(rootID, depth: 0)
+        return rows
     }
 
     func select(_ id: String?) {
         selectedID = id
         titleDraft = id.flatMap { topics[$0]?.title } ?? ""
+    }
+
+    func beginEditingSelected() {
+        guard let id = selectedID else { return }
+        beginEditing(id)
+    }
+
+    func beginEditing(_ id: String) {
+        guard let topic = topics[id] else { return }
+        select(id)
+        inlineTitle = topic.title
+        editingID = id
+    }
+
+    func commitInlineEdit() {
+        guard let id = editingID else { return }
+        let title = inlineTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        editingID = nil
+        guard !title.isEmpty, title != topics[id]?.title else { return }
+        rename(topicID: id, title: title)
+    }
+
+    func cancelInlineEdit() {
+        editingID = nil
+        titleDraft = selectedID.flatMap { topics[$0]?.title } ?? ""
+    }
+
+    func rename(topicID: String, title: String) {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        performEdit(.rename(topicId: topicID, title: normalized), selecting: .keep(topicID))
+    }
+
+    func undo() {
+        guard let snapshot = undoStack.popLast() else { return }
+        let current = MindmapSnapshot(
+            contentJson: document.contentJson,
+            sourceSha256: document.sourceSha256
+        )
+        if restore(snapshot) {
+            redoStack.append(current)
+        } else {
+            undoStack.append(snapshot)
+        }
+    }
+
+    func redo() {
+        guard let snapshot = redoStack.popLast() else { return }
+        let current = MindmapSnapshot(
+            contentJson: document.contentJson,
+            sourceSha256: document.sourceSha256
+        )
+        if restore(snapshot) {
+            undoStack.append(current)
+        } else {
+            redoStack.append(snapshot)
+        }
+    }
+
+    func moveSelection(_ direction: MindmapMoveDirection) {
+        guard let selectedID, let topic = topics[selectedID] else { return }
+        switch direction {
+        case .left:
+            select(topic.parentID)
+        case .right:
+            if !collapsedIDs.contains(selectedID),
+               let child = topic.childIDs.first(where: { topics[$0] != nil }) {
+                select(child)
+            } else {
+                selectAdjacentSibling(selectedID, offset: 1)
+            }
+        case .up:
+            selectAdjacentSibling(selectedID, offset: -1)
+        case .down:
+            selectAdjacentSibling(selectedID, offset: 1)
+        }
     }
 
     func renameSelected() {
@@ -201,18 +340,58 @@ private final class MindmapEditorModel: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         let previousIDs = Set(topics.keys)
+        let snapshot = MindmapSnapshot(
+            contentJson: document.contentJson,
+            sourceSha256: document.sourceSha256
+        )
         do {
             document = try editMindmapDocument(
                 path: path,
                 expectedSourceSha256: document.sourceSha256,
                 edit: edit
             )
+            undoStack.append(snapshot)
+            redoStack.removeAll()
             rebuildFromDocument(initial: false, previousIDs: previousIDs, selectionRule: rule)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
             status = "编辑未保存"
         }
+    }
+
+    private func restore(_ snapshot: MindmapSnapshot) -> Bool {
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            _ = try saveMindmapContent(
+                path: path,
+                expectedSourceSha256: document.sourceSha256,
+                contentJson: snapshot.contentJson
+            )
+            document = try openMindmapDocument(path: path)
+            rebuildFromDocument(
+                initial: false,
+                previousIDs: Set(topics.keys),
+                selectionRule: .keep(selectedID ?? rootID ?? "")
+            )
+            status = "已恢复历史版本"
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            status = "撤销/重做失败"
+            return false
+        }
+    }
+
+    private func selectAdjacentSibling(_ id: String, offset: Int) {
+        guard let parentID = topics[id]?.parentID,
+              let siblings = topics[parentID]?.childIDs,
+              let index = siblings.firstIndex(of: id) else { return }
+        let target = index + offset
+        guard siblings.indices.contains(target) else { return }
+        select(siblings[target])
     }
 
     private func rebuildFromDocument(
@@ -256,7 +435,7 @@ private final class MindmapEditorModel: ObservableObject {
         }
         var heights: [String: CGFloat] = [:]
         let gap: CGFloat = 12
-        let column: CGFloat = 286
+        let column: CGFloat = 320
 
         func visibleChildren(_ id: String) -> [String] {
             guard !collapsedIDs.contains(id), let topic = topics[id] else { return [] }
@@ -265,7 +444,7 @@ private final class MindmapEditorModel: ObservableObject {
 
         func nodeSize(_ topic: MindmapTopic) -> CGSize {
             let characters = max(6, topic.title.count)
-            let width = min(312, max(104, 44 + CGFloat(characters) * 7.4))
+            let width = min(344, max(112, 58 + CGFloat(characters) * 7.3))
             let height: CGFloat = topic.title.count > 34 ? 54 : 36
             return CGSize(width: width, height: height)
         }
@@ -377,6 +556,9 @@ private struct KiteMindmapEditorView: View {
     @ObservedObject var model: MindmapEditorModel
     @State private var dragOrigin: CGSize?
     @State private var magnificationOrigin: CGFloat?
+    @FocusState private var inlineEditorFocused: Bool
+    @FocusState private var searchFocused: Bool
+    @FocusState private var inspectorTitleFocused: Bool
 
     var body: some View {
         ZStack {
@@ -387,7 +569,7 @@ private struct KiteMindmapEditorView: View {
                 header
                 Divider().overlay(Color.white.opacity(0.08))
                 HStack(spacing: 0) {
-                    inspector
+                    sidebar
                     Rectangle()
                         .fill(Color.white.opacity(0.08))
                         .frame(width: 1)
@@ -398,6 +580,23 @@ private struct KiteMindmapEditorView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            searchFocused = false
+            inspectorTitleFocused = false
+            inlineEditorFocused = false
+            model.textInputFocused = false
+        }
+        .onChange(of: model.editingID) { id in
+            if id != nil {
+                DispatchQueue.main.async { inlineEditorFocused = true }
+            } else {
+                inlineEditorFocused = false
+                updateTextInputFocus()
+            }
+        }
+        .onChange(of: inlineEditorFocused) { _ in updateTextInputFocus() }
+        .onChange(of: searchFocused) { _ in updateTextInputFocus() }
+        .onChange(of: inspectorTitleFocused) { _ in updateTextInputFocus() }
         .alert("Mindmap 错误", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -431,6 +630,12 @@ private struct KiteMindmapEditorView: View {
             Spacer(minLength: 20)
 
             HStack(spacing: 5) {
+                headerButton("arrow.uturn.backward", "撤销 (Command+Z)", enabled: model.canUndo) {
+                    model.undo()
+                }
+                headerButton("arrow.uturn.forward", "重做 (Command+Shift+Z)", enabled: model.canRedo) {
+                    model.redo()
+                }
                 headerButton("folder", "打开") { KiteMindmapWindowController.chooseAndOpen() }
                 headerButton("arrow.clockwise", "重新载入") { KiteMindmapWindowController.open(path: model.path) }
                 headerButton("minus.magnifyingglass", "缩小") { model.zoomOut() }
@@ -448,10 +653,111 @@ private struct KiteMindmapEditorView: View {
         .background(.black.opacity(0.32))
     }
 
-    private var inspector: some View {
+    private var sidebar: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                outlinePanel
+                    .frame(height: max(180, proxy.size.height * 0.43))
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+                ScrollView {
+                    inspectorContent
+                        .padding(14)
+                }
+            }
+        }
+        .frame(width: 292)
+        .background(Color.black.opacity(0.24))
+    }
+
+    private var outlinePanel: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("OUTLINE")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1.3)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(model.outlineRows.count)")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                TextField("搜索主题", text: $model.searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .focused($searchFocused)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 27)
+            .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 6))
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(model.outlineRows) { row in
+                        outlineRow(row)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+        .padding(12)
+    }
+
+    private func outlineRow(_ row: MindmapOutlineRow) -> some View {
+        HStack(spacing: 3) {
+            Spacer()
+                .frame(width: CGFloat(min(row.depth, 7)) * 10)
+            Button {
+                clearTextInputFocus()
+                model.toggleCollapse(row.id)
+            } label: {
+                Image(systemName: row.isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 13, height: 20)
+                    .foregroundStyle(.secondary)
+                    .opacity(row.childCount > 0 ? 1 : 0.2)
+            }
+            .buttonStyle(.plain)
+            .disabled(row.childCount == 0)
+
+            Button {
+                clearTextInputFocus()
+                model.select(row.id)
+            } label: {
+                HStack(spacing: 6) {
+                    Text(row.title)
+                        .font(.system(size: 10.5, weight: model.selectedID == row.id ? .semibold : .regular))
+                        .lineLimit(1)
+                    Spacer(minLength: 2)
+                    if row.childCount > 0 {
+                        Text("\(row.childCount)")
+                            .font(.system(size: 8.5, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .frame(height: 22)
+                .background(
+                    model.selectedID == row.id
+                        ? Color(red: 0.72, green: 0.34, blue: 0.15).opacity(0.18)
+                        : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 4)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var inspectorContent: some View {
         VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("STRUCTURE")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("INSPECTOR")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .tracking(1.3)
                     .foregroundStyle(.secondary)
@@ -467,6 +773,7 @@ private struct KiteMindmapEditorView: View {
                     TextField("主题标题", text: $model.titleDraft)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12.5, weight: .medium))
+                        .focused($inspectorTitleFocused)
                         .padding(.horizontal, 9)
                         .frame(height: 30)
                         .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 6))
@@ -522,7 +829,7 @@ private struct KiteMindmapEditorView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Spacer()
+            Divider().overlay(Color.white.opacity(0.08))
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("能力基线")
@@ -535,9 +842,6 @@ private struct KiteMindmapEditorView: View {
             .font(.system(size: 10, design: .monospaced))
             .foregroundStyle(.secondary)
         }
-        .padding(16)
-        .frame(width: 250)
-        .background(Color.black.opacity(0.22))
     }
 
     private var canvas: some View {
@@ -546,6 +850,11 @@ private struct KiteMindmapEditorView: View {
                 industrialCanvas(size: proxy.size)
                     .onAppear { model.updateViewport(proxy.size) }
                     .onChange(of: proxy.size) { size in model.updateViewport(size) }
+                if let editingID = model.editingID,
+                   let node = model.layout.nodes[editingID],
+                   let topic = model.topics[editingID] {
+                    inlineEditor(topic: topic, node: node, size: proxy.size)
+                }
                 zoomBadge
                     .padding(14)
             }
@@ -600,25 +909,85 @@ private struct KiteMindmapEditorView: View {
         .simultaneousGesture(
             SpatialTapGesture()
                 .onEnded { value in
+                    clearTextInputFocus()
                     let point = worldPoint(value.location, size: size)
                     if let hit = model.layout.order.reversed().first(where: {
                         model.layout.nodes[$0]?.rect.contains(point) == true
-                    }) {
-                        model.select(hit)
+                    }), let node = model.layout.nodes[hit] {
+                        if toggleBadgeRect(for: node).contains(point) {
+                            model.toggleCollapse(hit)
+                        } else {
+                            model.select(hit)
+                        }
                     }
                 }
         )
         .simultaneousGesture(
             SpatialTapGesture(count: 2)
                 .onEnded { value in
+                    clearTextInputFocus()
                     let point = worldPoint(value.location, size: size)
                     if let hit = model.layout.order.reversed().first(where: {
                         model.layout.nodes[$0]?.rect.contains(point) == true
-                    }) {
-                        model.select(hit)
-                        model.toggleCollapse(hit)
+                    }), let node = model.layout.nodes[hit] {
+                        if toggleBadgeRect(for: node).contains(point) {
+                            model.select(hit)
+                            model.toggleCollapse(hit)
+                        } else {
+                            model.beginEditing(hit)
+                        }
                     }
                 }
+        )
+    }
+
+    private func updateTextInputFocus() {
+        model.textInputFocused = searchFocused || inspectorTitleFocused || inlineEditorFocused
+    }
+
+    private func clearTextInputFocus() {
+        searchFocused = false
+        inspectorTitleFocused = false
+        model.textInputFocused = false
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+
+    private func inlineEditor(topic: MindmapTopic, node: MindmapNodeLayout, size: CGSize) -> some View {
+        let rect = screenRect(node.rect, size: size)
+        return TextField("主题标题", text: $model.inlineTitle)
+            .textFieldStyle(.plain)
+            .font(.system(size: max(10, min(14, topic.fontSize)), weight: .medium, design: .rounded))
+            .padding(.horizontal, 9)
+            .frame(width: max(110, rect.width), height: max(30, rect.height))
+            .background(
+                Color(red: 0.99, green: 0.985, blue: 0.96),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color(red: 0.72, green: 0.34, blue: 0.15), lineWidth: 2)
+            )
+            .focused($inlineEditorFocused)
+            .position(x: rect.midX, y: rect.midY)
+            .onSubmit { model.commitInlineEdit() }
+            .onExitCommand { model.cancelInlineEdit() }
+    }
+
+    private func screenRect(_ rect: CGRect, size: CGSize) -> CGRect {
+        CGRect(
+            x: size.width / 2 + model.pan.width + rect.minX * model.zoom,
+            y: size.height / 2 + model.pan.height + rect.minY * model.zoom,
+            width: rect.width * model.zoom,
+            height: rect.height * model.zoom
+        )
+    }
+
+    private func toggleBadgeRect(for node: MindmapNodeLayout) -> CGRect {
+        CGRect(
+            x: node.rect.maxX - 26,
+            y: node.rect.midY - 12,
+            width: 24,
+            height: 24
         )
     }
 
@@ -702,7 +1071,9 @@ private struct KiteMindmapEditorView: View {
         let text = Text(topic.title)
             .font(font)
             .foregroundColor(textColor)
-        context.draw(text, at: CGPoint(x: rect.minX + 12, y: rect.midY), anchor: .leading)
+        var textContext = context
+        textContext.clip(to: nodePath)
+        textContext.draw(text, at: CGPoint(x: rect.minX + 12, y: rect.midY), anchor: .leading)
 
         if topic.hasChildren {
             let badge = CGRect(x: rect.maxX - 18, y: rect.midY - 6, width: 12, height: 12)
@@ -734,6 +1105,8 @@ private struct KiteMindmapEditorView: View {
             Text(model.document.sourceSha256.prefix(10))
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.tertiary)
+            Text("Tab 子主题 · Enter 同级 · Space 编辑")
+                .foregroundStyle(.tertiary)
             Text("\(model.layout.order.count) visible")
             Text("Rust Core")
         }
@@ -744,7 +1117,12 @@ private struct KiteMindmapEditorView: View {
         .background(.black.opacity(0.32))
     }
 
-    private func headerButton(_ symbol: String, _ help: String, action: @escaping () -> Void) -> some View {
+    private func headerButton(
+        _ symbol: String,
+        _ help: String,
+        enabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 11, weight: .semibold))
@@ -752,6 +1130,8 @@ private struct KiteMindmapEditorView: View {
                 .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.36)
         .help(help)
     }
 
@@ -771,6 +1151,7 @@ private struct KiteMindmapEditorView: View {
 final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
     private static var controllers: [String: KiteMindmapWindowController] = [:]
     private let model: MindmapEditorModel
+    private var keyMonitor: Any?
 
     init(path: String) throws {
         let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
@@ -793,6 +1174,7 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
         window.center()
+        installKeyboardMonitor()
     }
 
     required init?(coder: NSCoder) {
@@ -804,6 +1186,7 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
         if let existing = controllers[normalized] {
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
+            existing.window?.makeFirstResponder(existing.window?.contentView)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -812,6 +1195,7 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
             controllers[normalized] = controller
             controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
+            controller.window?.makeFirstResponder(controller.window?.contentView)
             NSApp.activate(ignoringOtherApps: true)
         } catch {
             let alert = NSAlert()
@@ -865,7 +1249,63 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
+        keyMonitor = nil
         KiteMindmapWindowController.controllers.removeValue(forKey: model.path)
+    }
+
+    private func installKeyboardMonitor() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.window?.isKeyWindow == true else { return event }
+            if self.model.textInputFocused { return event }
+
+            let command = event.modifierFlags.contains(.command)
+            let shift = event.modifierFlags.contains(.shift)
+            let characters = event.charactersIgnoringModifiers?.lowercased()
+
+            if command, characters == "z" {
+                if shift {
+                    self.model.redo()
+                } else {
+                    self.model.undo()
+                }
+                return nil
+            }
+
+            switch event.keyCode {
+            case 48:
+                self.model.addChild()
+                return nil
+            case 36:
+                self.model.addSibling()
+                return nil
+            case 49, 120:
+                self.model.beginEditingSelected()
+                return nil
+            case 51, 117:
+                self.model.deleteSelected()
+                return nil
+            case 53:
+                self.model.cancelInlineEdit()
+                return nil
+            case 123:
+                self.model.moveSelection(.left)
+                return nil
+            case 124:
+                self.model.moveSelection(.right)
+                return nil
+            case 125:
+                self.model.moveSelection(.down)
+                return nil
+            case 126:
+                self.model.moveSelection(.up)
+                return nil
+            default:
+                return event
+            }
+        }
     }
 }
 

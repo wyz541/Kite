@@ -36,6 +36,7 @@ The build script creates `apps/macos/build/Kite.app`.
 - Column multi-selection with range and toggle selection.
 - Independent global search window for file names or indexed file content.
 - Independent XMind-compatible Mindmap editor window backed by the Rust core.
+- Mindmap outline search, inline node editing, keyboard tree operations, and undo/redo.
 - Current-folder, favorite-folder, local-disk, and root-disk scopes in both search modes.
 - Ranked name results with collapsible duplicate locations.
 - Content results with line context and highlighted matches.

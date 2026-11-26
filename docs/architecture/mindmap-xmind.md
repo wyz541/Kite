@@ -106,10 +106,15 @@ AtomicFile 原子写入
 
 - 独立 NSWindow，不阻塞 Kite 主窗口。
 - 同一路径只保留一个编辑器窗口。
+- 左侧 OUTLINE 提供可见结构树和主题搜索，可直接定位深层主题。
 - 画布显示层级连线、节点颜色、主题形状和折叠状态。
-- 单击选择，双击展开/折叠。
+- 单击选择；双击节点进入画布内联标题编辑；点击节点右侧 +/- 展开或折叠。
 - 拖拽平移，触控板捏合缩放。
+- `Tab` 添加子主题，`Enter` 添加同级，`Space`/`F2` 编辑标题，方向键导航，`Delete` 删除。
+- `Command+Z` / `Command+Shift+Z` 撤销和重做。历史快照仍通过 Rust Core 原子保存。
 - 节点标题编辑、添加子主题、添加同级和删除都通过 Rust Core 执行并原子保存。
-- 底部状态栏显示 Rust Core 状态、源文件哈希、可见节点数和缩放比例。
+- 底部状态栏显示 Rust Core 状态、源文件哈希、快捷键、可见节点数和缩放比例。
+
+Debug 构建使用独立的 `com.wyz541.kite.mindmapdev` bundle identifier 和 `KiteMindmapDev` 可执行文件，便于与已安装的正式 Kite 同时运行。
 
 示例文件由 `apps/macos/build.sh` 复制到应用资源。首次打开示例时，会复制到 `~/Library/Application Support/Kite/Mindmaps/`，避免修改仓库内的验收基线文件。
