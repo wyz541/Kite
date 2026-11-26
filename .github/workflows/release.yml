@@ -34,6 +34,16 @@ jobs:
         shell: pwsh
         run: ./build.ps1
 
+      - name: Verify Windows package version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $archive = "dist/Kite-$env:TAG-windows-x64.zip"
+          if (-not (Test-Path -LiteralPath $archive)) {
+            throw "Expected Windows release asset was not produced: $archive"
+          }
+
       - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
         with:

@@ -12,7 +12,11 @@ $targetRoot = if ($env:CARGO_TARGET_DIR) {
     Join-Path $root 'target'
 }
 $binary = Join-Path $targetRoot 'release\kite-explorer.exe'
-$version = '0.6.94'
+$cargoToml = Get-Content -LiteralPath (Join-Path $root 'Cargo.toml') -Raw
+if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+    throw 'Unable to read package version from Cargo.toml'
+}
+$version = $Matches[1]
 $releaseName = "Kite-v$version-windows-x64"
 $staging = Join-Path $dist $releaseName
 $archive = Join-Path $dist "$releaseName.zip"
