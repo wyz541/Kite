@@ -500,6 +500,13 @@ try {
         )
     } | ConvertTo-Json -Depth 5
     [System.IO.File]::WriteAllText($sessionPath, $session, [System.Text.UTF8Encoding]::new($false))
+    # Keep the right preview/Agent pane closed so the active file column is not
+    # squeezed behind it. Drag coordinates must target the actual UIA file row.
+    $uiPreferences = @{
+        schema_version = 1
+        preview_visible = $false
+    } | ConvertTo-Json -Depth 3
+    [System.IO.File]::WriteAllText($uiPreferencesPath, $uiPreferences, [System.Text.UTF8Encoding]::new($false))
     $env:KITE_SESSION_PATH = $sessionPath
     $env:KITE_UI_PREFERENCES_PATH = $uiPreferencesPath
 
