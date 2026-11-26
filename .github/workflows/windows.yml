@@ -67,14 +67,14 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Run updater tests
+        run: cargo test --locked --lib updater::tests -- --test-threads=1
+
       - name: Run Agent session integration tests
         run: cargo test --locked --features agent-fixture --test agent_session -- --test-threads=1
 
       - name: Run Agent permission UI tests
         run: cargo test --locked --lib agent_permission_ui::tests
-
-      - name: Run updater tests
-        run: cargo test --locked --lib updater::tests -- --test-threads=1
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --features windows-ui,agent-fixture -- -D warnings
