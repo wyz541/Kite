@@ -1619,7 +1619,10 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(extracted.as_deref(), Ok(b"updated executable".as_slice()));
+        assert_eq!(
+            extracted.expect("read extracted update entry"),
+            b"updated executable"
+        );
     }
 
     #[test]
