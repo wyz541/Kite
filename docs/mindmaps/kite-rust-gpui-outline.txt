@@ -1,0 +1,429 @@
+Kite × Rust GPUI 工程沉淀
+	01 项目定位与边界
+		产品定位
+			本地优先的跨平台原生文件管理器
+			分栏导航、预览、搜索、文件操作在同一工作区
+		架构定位
+			共享 Rust Core
+			Windows：Rust + GPUI
+			macOS：SwiftUI + AppKit
+			两端共享领域能力，不共享 UI 渲染器
+		设计原则
+			macOS 作为视觉与交互基准
+			Windows GPUI 实现同一产品语义
+			路径先于装饰，状态先于品牌，反馈先于动画
+			可逆性优先：历史、回收站、会话恢复、确认
+		核心能力来源
+			[文档] README.md：产品、功能、构建与总体架构
+			[文档] docs/design/manifesto.md：项目宪法与反模式
+			[文档] docs/architecture/platforms.md：双原生 UI 边界
+			[配置] Cargo.toml：包描述、features 与平台依赖
+	02 技术架构与依赖总览
+		核心分层
+			业务核心：fs / search / VCS / Agent / session
+			跨语言接口：UniFFI records / enums / objects / callbacks
+			多端外壳：GPUI / SwiftUI / CLI / MCP
+		Windows 前端组成
+			src/main.rs：进程入口和首个窗口
+			src/tabs.rs：窗口壳与多页签
+			src/app.rs：单页签主界面和业务编排
+			src/*_window.rs：设置、搜索、预览、Git、Agent 等独立窗口
+			Win32 / COM / Shell / WPD 适配层
+		编译边界
+			windows-ui feature 控制 GPUI 二进制
+			cfg(windows) 控制 Windows UI 模块
+			agent-fixture 控制 Agent 测试夹具
+			performance 控制性能测试工具
+		核心能力来源
+			[框架] gpui-kit 0.8.0：GPUI 门面、基础层、组件库、资产
+			[跨语言] uniffi 0.32.2：Rust 与 Swift 的类型化边界
+			[Windows] windows 0.62.2 / windows-sys 0.61：Win32、Shell、COM
+			[代码] Cargo.toml、src/lib.rs、src/main.rs
+			[文档] docs/architecture/core-api.md
+	03 GPUI 启动与窗口生命周期
+		进程启动
+			Windows GUI subsystem
+			perf_trace::start
+			file_clipboard::trace_drag
+		应用初始化
+			gpui_kit::application()
+			.with_assets(AllAssets)
+			.run(|cx| ...)
+			gpui_kit::init(cx)
+		应用级配置
+			读取 UI Preferences
+			Light / Dark / System 主题
+			KiteApp::bind_keys
+			KiteApp::install_menus
+		窗口创建
+			WindowOptions + TitlebarOptions
+			WindowBounds::centered
+			gpui_kit::open_window
+			KiteWindow::new
+		窗口层级
+			KiteWindow：一个 OS 窗口
+			KiteApp：一个页签内容
+			独立功能窗口：设置、搜索、Git、Agent、Diff 等
+		核心能力来源
+			[框架] gpui_kit::application / init / open_window
+			[类型] WindowOptions、WindowBounds、TitlebarOptions
+			[代码] src/main.rs、src/tabs.rs
+			[代码] src/settings_window.rs、src/global_search_window.rs、src/agent_window.rs
+	04 GPUI 编程模型
+		Entity 与 Context
+			Entity<T>：可观察状态对象
+			Context<T>：update / notify / spawn / subscribe
+			cx.new：创建子 Entity
+			this.update / this.update_in：异步结果回到 UI
+		Render
+			用 Rust 组合元素树
+			render 读取最新状态
+			条件组合：when / when_some
+			子窗口通过 Entity 嵌入元素树
+		Element DSL
+			div / h_flex / v_flex
+			flex_1 / w_full / h_full / min_w_0
+			gap / padding / border / rounded / overflow
+			bg / text_color / theme token
+		组件库
+			Button / Switch / Progress
+			Input / Textarea / Editor / TextView
+			DataTable / TableDelegate
+			PopupMenu / DropdownMenu / ContextMenuExt
+			ScrollableElement / Scrollbar / Resizable
+		交互模型
+			actions! 宏声明命令
+			key_context 与 focus_handle
+			on_action / capture_key_down / listener
+			Entity observation / EventEmitter / Subscription
+		核心能力来源
+			[框架] GPUI：Entity、Context、Render、Task、Subscription
+			[框架] gpui-kit component：Button、Input、DataTable、Menu、Scroll
+			[代码] src/actions.rs、src/app.rs、src/table.rs
+			[代码] src/tabs.rs：observe + EventEmitter + Subscription
+	05 状态模型与数据流
+		状态所有权
+			KiteWindow：页签集合、活动页签、共享剪贴板
+			KiteApp：单页签导航、列表/分栏、搜索、预览、Git、Agent 编排
+			子 Entity：InputState、TableState、AgentPanel
+			Rust Core：领域状态、持久化、外部进程与索引
+		状态分组
+			导航：current_dir / history / history_index
+			列表与分栏：TableState / column_panes / selection
+			反馈：loading / error / notice / skipped
+			异步协调：generation / Task / cancel flag
+			工作流：modal / git_dialog / active_git_operation / Agent
+			持久化：session / ui_preferences / favorites
+		标准数据流
+			用户输入 → Action / listener
+			修改 KiteApp 或子 Entity 状态
+			需要 I/O 时创建 Task
+			background_spawn 执行阻塞工作
+			await 后在 update/update_in 中回写
+			generation 校验过期结果
+			cx.notify 触发 Render
+		跨实体观察
+			KiteWindow observe KiteApp
+			页签变化更新窗口标题和会话
+			TabRequest 事件解耦页签命令
+			共享剪贴板通过 Rc<RefCell<...>> 在页签间复用
+		核心能力来源
+			[框架] Entity / Context / Render / observe / subscribe
+			[代码] src/app.rs：KiteApp 状态字段与状态变更
+			[代码] src/tabs.rs：KiteWindow 和页签同步
+			[代码] src/session.rs、src/ui_preferences.rs、src/favorites.rs
+	06 异步、并发与性能
+		Task 生命周期
+			Task 存入结构体字段以保证存活
+			替换或丢弃 Task 会取消旧任务
+			Task::ready(()) 用于清空
+			.detach() 用于明确的后台独立任务
+		任务分工
+			cx.spawn / cx.spawn_in：UI 协程
+			cx.background_spawn：阻塞式文件、搜索、Git 工作
+			await 后回到 foreground 更新 Entity
+			window.defer：延后到当前更新之后
+		取消与防旧结果
+			load_generation
+			search_generation / column_search_generation
+			vcs_generation / column_generation / preview_generation
+			AtomicBool 搜索取消标记
+			VCS CancellationToken
+		防抖与节流
+			预览加载防抖
+			分栏搜索防抖
+			目录变化自动刷新防抖
+			全局名称查询延迟
+		性能保护
+			后台索引低优先级
+			结果数量与输出长度上限
+			图片预览缓存容量
+			perf_trace 首内容渲染标记
+			性能 JSON 基线与对照
+		核心能力来源
+			[框架] Task、cx.spawn、cx.spawn_in、background_spawn、window.defer
+			[标准库] std::sync::atomic、mpsc、Arc、Mutex
+			[代码] src/file_watcher.rs、src/content_search.rs、src/name_index.rs
+			[代码] src/perf_trace.rs
+			[文档] docs/architecture/auto-refresh.md、docs/performance/README.md
+	07 主界面与布局系统
+		窗口壳
+			KiteWindow 根 v_flex
+			Tab Bar
+			Active KiteApp
+		页签内容
+			Toolbar
+			Main Workspace
+			Status Bar
+			Modal / Dialog 覆盖层
+		工作区
+			Sidebar
+			中间内容区
+			Right Pane：Preview / Agent
+		中间内容区
+			列表模式：DataTable
+			分栏模式：横向 ColumnPane 链
+		响应式规则
+			侧边栏可隐藏
+			窗口变窄时栏目横向滚动
+			Right Pane 在窄窗口切为 Overlay
+			固定尺寸常量 + flex 约束
+		核心能力来源
+			[框架] GPUI 元素 DSL 与样式系统
+			[组件] Button、Input、DataTable、Scrollbar、Progress
+			[代码] src/app.rs 的 render_toolbar / render_sidebar / render_columns / render_right_pane
+			[代码] src/tabs.rs 的 render_tab_bar
+	08 导航、分栏与文件列表
+		导航
+			返回 / 前进 / 上一级
+			面包屑与可编辑路径
+			当前路径历史
+			页签与会话恢复
+		分栏浏览
+			ColumnPane 有序向量
+			选中目录追加下一栏
+			选中文件截断更深栏
+			复用已加载共同前缀
+			分栏级排序 / 筛选 / 分组 / 搜索
+		列表浏览
+			FileTableDelegate
+			列定义：名称 / VCS / 日期 / 类型 / 大小
+			TableDelegate 的排序、右键菜单、行渲染
+			批量选择与可见行范围选择
+		视图偏好
+			列宽预设
+			详细信息列可见性
+			排序方向持久化
+			分栏显示规则持久化
+		核心能力来源
+			[组件] gpui-kit DataTable / TableState / TableDelegate
+			[代码] src/table.rs、src/fs.rs、src/ui_preferences.rs
+			[代码] src/app.rs 的 ColumnPane 与导航方法
+			[文档] docs/architecture/sidebar-navigation.md、docs/architecture/macos-column-rules.md
+	09 文件操作、预览与编辑
+		文件管理
+			新建文件夹 / 新建文件
+			重命名
+			复制 / 剪切 / 粘贴
+			删除到回收站
+			复制到指定目录
+		系统集成
+			Windows Explorer 文件剪贴板
+			macOS Finder 文件剪贴板
+			拖入 / 拖出
+			默认应用打开
+		压缩与解压
+			ZIP / TAR.GZ
+			临时路径 + 原子重命名
+			拒绝不安全的归档路径和符号链接
+			独立进度窗口
+		预览与编辑
+			图片 / 文本 / 日志 / Markdown / 代码
+			文本大小与二进制检测
+			TextDocument 与保存
+			大日志只读取尾部
+		核心能力来源
+			[Rust 库] std::fs、walkdir、zip、tar、image、trash、open
+			[Windows API] OLE、DataExchange、Shell
+			[组件] gpui-kit TextView / Editor / Progress
+			[代码] src/fs.rs、src/archive.rs、src/preview.rs、src/text_editor.rs
+			[文档] docs/architecture/file-drag-drop.md、docs/architecture/context-menu.md
+	10 搜索与索引
+		搜索入口
+			当前分栏搜索
+			全局名称搜索
+			全局内容搜索
+			名称 / 内容模式切换
+		索引架构
+			名称索引
+			内容索引
+			Tantivy 字段与查询
+			候选文件再精确匹配
+		增量与范围
+			USN Journal 增量变更
+			notify 文件变化监听
+			当前目录 / 收藏 / 本地磁盘 / 网络卷范围
+			隐藏项、构建目录、二进制和超限文件排除
+		资源保护
+			低优先级索引线程
+			单写入线程与缓冲上限
+			文件大小 / 索引数量 / 结果数量上限
+			低功耗和内存压力暂停
+		核心能力来源
+			[Rust 库] Tantivy、grep-searcher、ignore、walkdir、notify、sysinfo
+			[Windows API] USN Journal / DeviceIoControl
+			[代码] src/content_search.rs、src/name_index.rs、src/indexed_search.rs
+			[代码] src/global_search_window.rs
+			[文档] docs/architecture/content-search.md
+	11 VCS、Git 与 Diff
+		VCS 状态
+			Git / SVN 状态徽标
+			把状态应用到文件条目
+			工作区根路径与 VCS 可用性
+		Git 服务
+			GitService 统一入口
+			命令执行器
+			结构化错误
+			控制台与输出上限
+			凭据 Askpass Bridge
+		Git 窗口
+			Git Client
+			提交
+			提交历史与提交图
+			分支与标签
+			Stash / Reset / Revert / Cherry-pick
+			Rebase
+			Remote / Fetch / Pull / Push / Clone
+		Diff 与审核
+			Diff Viewer
+			行级暂存
+			类似算法的文本差异
+			Git 事件进度与取消
+		核心能力来源
+			[外部能力] git CLI（不链接 libgit2）
+			[Rust 库] similar、keyring、notify、std::process
+			[代码] src/git/*、src/git_changes.rs、src/git_rebase.rs
+			[代码] src/diff.rs、src/diff_viewer_window.rs、src/git_client_window.rs
+			[文档] docs/architecture/git-client.md
+	12 Agent 集成
+		Agent Core
+			AgentProfileStore
+			配置校验与原子持久化
+			Keychain / Credential Manager 凭据
+			AgentSession 状态机
+		ACP 会话
+			JSON-RPC over stdio
+			initialize / session/new / session/prompt
+			流式 session/update
+			权限请求与结构化回复
+			取消、超时、进程树清理
+		Agent 表面
+			右侧 Agent 面板
+			独立 Agent 窗口
+			右键“使用 Agent”菜单
+			上下文快照与工作目录
+			会话恢复
+		结果审核
+			结构化回答 / 引用 / 文件修改
+			unified diff
+			应用前哈希重校验
+			审计只记录元数据
+		核心能力来源
+			[Rust 库] uniffi、keyring、std::process、similar
+			[协议] ACP / JSON-RPC over stdio
+			[代码] src/agent/*、src/agent_review.rs、src/agent_panel.rs
+			[代码] src/bin/kite-cli.rs、src/bin/kite-mcp.rs
+			[文档] docs/architecture/agent-integration.md、agent-session.md、agent-result-review.md
+	13 Windows 平台集成
+		Shell 命名空间
+			IShellItem / IEnumShellItems
+			WPD / MTP 设备
+			设备路径与本地文件路径区分
+		系统右键菜单
+			ContextMenuTarget
+			ContextMenuModel
+			MenuProvider
+			Action Envelope
+			Kite 原生菜单 + Windows Shell 扩展
+		COM 与重入安全
+			后台线程 CoInitializeEx
+			IContextMenu2 / IContextMenu3 消息转发
+			PostMessageW 延迟原生菜单
+			避免在 GPUI update 中嵌套 Windows 消息循环
+		系统能力
+			Explorer 文件剪贴板
+			OLE 拖放
+			回收站
+			默认文件管理器
+			更新器与开始菜单快捷方式
+		核心能力来源
+			[Windows API] Win32、COM、Shell、DataExchange、OLE、Storage
+			[Rust 库] windows、windows-sys、winreg、keyring
+			[代码] src/context_menu/mod.rs、src/context_menu/windows.rs
+			[代码] src/file_clipboard.rs、src/shell_fs.rs、src/explorer_integration.rs
+			[文档] docs/architecture/context-menu.md、default-file-manager.md、file-drag-drop.md
+	14 共享 Rust Core 与跨语言边界
+		Core 约束
+			不依赖 GPUI / SwiftUI / AppKit
+			领域规则、状态机、持久化和副作用收敛
+			UI 只做输入适配、调用编排和展示
+		UniFFI 边界
+			Record：跨语言数据传输
+			Enum：稳定状态与错误分类
+			Object：可持有服务、任务和监视器
+			Callback interface：Git 事件与凭据回调
+		Core API
+			CoreRequest / CoreResult / CoreError
+			ExecutionContext
+			trace_id / deadline / idempotency_key
+			read_only / confirmed
+			Tool / Resource / Prompt 注册
+		多端入口
+			GPUI UI
+			SwiftUI UI
+			kite-cli
+			kite-mcp
+		核心能力来源
+			[库] uniffi 0.32.2
+			[代码] src/ffi.rs、src/core_api.rs
+			[代码] src/bin/kite-cli.rs、src/bin/kite-mcp.rs
+			[文档] docs/architecture/platforms.md、core-api.md
+	15 工程化、验证与复用结论
+		测试与验收
+			纯函数与状态机测试
+			分栏行为和选择测试
+			Agent fixture 集成测试
+			CLI / MCP 测试
+			Windows 真机截图与 UI Automation
+		持续集成与发布
+			Windows CI
+			Clippy
+			Release build
+			浏览器拖拽 E2E
+			发布包与 SHA-256
+			Windows / macOS 发布对齐
+		性能与可靠性
+			首内容渲染 perf trace
+			启动、目录加载、搜索、Git 性能场景
+			原子写入、哈希校验、回滚
+			取消、超时、错误恢复
+			资源上限和低功耗策略
+		可复用模式
+			Window Shell / Tab View 分层
+			Entity 持有子 Entity
+			TableDelegate 适配业务数据
+			Provider 组合右键菜单
+			Generation token 丢弃旧结果
+			Task 字段管理异步生命周期
+			UI 与 Core 严格分层
+		风险与重构机会
+			KiteApp 约 1.25 万行，编排职责过多
+			ffi.rs 约 5300 行，跨语言出口较大
+			建议拆分 NavigationState / ColumnBrowserState / SearchState
+			建议拆分 PreviewState / FileOperationState / GitWorkflowState
+			建议拆分 AgentSurfaceState / DialogState
+		核心能力来源
+			[代码] src/app.rs、src/ffi.rs、src/tests 与 tests/
+			[脚本] .github/workflows/*、build.ps1、scripts/performance/
+			[文档] docs/performance/*、docs/architecture/release-parity.md
+			[项目实践] 以真实功能链路验证 GPUI、异步和系统桥接

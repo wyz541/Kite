@@ -1,0 +1,3019 @@
+Kite × Rust GPUI 工程能力地图
+	00 量化口径
+		源码参数
+			尺寸、超时、上限、debounce 来自当前工作区源码常量
+			统计时间：2026-11-26
+		结构数量
+			模块、类型、窗口、Task、generation 等数量来自当前工作区静态扫描
+			统计值会随代码变化，适合作为当前版本基线
+		性能数据
+			功能性能来自 docs/performance v0.6.61 release 基线
+			Agent 性能来自 docs/performance/agent-v0.6.94.md
+		无固定上限
+			没有硬编码上限时会明确标注，不补推测值
+			历史、选择、栏数等结构性能力按实际行为说明
+		代码关键词图例
+			... 表示省略重复参数、分支和中间步骤
+			→ 表示主要调用顺序，不代表唯一执行路径
+			:: 表示 Rust 模块、类型或关联函数路径
+	01 项目定位与边界
+		主题概览
+			一句话定位
+				先看清 Kite 是什么，以及为什么它不是一套 UI 跑遍所有平台。
+			学完能回答
+				哪些能力由两端共享？Windows 和 macOS 各负责什么？
+		产品定位
+			本地优先的跨平台原生文件管理器
+			分栏导航、预览、搜索、文件操作在同一工作区
+		架构定位
+			共享 Rust Core
+			Windows：Rust + GPUI
+				Windows
+					作用：目标操作系统
+					Kite 中：Windows 10/11 x64
+				Rust
+					作用：实现语言和跨平台核心
+					Kite 中：Core、GPUI 前端和系统桥
+				GPUI
+					作用：Rust 原生桌面 UI 框架
+					Kite 中：Windows Kite 界面
+			macOS：SwiftUI + AppKit
+				macOS
+					作用：目标操作系统
+					Kite 中：macOS 13+ Apple Silicon
+				SwiftUI
+					作用：声明式原生界面
+					Kite 中：窗口、分栏、搜索和设置
+				AppKit
+					作用：调用 macOS 系统能力
+					Kite 中：Finder、Quick Look、菜单和剪贴板
+			两端共享领域能力，不共享 UI 渲染器
+		设计原则
+			macOS 作为视觉与交互基准
+			Windows GPUI 实现同一产品语义
+			路径先于装饰，状态先于品牌，反馈先于动画
+			可逆性优先：历史、回收站、会话恢复、确认
+		核心能力来源
+			设计文档
+				README.md
+				docs/design/manifesto.md
+				docs/architecture/platforms.md
+			项目配置
+				Cargo.toml
+		能力说明
+			Rust Core
+				是什么
+					一个不依赖任何 UI 框架的 Rust 业务核心，输出 rlib、staticlib 和 cdylib。
+				能做什么
+					负责文件、搜索、VCS、会话、Agent、更新等业务规则和副作用。
+				在 Kite 中的用法
+					Windows GPUI 直接依赖它；macOS SwiftUI 通过 UniFFI 调用它；CLI 和 MCP 也复用它。
+				一句类比
+					同一间后厨，给不同前厅供应同一套菜。
+				项目关键数值
+					顶层 Rust 模块：33 个 pub mod
+					产物类型：rlib / staticlib / cdylib，共 3 种
+					跨端复用入口：GPUI、SwiftUI、CLI、MCP，共 4 个外壳
+				核心代码关键词
+					关键词
+						pub mod fs/git/agent/search/...
+						crate-type = [rlib, staticlib, cdylib]
+						uniffi::setup_scaffolding!()
+					过程
+						领域模块 ...
+						→ lib.rs 导出 ...
+						→ UI/Swift/CLI/MCP 复用
+			原生 UI Shell
+				是什么
+					每个平台用符合系统习惯的界面技术实现窗口、菜单、布局和交互。
+				能做什么
+					负责展示、输入、焦点、主题和系统交互，不复制核心业务状态机。
+				在 Kite 中的用法
+					Windows 用 Rust + GPUI；macOS 用 SwiftUI + AppKit。
+				一句类比
+					两套装修风格不同的前厅，共用同一后厨。
+				项目关键数值
+					平台 UI：Windows GPUI + macOS SwiftUI/AppKit，共 2 套
+					Windows 窗口文件：14 个 *window*.rs
+					Render 实现：18 个
+				核心代码关键词
+					关键词
+						#[cfg(windows)] mod app/tabs/...
+						gpui_kit::application()
+						SwiftUI + AppKit
+					过程
+						main ...
+						→ init ...
+						→ Window
+						→ Render
+	02 技术架构与依赖总览
+		主题概览
+			一句话定位
+				项目由领域层、跨语言层、UI 外壳层和系统适配层共同组成。
+			学完能回答
+				GPUI 在哪里？为什么 Swift 能调用 Rust？Win32 能力从哪里进入？
+		核心分层
+			业务核心：fs / search / VCS / Agent / session
+				fs
+					作用：读取目录、文件元数据并执行文件操作
+					Kite 中：主窗口、分栏、预览和文件操作
+				search
+					作用：按名称或内容查找文件
+					Kite 中：全局搜索和分栏搜索
+				VCS
+					作用：读取 Git/SVN 状态并执行版本控制操作
+					Kite 中：文件状态徽标和 Git 客户端
+				Agent
+					作用：管理外部 Agent 的配置、会话、权限和审核
+					Kite 中：Agent 面板、窗口和右键入口
+				session
+					作用：保存和恢复页签、路径及窗口状态
+					Kite 中：启动恢复和关闭保存
+			跨语言接口：UniFFI records / enums / objects / callbacks
+				Record
+					作用：跨语言传输普通结构体数据
+					Kite 中：目录、文件、Git、Agent 结果 DTO
+				Enum
+					作用：跨语言表达固定状态和错误分类
+					Kite 中：Agent 状态、Git 错误、操作类型
+				Object
+					作用：让 Swift 长期持有 Rust 服务对象
+					Kite 中：GitService、AgentSession、进度监视器
+				Callback
+					作用：让 Rust 反向调用 UI 提供的处理函数
+					Kite 中：Git 事件、凭据请求、Agent 事件
+			多端外壳：GPUI / SwiftUI / CLI / MCP
+				GPUI
+					作用：Windows 原生桌面界面
+					Kite 中：主窗口、设置、搜索、Git、Agent 窗口
+				SwiftUI
+					作用：macOS 原生桌面界面
+					Kite 中：macOS Kite 全部 UI
+				CLI
+					作用：在终端调用 Core 能力
+					Kite 中：自动化脚本、调试和回归测试
+				MCP
+					作用：向外部 AI 客户端暴露 Core 工具和资源
+					Kite 中：kite-mcp 服务
+		Windows 前端组成
+			src/main.rs：进程入口和首个窗口
+			src/tabs.rs：窗口壳与多页签
+			src/app.rs：单页签主界面和业务编排
+			src/*_window.rs：设置、搜索、预览、Git、Agent 等独立窗口
+			Win32 / COM / Shell / WPD 适配层
+				Win32
+					作用：调用 Windows 原生窗口、文件和系统 API
+					Kite 中：窗口消息、文件属性、设备枚举
+				COM
+					作用：通过统一接口持有 Windows 系统对象
+					Kite 中：Shell 菜单、剪贴板、拖放
+				Shell
+					作用：访问资源管理器命名空间和系统扩展
+					Kite 中：文件菜单、WPD 设备浏览
+				WPD
+					作用：浏览手机、相机等便携设备
+					Kite 中：设备侧边栏和 Shell 命名空间
+		编译边界
+			windows-ui feature 控制 GPUI 二进制
+			cfg(windows) 控制 Windows UI 模块
+			agent-fixture 控制 Agent 测试夹具
+			performance 控制性能测试工具
+		核心能力来源
+			框架与跨语言
+				gpui-kit 0.8.0
+				uniffi 0.32.2
+			Windows 依赖
+				windows 0.62.2
+				windows-sys 0.61
+			项目代码
+				Cargo.toml
+				src/lib.rs
+				src/main.rs
+			设计文档
+				docs/architecture/core-api.md
+		能力说明
+			GPUI
+				是什么
+					用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+				能做什么
+					创建窗口、渲染元素、处理键鼠、管理焦点、订阅状态和运行异步任务。
+				在 Kite 中的用法
+					Windows 端的主窗口、设置、全局搜索、Git、Agent、Diff 等窗口都基于它。
+				一句类比
+					用 Rust 写的界面积木系统。
+				项目关键数值
+					项目通过 gpui-kit 0.8.0 使用 GPUI
+					底层 gpui 版本：0.2.2
+					Windows 窗口文件：14 个；Render 实现：18 个
+				核心代码关键词
+					关键词
+						Entity
+						Context
+						Render
+						WindowOptions
+						gpui_kit::open_window
+					过程
+						Application ...
+						→ Window
+						→ Entity ...
+						→ Render ...
+						→ Element
+			gpui-kit
+				是什么
+					对 GPUI、基础层、组件库和资源的统一门面，项目通过它使用 GPUI。
+				能做什么
+					提供 Button、Input、DataTable、Menu、Scroll、Progress、Resizable 等成品组件。
+				在 Kite 中的用法
+					项目统一 `use gpui_kit::*`，并依靠组件库快速组合复杂桌面界面。
+				一句类比
+					GPUI 是毛坯房，gpui-kit 是预装家具和工具箱。
+				项目关键数值
+					版本：0.8.0
+					已列组件与接口：15 个
+					Button 调用点：277 个；PopupMenu 引用：62 个
+				核心代码关键词
+					关键词
+						use gpui_kit::*
+						gpui_kit::init(cx)
+						Button
+						InputState
+						DataTable
+						PopupMenu
+					过程
+						init ...
+						→ 组件状态 ...
+						→ on_click / on_action ...
+						→ Render
+			UniFFI
+				是什么
+					把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+				能做什么
+					跨语言传 Record、Enum，持有 Object，接收回调，并把 Rust 能力暴露给 Swift。
+				在 Kite 中的用法
+					macOS SwiftUI 通过 UniFFI 调用目录、搜索、Git、Agent、更新等 Core 能力。
+				一句类比
+					Rust 和 Swift 之间的标准插头和插座。
+				项目关键数值
+					版本：0.32.2
+					Record：95 个；Enum：34 个
+					Object：6 个；export 块：9 个
+				核心代码关键词
+					关键词
+						uniffi::setup_scaffolding!()
+						#[uniffi::export]
+						uniffi::Record
+						Enum
+						Object
+						callback_interface
+					过程
+						Rust DTO ...
+						→ UniFFI 绑定 ...
+						→ Swift 调用
+			windows / windows-sys
+				是什么
+					Rust 调用 Windows 原生 API 的绑定 crate。
+				能做什么
+					访问 Win32、COM、Shell、剪贴板、文件属性、设备、更新和窗口消息。
+				在 Kite 中的用法
+					右键菜单、拖放、回收站、WPD/MTP、USN Journal、默认文件管理器都依赖它。
+				一句类比
+					连接 Windows 操作系统的原厂接口。
+				项目关键数值
+					绑定 crate：windows 0.62.2 + windows-sys 0.61
+					发布目标：Windows 10/11 x64
+					主要桥接域：Win32、COM、Shell、WPD，共 4 类
+				核心代码关键词
+					关键词
+						windows::Win32::*
+						windows::core::{Interface, PCWSTR, BOOL}
+						CoInitializeEx
+					过程
+						Rust ...
+						→ COM 接口 ...
+						→ Win32 调用 ...
+						→ Drop 清理
+	03 GPUI 启动与窗口生命周期
+		主题概览
+			一句话定位
+				GPUI 应用先启动 Application，再初始化组件与主题，然后打开 Window，窗口里放 View Entity。
+			学完能回答
+				从进程启动到 Kite 窗口出现，中间依次发生了什么？
+		进程启动
+			Windows GUI subsystem
+			perf_trace::start
+				perf_trace::start
+					作用：启动性能事件记录
+					Kite 中：测量进程启动到首窗口/首内容渲染
+			file_clipboard::trace_drag
+				trace_drag
+					作用：记录文件拖放诊断信息
+					Kite 中：排查 Explorer 拖放失败
+		应用初始化
+			gpui_kit::application()
+			.with_assets(AllAssets)
+			.run(|cx| ...)
+			gpui_kit::init(cx)
+		应用级配置
+			读取 UI Preferences
+			Light / Dark / System 主题
+				Light
+					作用：固定使用浅色主题
+					Kite 中：设置中的浅色外观
+				Dark
+					作用：固定使用深色主题
+					Kite 中：设置中的深色外观
+				System
+					作用：跟随操作系统外观
+					Kite 中：启动时读取系统主题
+			KiteApp::bind_keys
+				bind_keys
+					作用：把快捷键注册到 GPUI 的动作系统
+					Kite 中：导航、搜索、页签、文件操作快捷键
+			KiteApp::install_menus
+				install_menus
+					作用：安装应用和窗口菜单
+					Kite 中：文件、编辑、视图、Kite 菜单
+		窗口创建
+			WindowOptions + TitlebarOptions
+				WindowOptions
+					作用：描述窗口整体配置
+					Kite 中：窗口尺寸、位置、标题和显示属性
+				TitlebarOptions
+					作用：描述标题栏是否显示和显示什么
+					Kite 中：主窗口和各独立窗口标题
+			WindowBounds::centered
+				centered
+					作用：按给定尺寸创建居中窗口
+					Kite 中：主窗口和独立窗口初始位置
+			gpui_kit::open_window
+				open_window
+					作用：创建系统窗口并放入一个 View Entity
+					Kite 中：Kite 的所有 GPUI 窗口
+			KiteWindow::new
+				new
+					作用：创建窗口根 View 并恢复会话/页签
+					Kite 中：Kite 主窗口启动
+		窗口层级
+			KiteWindow：一个 OS 窗口
+			KiteApp：一个页签内容
+			独立功能窗口：设置、搜索、Git、Agent、Diff 等
+		核心能力来源
+			框架 API
+				gpui_kit::application
+				gpui_kit::init
+				gpui_kit::open_window
+			框架类型
+				WindowOptions
+				WindowBounds
+				TitlebarOptions
+			项目代码
+				src/main.rs
+				src/tabs.rs
+				src/settings_window.rs
+				src/global_search_window.rs
+				src/agent_window.rs
+		能力说明
+			gpui_kit::application
+				是什么
+					启动 GPUI 应用和平台事件循环的入口。
+				能做什么
+					加载应用资源、进入 run 回调、管理窗口和进程生命周期。
+				在 Kite 中的用法
+					`src/main.rs` 用它启动 Kite，并在回调里初始化主题、快捷键和菜单。
+				一句类比
+					打开总控台，启动整栋大楼。
+				项目关键数值
+					应用事件循环：1 个
+					主窗口初始尺寸：1240 × 800
+					窗口创建入口：18 个 open_window 调用点
+				核心代码关键词
+					关键词
+						gpui_kit::application().with_assets(...).run(|cx| ...)
+					过程
+						application() ...
+						→ init(cx) ...
+						→ Theme/bind_keys/install_menus ...
+						→ open_window
+			gpui_kit::init
+				是什么
+					初始化 GPUI Kit 的基础层、组件库和主题系统。
+				能做什么
+					注册输入、菜单、表格、主题等基础能力，让后续窗口能正常使用组件。
+				在 Kite 中的用法
+					每个 GPUI 应用启动时调用一次。
+				一句类比
+					给前厅通电、开灯、摆好桌椅。
+				项目关键数值
+					启动调用次数：1 次
+					外观模式：Light / Dark / System，共 3 种
+					初始化层级：GPUI 基础层 + 组件库 + 资产
+				核心代码关键词
+					关键词
+						gpui_kit::init(cx)
+						Theme::change(mode, None, cx)
+					过程
+						init(cx) ...
+						→ 主题/组件注册 ...
+						→ KiteWindow
+			gpui_kit::open_window
+				是什么
+					创建新的操作系统窗口，并把一个实现 Render 的 Entity 放进去。
+				能做什么
+					设置窗口标题和尺寸，返回窗口句柄与内容 Entity，供后续更新和关闭。
+				在 Kite 中的用法
+					主窗口和所有独立功能窗口都通过它创建。
+				一句类比
+					开一扇新窗口，并指定由哪个页面负责。
+				项目关键数值
+					调用点：18 个
+					窗口尺寸范围：560×320 到 1280×820
+					主窗口：1240×800；设置窗口：760×560
+				核心代码关键词
+					关键词
+						gpui_kit::open_window(WindowOptions { ... }, cx, |window, cx| ...)
+					过程
+						WindowOptions ...
+						→ open_window ...
+						→ cx.new(|cx| KiteWindow::new(...))
+			WindowOptions / WindowBounds
+				是什么
+					描述窗口标题栏、尺寸、位置和显示方式的数据结构。
+				能做什么
+					决定窗口大小、是否居中、标题栏样式以及初始位置。
+				在 Kite 中的用法
+					Kite 主窗口使用 1240×800 居中窗口，各独立窗口使用不同尺寸。
+				一句类比
+					新房子的户型单。
+				项目关键数值
+					主窗口：1240×800
+					常用独立窗口：560×320 ～ 1280×820
+					最小窗口示例：设置 680×500；搜索 720×520
+				核心代码关键词
+					关键词
+						titlebar: Some(TitlebarOptions { ... })
+						window_bounds: Some(WindowBounds::centered(...))
+						window_min_size
+					过程
+						WindowOptions { ... } ...
+						→ open_window
+			KiteWindow
+				是什么
+					主窗口根 Entity，负责管理窗口里的多个页签。
+				能做什么
+					创建、关闭、切换页签，共享剪贴板，保存会话，更新窗口标题和焦点。
+				在 Kite 中的用法
+					一个 KiteWindow 内持有多个 KiteApp，活动 KiteApp 显示在页签区域。
+				一句类比
+					浏览器窗口的总台，负责管理多个标签页。
+				项目关键数值
+					会话保存页签上限：64 个
+					活动页签：1 个
+					共享文件剪贴板：1 份
+				核心代码关键词
+					关键词
+						restore_session
+						persist_session
+						tabs: Vec<TabEntry>
+						active_after_close(...)
+					过程
+						load_session ...
+						→ new_restored ...
+						→ active tab ...
+						→ save_session
+	04 GPUI 编程模型
+		主题概览
+			一句话定位
+				GPUI 的核心写法是：Entity 存状态，Context 改状态，Render 画界面，Action 和 Subscription 接事件。
+			学完能回答
+				为什么状态变化会引发重绘？页面之间如何通信？
+		Entity 与 Context
+			Entity<T>：可观察状态对象
+				Entity<T>
+					作用：保存可观察状态并允许安全更新
+					Kite 中：页面、输入框、表格和 Agent 面板
+			Context<T>：update / notify / spawn / subscribe
+				update
+					作用：修改 Entity 状态
+					Kite 中：点击、菜单、异步结果回写
+				notify
+					作用：请求界面重绘
+					Kite 中：状态变化后刷新视图
+				spawn
+					作用：创建异步 UI 任务
+					Kite 中：加载目录、搜索、Git 事件
+				subscribe
+					作用：监听其他 Entity 或事件
+					Kite 中：页签请求、Agent 事件、子组件变化
+			cx.new：创建子 Entity
+				cx.new
+					作用：在当前 GPUI 应用中创建子状态对象
+					Kite 中：InputState、TableState、AgentPanel
+			this.update / this.update_in：异步结果回到 UI
+				this.update
+					作用：在异步任务中更新 Entity
+					Kite 中：后台结果写回普通状态
+				this.update_in
+					作用：同时使用窗口上下文更新 Entity
+					Kite 中：输入框设值、焦点和窗口相关操作
+		Render
+			用 Rust 组合元素树
+			render 读取最新状态
+			条件组合：when / when_some
+				when
+					作用：根据布尔条件决定是否加入元素
+					Kite 中：显示或隐藏搜索栏、提示条
+				when_some
+					作用：在 Option 有值时加入元素并取用值
+					Kite 中：错误提示、Git 信息和更新横幅
+			子窗口通过 Entity 嵌入元素树
+		Element DSL
+			div / h_flex / v_flex
+				div
+					作用：通用盒模型容器
+					Kite 中：普通布局、背景和边框
+				h_flex
+					作用：水平 flex 容器
+					Kite 中：工具栏、按钮组、分栏
+				v_flex
+					作用：垂直 flex 容器
+					Kite 中：窗口根布局、侧边栏、状态栏
+			flex_1 / w_full / h_full / min_w_0
+				flex_1
+					作用：占满剩余空间
+					Kite 中：主内容区和可伸缩区域
+				w_full
+					作用：让元素占满父容器宽度
+					Kite 中：工具栏、表格和横幅
+				h_full
+					作用：让元素占满父容器高度
+					Kite 中：分栏和侧边栏
+				min_w_0
+					作用：允许子元素缩到更小，避免 flex 溢出
+					Kite 中：长路径、长文件名和窄窗口
+			gap / padding / border / rounded / overflow
+				gap
+					作用：设置子元素之间的间距
+					Kite 中：工具栏按钮、分栏和卡片
+				padding
+					作用：设置容器内边距
+					Kite 中：工具栏、弹窗和面板
+				border
+					作用：绘制边框
+					Kite 中：分栏、输入区和分隔区域
+				rounded
+					作用：设置圆角
+					Kite 中：按钮、面板和弹窗
+				overflow
+					作用：控制内容超出时裁剪或滚动
+					Kite 中：表格、长文本和横向分栏
+			bg / text_color / theme token
+				bg
+					作用：设置背景色
+					Kite 中：面板、侧边栏、状态栏
+				text_color
+					作用：设置文字颜色
+					Kite 中：标题、说明和错误文字
+				theme token
+					作用：复用主题定义的颜色和状态
+					Kite 中：明暗主题和全局视觉一致性
+		组件库
+			Button / Switch / Progress
+				Button
+					作用：触发命令或提交动作
+					Kite 中：返回、刷新、搜索、设置、Git 操作
+				Switch
+					作用：切换开/关状态
+					Kite 中：自动 Fetch、设置项和预览开关
+				Progress
+					作用：显示任务完成度和状态
+					Kite 中：更新下载、压缩、索引和 Git 操作
+			Input / Textarea / Editor / TextView
+				Input
+					作用：单行文本输入
+					Kite 中：路径、搜索词、文件名和用户名
+				Textarea
+					作用：多行纯文本输入
+					Kite 中：环境变量、提交说明和长文本配置
+				Editor
+					作用：带状态和编辑能力的多行编辑器
+					Kite 中：提交信息、Agent 结果和文本编辑
+				TextView
+					作用：只读文本或富文本展示
+					Kite 中：日志、代码、Markdown 和 Agent 回答
+			DataTable / TableDelegate
+				DataTable
+					作用：显示列、行、排序和选择的高性能表格视图
+					Kite 中：文件列表和部分 Git 列表
+				TableDelegate
+					作用：把业务数据适配成表格列、行、排序和菜单
+					Kite 中：FileTableDelegate 渲染文件条目
+			PopupMenu / DropdownMenu / ContextMenuExt
+				PopupMenu
+					作用：显示浮动的菜单项列表
+					Kite 中：排序、筛选、分组和操作菜单
+				DropdownMenu
+					作用：把下拉菜单绑定到触发元素
+					Kite 中：范围选择、分支选择和操作按钮
+				ContextMenuExt
+					作用：给元素扩展右键菜单能力
+					Kite 中：文件行、目录栏和预览区右键菜单
+			ScrollableElement / Scrollbar / Resizable
+				ScrollableElement
+					作用：让容器支持滚动和滚动位置跟踪
+					Kite 中：表格、文本和结果列表
+				Scrollbar
+					作用：显示可拖动滚动条
+					Kite 中：分栏、列表和长文本视图
+				Resizable
+					作用：提供可拖动调整尺寸的面板
+					Kite 中：Git 客户端的左右/上下分栏
+		交互模型
+			actions! 宏声明命令
+				actions!
+					作用：批量声明可绑定快捷键和菜单的命令类型
+					Kite 中：打开设置、返回、刷新、复制、Git 操作
+			key_context 与 focus_handle
+				key_context
+					作用：定义快捷键生效的上下文范围
+					Kite 中：Kite 主窗口和 Git 窗口快捷键
+				focus_handle
+					作用：标识当前焦点对象并控制键盘输入
+					Kite 中：窗口、表格、输入框和弹窗
+			on_action / capture_key_down / listener
+				on_action
+					作用：把 Action 绑定到处理函数
+					Kite 中：快捷键和菜单命令
+				capture_key_down
+					作用：在元素层提前捕获按键事件
+					Kite 中：全局快捷键和搜索框特殊按键
+				listener
+					作用：把 UI 事件转换为 Entity 回调
+					Kite 中：按钮点击、输入提交、菜单选择
+			Entity observation / EventEmitter / Subscription
+				Entity observation
+					作用：父实体监听子实体变化
+					Kite 中：KiteWindow 观察 KiteApp
+				EventEmitter
+					作用：子实体向父实体发送明确事件
+					Kite 中：TabRequest 的新建、关闭和切换
+				Subscription
+					作用：保存订阅关系并随生命周期释放
+					Kite 中：页签订阅和组件事件订阅
+		核心能力来源
+			框架能力
+				GPUI
+				gpui-kit component
+			GPUI 原语
+				Entity
+				Context
+				Render
+				Task
+				Subscription
+			项目代码
+				src/actions.rs
+				src/app.rs
+				src/table.rs
+				src/tabs.rs
+		能力说明
+			Entity
+				是什么
+					可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+				能做什么
+					保存状态、通知观察者变化、被父子组件持有，并能在异步结果回来后安全更新。
+				在 Kite 中的用法
+					KiteWindow、KiteApp、InputState、TableState、AgentPanel 都是 Entity。
+				一句类比
+					一个会通知观众“我变了”的数据盒子。
+				项目关键数值
+					Windows Render 实现：18 个
+					KiteApp 长任务字段：13 个
+					状态对象覆盖：页面、输入框、表格、Agent 面板
+				核心代码关键词
+					关键词
+						Entity<T>
+						cx.new(|cx| ...)
+						cx.observe_in(...)
+						this.update_in(cx, ...)
+					过程
+						state ...
+						→ Entity ...
+						→ update/observe ...
+						→ notify
+			Context
+				是什么
+					操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+				能做什么
+					调用 update、notify、spawn、subscribe、observe，访问窗口和焦点。
+				在 Kite 中的用法
+					所有点击回调、渲染辅助函数、异步回写都使用 Context。
+				一句类比
+					控制当前页面和数据的遥控器。
+				项目关键数值
+					核心操作：update / notify / spawn / subscribe，共 4 类
+					KiteApp 中 notify 调用点：191 个
+					异步回写入口：update / update_in，共 2 种
+				核心代码关键词
+					关键词
+						cx.notify()
+						cx.spawn_in(window, ...)
+						cx.subscribe_in(...)
+						window.defer(...)
+					过程
+						listener ...
+						→ state update ...
+						→ notify ...
+						→ Render
+			Render
+				是什么
+					把 Entity 的当前状态转换成元素树的 trait。
+				能做什么
+					状态变化后重新读取数据，组合出最新界面。
+				在 Kite 中的用法
+					KiteWindow、KiteApp 和每个独立窗口都实现 Render。
+				一句类比
+					按当前数据重新摆一遍家具。
+				项目关键数值
+					Render 实现：18 个
+					最大单文件实现：src/app.rs，12,515 行
+					主窗口渲染层级：窗口壳 → 页签 → 工作区 → 面板
+				核心代码关键词
+					关键词
+						impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
+					过程
+						render ...
+						→ v_flex().child(...) ...
+						→ element tree
+			Element DSL
+				是什么
+					用 `div`、`h_flex`、`v_flex` 和链式样式方法描述界面的 Rust DSL。
+				能做什么
+					布局、设置间距、边框、颜色、尺寸、溢出、条件显示和事件绑定。
+				在 Kite 中的用法
+					Kite 的工具栏、侧边栏、分栏、状态栏、弹窗全部用它组合。
+				一句类比
+					用代码搭积木。
+				项目关键数值
+					基础容器：div / h_flex / v_flex，共 3 个
+					主界面布局常量：27 个
+					常用布局维度：尺寸、间距、边框、圆角、溢出、颜色
+				核心代码关键词
+					关键词
+						div()
+						h_flex()
+						v_flex()
+						.flex_1()
+						.w_full()
+						.gap(...)
+						.child(...)
+					过程
+						容器 ...
+						→ 子元素 ...
+						→ when_some(...) ...
+						→ element tree
+			Action / Subscription
+				是什么
+					Action 表示键盘或菜单命令；Subscription 表示实体之间的观察和订阅关系。
+				能做什么
+					把用户操作路由到处理函数，并在子实体变化时更新父实体。
+				在 Kite 中的用法
+					快捷键、页签命令、KiteWindow 观察 KiteApp 都使用这套机制。
+				一句类比
+					Action 是按钮，Subscription 是连接按钮和设备的电线。
+				项目关键数值
+					Action 类型：62 个
+					页签请求类型：New / Close / Next / Previous，共 4 个
+					每个页签建立窗口观察订阅：1 个
+				核心代码关键词
+					关键词
+						actions!(kite, [...])
+						on_action(cx.listener(...))
+						EventEmitter<TabRequest>
+						cx.subscribe_in
+					过程
+						KeyDown / Click ...
+						→ Action/listener ...
+						→ state ...
+						→ notify
+	05 状态模型与数据流
+		主题概览
+			一句话定位
+				Kite 的状态分层为：窗口壳状态、页签页面状态、子 Entity 状态和 Rust Core 领域状态。
+			学完能回答
+				一个用户操作如何从点击变成状态变化，再变成新界面？
+		状态所有权
+			KiteWindow：页签集合、活动页签、共享剪贴板
+			KiteApp：单页签导航、列表/分栏、搜索、预览、Git、Agent 编排
+			子 Entity：InputState、TableState、AgentPanel
+			Rust Core：领域状态、持久化、外部进程与索引
+		状态分组
+			导航：current_dir / history / history_index
+				current_dir
+					作用：当前显示的目录
+					Kite 中：面包屑、当前栏和路径栏
+				history
+					作用：访问过的路径列表
+					Kite 中：返回和前进
+				history_index
+					作用：当前位于历史列表的位置
+					Kite 中：判断能否返回/前进
+			列表与分栏：TableState / column_panes / selection
+				TableState
+					作用：列表视图的表格状态
+					Kite 中：文件列表、排序和选中项
+				column_panes
+					作用：分栏视图的目录链
+					Kite 中：多栏路径浏览
+				selection
+					作用：当前选中文件和目录
+					Kite 中：预览、批量操作和右键菜单
+			反馈：loading / error / notice / skipped
+				loading
+					作用：当前任务加载中
+					Kite 中：读取目录、搜索和预览
+				error
+					作用：当前不可恢复或可展示错误
+					Kite 中：状态栏和错误视图
+				notice
+					作用：一次性操作提示
+					Kite 中：复制成功、Git 操作结果
+				skipped
+					作用：被跳过且无法读取的项目数量
+					Kite 中：目录扫描结果提示
+			异步协调：generation / Task / cancel flag
+				generation
+					作用：区分新旧异步请求
+					Kite 中：目录、搜索、VCS 和预览
+				Task
+					作用：持有并管理异步任务
+					Kite 中：加载、搜索、Git 和监听任务
+				cancel flag
+					作用：通知长任务尽快停止
+					Kite 中：搜索和 VCS 取消
+			工作流：modal / git_dialog / active_git_operation / Agent
+				modal
+					作用：阻塞式输入弹窗
+					Kite 中：新建、重命名、提交和凭据
+				git_dialog
+					作用：Git 专用弹窗状态
+					Kite 中：推送、克隆和远程管理
+				active_git_operation
+					作用：正在执行的 Git 长任务
+					Kite 中：Fetch、Pull、Push 和 Clone
+				Agent
+					作用：Agent 面板和会话状态
+					Kite 中：对话、权限和结果审核
+			持久化：session / ui_preferences / favorites
+				session
+					作用：页签、路径和窗口状态
+					Kite 中：启动恢复
+				ui_preferences
+					作用：主题、列宽和视图偏好
+					Kite 中：设置和布局恢复
+				favorites
+					作用：收藏目录与文件
+					Kite 中：侧边栏收藏
+		标准数据流
+			用户输入 → Action / listener
+				Action
+					作用：可绑定快捷键和菜单的命令对象
+					Kite 中：返回、刷新、打开设置
+				listener
+					作用：接收 UI 事件并调用处理函数
+					Kite 中：鼠标点击和输入提交
+			修改 KiteApp 或子 Entity 状态
+			需要 I/O 时创建 Task
+			background_spawn 执行阻塞工作
+			await 后在 update/update_in 中回写
+			generation 校验过期结果
+			cx.notify 触发 Render
+		跨实体观察
+			KiteWindow observe KiteApp
+			页签变化更新窗口标题和会话
+			TabRequest 事件解耦页签命令
+			共享剪贴板通过 Rc<RefCell<...>> 在页签间复用
+		核心能力来源
+			GPUI 原语
+				Entity
+				Context
+				Render
+				observe
+				subscribe
+			项目代码
+				src/app.rs
+				src/tabs.rs
+				src/session.rs
+				src/ui_preferences.rs
+				src/favorites.rs
+		能力说明
+			KiteApp
+				是什么
+					单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+				能做什么
+					管理当前目录、历史、列表/分栏、搜索、预览、Git 对话和工作流状态。
+				在 Kite 中的用法
+					每个页签创建一个 KiteApp，负责该页签的完整浏览上下文。
+				一句类比
+					一个浏览器标签页的完整工作和记忆。
+				项目关键数值
+					文件规模：12,515 行
+					Task 字段：13 个
+					generation 计数器：7 个
+				核心代码关键词
+					关键词
+						pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
+					过程
+						new_at ...
+						→ request_load ...
+						→ update state ...
+						→ render_*
+			KiteWindow
+				是什么
+					一个操作系统窗口的根 View Entity。
+				能做什么
+					管理页签集合、活动页签、共享文件剪贴板、窗口标题和会话持久化。
+				在 Kite 中的用法
+					它观察各个 KiteApp 的状态变化，并在页签切换时同步标题和剪贴板。
+				一句类比
+					窗口总台，KiteApp 是里面的工作台。
+				项目关键数值
+					会话保存页签上限：64 个
+					活动页签：1 个
+					共享文件剪贴板：1 份
+				核心代码关键词
+					关键词
+						restore_session
+						persist_session
+						tabs: Vec<TabEntry>
+						active_after_close(...)
+					过程
+						load_session ...
+						→ new_restored ...
+						→ active tab ...
+						→ save_session
+			generation token
+				是什么
+					每次异步请求递增的版本号。
+				能做什么
+					判断异步结果是否属于最新请求，防止旧结果覆盖新状态。
+				在 Kite 中的用法
+					目录加载、搜索、VCS、分栏、预览都使用不同 generation。
+				一句类比
+					每次下单发一个号码，只认最新号码的结果。
+				项目关键数值
+					KiteApp generation 计数器：7 个
+					典型场景：目录、搜索、VCS、分栏、预览
+					每次请求递增计数：1 次
+				核心代码关键词
+					关键词
+						*_generation.wrapping_add(1)
+						if this.load_generation != generation { return
+						}
+					过程
+						request ...
+						→ generation++ ...
+						→ await ...
+						→ 相等才回写
+			cx.notify
+				是什么
+					告诉 GPUI 当前 Entity 的状态已经变化，需要重新渲染。
+				能做什么
+					触发 Render 读取最新状态并更新界面。
+				在 Kite 中的用法
+					文件列表、搜索、预览、窗口标题等状态修改后调用。
+				一句类比
+					通知装修队“数据变了，请重新摆一遍”。
+				项目关键数值
+					KiteApp 中 notify 调用点：191 个
+					每次重绘通知：1 次
+					状态变化后触发最新 Render
+				核心代码关键词
+					关键词
+						cx.notify()
+					过程
+						mutate state ...
+						→ notify ...
+						→ Render
+			session / preferences
+				是什么
+					保存页签、路径、布局、主题、收藏等跨启动状态的数据层。
+				能做什么
+					启动时恢复工作区，关闭或修改时保存；路径失效时提供修复。
+				在 Kite 中的用法
+					`session` 保存页签和路径；`ui_preferences` 保存布局和主题；`favorites` 保存收藏。
+				一句类比
+					下班前给桌面拍照，第二天按照片恢复。
+				项目关键数值
+					会话文件上限：2 MiB
+					会话页签上限：64 个
+					偏好文件上限：64 KiB；列规则上限：512 条
+					Git 客户端窗口会话上限：32 个
+				核心代码关键词
+					关键词
+						load_session
+						save_session
+						SessionStateDto
+						SessionTabDto
+						load_ui_preferences
+						save_ui_preferences
+					过程
+						启动 ...
+						→ load ...
+						→ KiteApp 恢复 ...
+						→ 修改后 save
+	06 异步、并发与性能
+		主题概览
+			一句话定位
+				GPUI 主线程只负责编排和渲染，阻塞工作进入后台；Task 管理生命周期，generation 丢弃旧结果。
+			学完能回答
+				为什么界面不会因为读大目录、搜索或 Git 命令而冻结？
+		Task 生命周期
+			Task 存入结构体字段以保证存活
+			替换或丢弃 Task 会取消旧任务
+			Task::ready(()) 用于清空
+				Task::ready(())
+					作用：创建一个立即完成的占位 Task
+					Kite 中：取消或失效后清空任务字段
+			.detach() 用于明确的后台独立任务
+		任务分工
+			cx.spawn / cx.spawn_in：UI 协程
+				cx.spawn
+					作用：创建 UI 异步任务
+					Kite 中：不需要窗口上下文的异步流程
+				cx.spawn_in
+					作用：带窗口上下文创建 UI 异步任务
+					Kite 中：输入框、焦点和窗口相关异步流程
+			cx.background_spawn：阻塞式文件、搜索、Git 工作
+			await 后回到 foreground 更新 Entity
+			window.defer：延后到当前更新之后
+		取消与防旧结果
+			load_generation
+			search_generation / column_search_generation
+				search_generation
+					作用：主搜索请求版本
+					Kite 中：当前目录/全局搜索防旧结果
+				column_search_generation
+					作用：分栏搜索请求版本
+					Kite 中：分栏输入防旧结果
+			vcs_generation / column_generation / preview_generation
+				vcs_generation
+					作用：VCS 查询版本
+					Kite 中：Git/SVN 状态刷新
+				column_generation
+					作用：分栏加载版本
+					Kite 中：切换或刷新目录链
+				preview_generation
+					作用：预览加载版本
+					Kite 中：快速切换文件时丢弃旧预览
+			AtomicBool 搜索取消标记
+			VCS CancellationToken
+		防抖与节流
+			预览加载防抖
+			分栏搜索防抖
+			目录变化自动刷新防抖
+			全局名称查询延迟
+		性能保护
+			后台索引低优先级
+			结果数量与输出长度上限
+			图片预览缓存容量
+			perf_trace 首内容渲染标记
+			性能 JSON 基线与对照
+		核心能力来源
+			GPUI 异步 API
+				Task
+				cx.spawn
+				cx.spawn_in
+				background_spawn
+				window.defer
+			Rust 标准库
+				std::sync::atomic
+				mpsc
+				Arc
+				Mutex
+			项目代码
+				src/file_watcher.rs
+				src/content_search.rs
+				src/name_index.rs
+				src/perf_trace.rs
+			设计文档
+				docs/architecture/auto-refresh.md
+				docs/performance/README.md
+		能力说明
+			cx.spawn / cx.spawn_in
+				是什么
+					创建一个与 UI 上下文关联的异步任务。
+				能做什么
+					等待后台结果，再通过 `update` 或 `update_in` 回到 UI 更新状态。
+				在 Kite 中的用法
+					目录加载、搜索、Git 事件、窗口操作都用它组织前后台流程。
+				一句类比
+					前厅服务员：负责下单和上菜，不亲自做菜。
+				项目关键数值
+					cx.spawn 调用点：40 个
+					cx.spawn_in 调用点：60 个
+					background_spawn 调用点：76 个
+				核心代码关键词
+					关键词
+						cx.spawn(async move |this, cx| ...)
+						cx.spawn_in(window, async move |this, cx| ...)
+					过程
+						spawn ...
+						→ await ...
+						→ this.update_in(...)
+			background_spawn
+				是什么
+					在后台执行阻塞或 CPU 密集任务的入口。
+				能做什么
+					读取目录、扫描文件、查询索引、运行 Git、解码图片。
+				在 Kite 中的用法
+					凡是会卡住 UI 的工作，都包在 `cx.background_spawn` 里执行。
+				一句类比
+					后厨，真正干重活的地方。
+				项目关键数值
+					调用点：76 个
+					执行位置：后台执行器
+					典型任务：目录读取、搜索、Git、预览、索引
+				核心代码关键词
+					关键词
+						cx.background_spawn(async move { load_directory_snapshot(...) }).await
+					过程
+						background_spawn ...
+						→ IO/CPU ...
+						→ await ...
+						→ update_in
+			Task
+				是什么
+					异步任务的句柄，可以存储、等待、取消或分离。
+				能做什么
+					存进结构体字段可保持任务存活；替换或丢弃会取消旧任务；detach 后继续后台运行。
+				在 Kite 中的用法
+					Kite 用 `_load_task`、`_search_task`、`_vcs_task` 等字段管理任务。
+				一句类比
+					订单小票；撕掉小票就等于取消订单。
+				项目关键数值
+					KiteApp Task 字段：13 个
+					整个 src 中 Task 字段：29 个
+					Task 生命周期：持有、替换取消、detach、ready 清空
+				核心代码关键词
+					关键词
+						_load_task: Task<()>
+						self._load_task = cx.spawn_in(...)
+						Task::ready(())
+					过程
+						创建 Task ...
+						→ 字段持有 ...
+						→ 替换/丢弃取消
+			window.defer
+				是什么
+					把一段操作延后到当前 GPUI 更新结束之后执行。
+				能做什么
+					避免在渲染或更新过程中重入窗口、滚动或原生菜单系统。
+				在 Kite 中的用法
+					滚动定位、Git 自动刷新、原生菜单打开等场景使用。
+				一句类比
+					当前这件事做完，再处理下一件。
+				项目关键数值
+					调用点：7 个
+					典型用途：滚动定位、Git 打开、原生菜单
+					执行时机：当前 GPUI 更新返回之后
+				核心代码关键词
+					关键词
+						window.defer(cx, move |window, cx| ...)
+					过程
+						render/update ...
+						→ defer ...
+						→ 当前更新结束后执行
+			debounce
+				是什么
+					把短时间内的多次事件合并成最后一次执行。
+				能做什么
+					减少搜索请求、预览加载、目录刷新和文件监听的抖动。
+				在 Kite 中的用法
+					分栏搜索、预览、目录 watcher 都使用 45ms 到 280ms 的防抖。
+				一句类比
+					电梯门等人，最后一个人进来后再关门。
+				项目关键数值
+					预览防抖：45 ms
+					分栏搜索防抖：180 ms
+					目录自动刷新防抖：180 ms
+					全局名称查询延迟：280 ms
+					索引交互暂停：650 ms
+				核心代码关键词
+					关键词
+						background_executor().timer(Duration::from_millis(...)).await
+					过程
+						高频事件 ...
+						→ debounce timer ...
+						→ 最新一次事件
+			perf_trace
+				是什么
+					项目内记录性能时间点的轻量工具。
+				能做什么
+					记录进程启动、首窗口渲染、首内容渲染等关键耗时。
+				在 Kite 中的用法
+					启动性能测量和性能回归比较使用它。
+				一句类比
+					给关键流程按秒表。
+				项目关键数值
+					Windows 首内容：p50 558.0 ms，p95 828.9 ms
+					macOS 首内容：p50 810.0 ms，p95 817.8 ms
+					来源：v0.6.61 release 启动基线
+				核心代码关键词
+					关键词
+						perf_trace::start()
+						perf_trace::mark_once("windows.first_content_render")
+					过程
+						process start ...
+						→ first window ...
+						→ first content ...
+						→ JSON 基线
+	07 主界面与布局系统
+		主题概览
+			一句话定位
+				主界面由窗口壳、工具栏、侧边栏、内容区、右侧面板和状态栏组成，并用断点适配窄窗口。
+			学完能回答
+				为什么同一个界面在宽窗口和窄窗口下布局不同？
+		窗口壳
+			KiteWindow 根 v_flex
+			Tab Bar
+			Active KiteApp
+		页签内容
+			Toolbar
+			Main Workspace
+			Status Bar
+			Modal / Dialog 覆盖层
+				Modal
+					作用：需要输入或确认的阻塞式弹窗
+					Kite 中：新建、重命名、Git 凭据
+				Dialog
+					作用：业务流程中的对话窗口
+					Kite 中：Push、Clone、Remotes
+				覆盖层
+					作用：在当前界面之上叠加内容
+					Kite 中：窄窗口预览和弹窗
+		工作区
+			Sidebar
+			中间内容区
+			Right Pane：Preview / Agent
+				Preview
+					作用：显示当前文件内容或属性
+					Kite 中：图片、文本、Markdown、Git 状态
+				Agent
+					作用：显示 Agent 对话和任务状态
+					Kite 中：右侧 Agent 面板
+		中间内容区
+			列表模式：DataTable
+			分栏模式：横向 ColumnPane 链
+		响应式规则
+			侧边栏可隐藏
+			窗口变窄时栏目横向滚动
+			Right Pane 在窄窗口切为 Overlay
+			固定尺寸常量 + flex 约束
+				固定尺寸常量
+					作用：统一侧边栏、工具栏、栏宽和状态栏尺寸
+					Kite 中：布局一致性
+				flex 约束
+					作用：用 flex、min/max、overflow 处理剩余空间
+					Kite 中：宽窄窗口自适应
+		核心能力来源
+			框架能力
+				GPUI 元素 DSL
+				GPUI 样式系统
+			GPUI 组件
+				Button
+				Input
+				DataTable
+				Scrollbar
+				Progress
+			项目代码
+				src/app.rs
+				src/tabs.rs
+			关键函数
+				render_toolbar
+				render_sidebar
+				render_columns
+				render_right_pane
+				render_tab_bar
+		能力说明
+			h_flex / v_flex
+				是什么
+					GPUI 中的水平 flex 和垂直 flex 布局容器。
+				能做什么
+					横向或纵向排列子元素，并支持居中、拉伸、换行、间距和固定尺寸。
+				在 Kite 中的用法
+					工具栏、侧边栏、分栏、预览栏、状态栏都靠它们组合。
+				一句类比
+					把家具横着摆或竖着摆。
+				项目关键数值
+					主界面布局常量：27 个
+					侧边栏宽度：208 px
+					分栏宽度：252 px；预览宽度：300 px
+					Agent 面板宽度：360 px；覆盖断点：980 px
+				核心代码关键词
+					关键词
+						h_flex().flex_1().child(...)
+						v_flex().size_full().child(...)
+					过程
+						根容器 ...
+						→ 子容器 ...
+						→ flex 尺寸/间距 ...
+						→ 元素树
+			gpui-kit 组件
+				是什么
+					一组基于 GPUI 的成品 UI 控件。
+				能做什么
+					提供按钮、输入框、表格、菜单、滚动条、进度条、可调整面板等常用能力。
+				在 Kite 中的用法
+					Kite 使用 Button、Input、DataTable、PopupMenu、Scrollbar、Progress 等组件。
+				一句类比
+					一套预装家具，不用从木头开始做。
+				项目关键数值
+					组件与接口：15 个
+					Button 调用点：277 个
+					Input 状态引用：38 处
+					PopupMenu 引用：62 处；ScrollHandle：14 处
+				核心代码关键词
+					关键词
+						Button::new(...)
+						InputState
+						DataTable::new(&self.table)
+						PopupMenu
+					过程
+						组件 state ...
+						→ UI event ...
+						→ Entity update ...
+						→ Render
+			theme token
+				是什么
+					统一管理颜色、背景、边框、文字和状态色的主题系统。
+				能做什么
+					支持明暗主题，保证不同窗口和组件的视觉一致。
+				在 Kite 中的用法
+					代码通过 `cx.theme()` 读取当前主题的颜色和样式。
+				一句类比
+					装修用的统一色卡。
+				项目关键数值
+					外观模式：Light / Dark / System，共 3 种
+					主题来源：cx.theme()
+					视觉覆盖：背景、前景、边框、状态栏、强调色
+				核心代码关键词
+					关键词
+						cx.theme().background
+						.border
+						.muted_foreground
+						.danger
+					过程
+						Theme::change ...
+						→ cx.theme() ...
+						→ 组件样式
+			responsive breakpoint
+				是什么
+					根据窗口宽度切换布局的断点规则。
+				能做什么
+					在宽窗口中并排显示预览，在窄窗口中把预览改成覆盖层。
+				在 Kite 中的用法
+					`RIGHT_PANE_OVERLAY_BREAKPOINT = 980px` 控制右侧面板是否浮层显示。
+				一句类比
+					小房间放不下大桌子时，把桌子折叠起来。
+				项目关键数值
+					右侧面板覆盖断点：980 px
+					侧边栏：208 px；分栏：252 px
+					预览：300 px；Agent：360 px
+					状态栏高度：28 px；工具栏控件高度：36 px
+				核心代码关键词
+					关键词
+						window.viewport_size().width < px(RIGHT_PANE_OVERLAY_BREAKPOINT)
+					过程
+						viewport ...
+						→ 980px 判断 ...
+						→ 并排布局/absolute overlay
+	08 导航、分栏与文件列表
+		主题概览
+			一句话定位
+				分栏用有序 ColumnPane 表示路径链，列表用 TableDelegate 把文件数据适配成可排序表格。
+			学完能回答
+				为什么选中一个目录后右边会出现下一栏？为什么选中文件会关掉更深的栏？
+		导航
+			返回 / 前进 / 上一级
+				返回
+					作用：回到上一条访问历史
+					Kite 中：Alt+←
+				前进
+					作用：回到下一条访问历史
+					Kite 中：Alt+→
+				上一级
+					作用：进入当前目录的父目录
+					Kite 中：Alt+↑
+			面包屑与可编辑路径
+			当前路径历史
+			页签与会话恢复
+		分栏浏览
+			ColumnPane 有序向量
+			选中目录追加下一栏
+			选中文件截断更深栏
+			复用已加载共同前缀
+			分栏级排序 / 筛选 / 分组 / 搜索
+				排序
+					作用：按名称、日期、类型、大小排序
+					Kite 中：分栏表头排序
+				筛选
+					作用：只显示文件夹、文件、媒体或文档
+					Kite 中：分栏显示规则
+				分组
+					作用：按类型、扩展名或日期聚合
+					Kite 中：分栏分组标题
+				搜索
+					作用：在当前栏递归搜索
+					Kite 中：分栏搜索框
+		列表浏览
+			FileTableDelegate
+			列定义：名称 / VCS / 日期 / 类型 / 大小
+				名称
+					作用：文件名和图标
+					Kite 中：主列
+				VCS
+					作用：Git/SVN 状态徽标
+					Kite 中：版本控制列
+				日期
+					作用：修改日期
+					Kite 中：详细信息列
+				类型
+					作用：文件类型或扩展名
+					Kite 中：详细信息列
+				大小
+					作用：文件大小，目录通常不显示
+					Kite 中：详细信息列
+			TableDelegate 的排序、右键菜单、行渲染
+			批量选择与可见行范围选择
+		视图偏好
+			列宽预设
+			详细信息列可见性
+			排序方向持久化
+			分栏显示规则持久化
+		核心能力来源
+			GPUI 组件
+				DataTable
+				TableState
+				TableDelegate
+			项目代码
+				src/table.rs
+				src/fs.rs
+				src/ui_preferences.rs
+				src/app.rs
+			关键函数
+				ColumnPane
+				render_columns
+				render_column
+			设计文档
+				docs/architecture/sidebar-navigation.md
+				docs/architecture/macos-column-rules.md
+		能力说明
+			ColumnPane
+				是什么
+					表示一个目录栏的状态对象。
+				能做什么
+					保存目录路径、文件条目、选中项、排序、筛选、分组、搜索和加载状态。
+				在 Kite 中的用法
+					`Vec<ColumnPane>` 按路径层级排列；选中目录追加下一栏，选中文件截断更深栏。
+				一句类比
+					一行文件夹窗口，串起来就是路径链。
+				项目关键数值
+					分栏宽度：252 px
+					分栏间距：4 px；分栏内边距：4 px
+					列头高度：32 px；列搜索高度：40 px
+					栏数：无固定上限，使用横向滚动
+				核心代码关键词
+					关键词
+						ColumnPane { path, directory_entries, selected_paths, sort, ... }
+						load_column_pane(path, rule)
+					过程
+						root ...
+						→ column_chain ...
+						→ load_column_pane ...
+						→ Vec<ColumnPane>
+			DataTable / TableDelegate
+				是什么
+					通用数据表格组件，以及把业务数据翻译成行列的适配接口。
+				能做什么
+					处理列定义、排序、行渲染、选择、右键菜单和滚动。
+				在 Kite 中的用法
+					`FileTableDelegate` 把 `FileEntry` 渲染成名称、VCS、日期、类型和大小列。
+				一句类比
+					通用表格控件 + 文件专用说明书。
+				项目关键数值
+					文件表格列数：5 列
+					列定义：名称、VCS、日期、类型、大小
+					DataTable 实例：1 个核心文件列表
+					TableDelegate 实现：FileTableDelegate
+				核心代码关键词
+					关键词
+						impl TableDelegate for FileTableDelegate
+						column
+						render_td
+						perform_sort
+						context_menu
+					过程
+						FileEntry[] ...
+						→ FileTableDelegate ...
+						→ DataTable ...
+						→ row render
+			history
+				是什么
+					记录当前路径访问顺序和历史位置的数据结构。
+				能做什么
+					支持返回、前进和恢复导航上下文。
+				在 Kite 中的用法
+					`history` 与 `history_index` 支撑浏览器式前后导航。
+				一句类比
+					网页浏览器的历史记录。
+				项目关键数值
+					历史列表：无显式步数上限
+					会话恢复页签上限：64 个
+					导航动作：返回、前进、上一级，共 3 个
+				核心代码关键词
+					关键词
+						history: Vec<PathBuf>
+						history_index: usize
+						NavigationIntent::{Push, ReplaceIndex, Refresh}
+					过程
+						navigate_to ...
+						→ apply_history ...
+						→ history_index
+			selection
+				是什么
+					文件和目录的单选、多选、范围选择状态。
+				能做什么
+					参与批量操作、键盘导航、右键菜单和下一栏加载。
+				在 Kite 中的用法
+					分栏通过选中目录决定右侧路径；列表通过选中项决定预览和操作目标。
+				一句类比
+					在文件上贴勾选标签。
+				项目关键数值
+					列表模式当前行：1 个
+					分栏模式：支持多选，无固定上限
+					选择范围：可可见行连续选择
+				核心代码关键词
+					关键词
+						selected_path
+						selected_paths
+						anchor_path
+						toggle_selection
+						select_range_to
+						select_all
+					过程
+						click/key ...
+						→ selection update ...
+						→ preview/actions
+	09 文件操作、预览与编辑
+		主题概览
+			一句话定位
+				文件操作由 Rust 库执行，系统剪贴板和拖放交给操作系统，预览和编辑由 GPUI 文本/媒体组件展示。
+			学完能回答
+				复制、粘贴、拖放、压缩和预览分别由哪一层负责？
+		文件管理
+			新建文件夹 / 新建文件
+				新建文件夹
+					作用：在当前目录创建目录
+					Kite 中：文件菜单和右键菜单
+				新建文件
+					作用：在当前目录创建空文件
+					Kite 中：文件菜单和右键菜单
+			重命名
+			复制 / 剪切 / 粘贴
+				复制
+					作用：把选中文件放入剪贴板并保留原文件
+					Kite 中：批量复制
+				剪切
+					作用：把选中文件放入剪贴板并准备移动
+					Kite 中：批量移动
+				粘贴
+					作用：把剪贴板内容放到目标目录
+					Kite 中：列表和分栏目标目录
+			删除到回收站
+			复制到指定目录
+		系统集成
+			Windows Explorer 文件剪贴板
+			macOS Finder 文件剪贴板
+			拖入 / 拖出
+				拖入
+					作用：从外部应用接收文件到 Kite
+					Kite 中：拖到文件夹行或分栏背景
+				拖出
+					作用：把 Kite 文件拖到外部应用
+					Kite 中：Explorer、浏览器、邮件等
+			默认应用打开
+		压缩与解压
+			ZIP / TAR.GZ
+				ZIP
+					作用：创建和解压 ZIP 压缩包
+					Kite 中：跨平台常用压缩格式
+				TAR.GZ
+					作用：创建和解压 gzip 压缩的 tar 包
+					Kite 中：Unix 常见归档格式
+			临时路径 + 原子重命名
+				临时路径
+					作用：先写临时文件，避免留下半成品
+					Kite 中：压缩、解压和文本保存
+				原子重命名
+					作用：写完后一次性替换目标文件
+					Kite 中：降低中断导致的数据损坏
+			拒绝不安全的归档路径和符号链接
+			独立进度窗口
+		预览与编辑
+			图片 / 文本 / 日志 / Markdown / 代码
+				图片
+					作用：读取尺寸、缩放并展示预览
+					Kite 中：PNG、JPEG、GIF、WebP 等
+				文本
+					作用：读取 UTF-8 文本并显示
+					Kite 中：普通 txt 和配置文件
+				日志
+					作用：只读取尾部并按行展示
+					Kite 中：大型日志文件
+				Markdown
+					作用：渲染 Markdown 或展示源码
+					Kite 中：文档预览和编辑
+				代码
+					作用：按语言高亮显示源码
+					Kite 中：开发文件预览
+			文本大小与二进制检测
+			TextDocument 与保存
+			大日志只读取尾部
+		核心能力来源
+			Rust 依赖
+				std::fs
+				walkdir
+				zip
+				tar
+				image
+				trash
+				open
+			Windows API
+				OLE
+				DataExchange
+				Shell
+			GPUI 组件
+				TextView
+				Editor
+				Progress
+			项目代码
+				src/fs.rs
+				src/archive.rs
+				src/preview.rs
+				src/text_editor.rs
+			设计文档
+				docs/architecture/file-drag-drop.md
+				docs/architecture/context-menu.md
+		能力说明
+			std::fs / fs
+				是什么
+					Rust 标准文件系统 API，以及项目封装的目录和文件操作。
+				能做什么
+					读取目录、读取文件、创建、重命名、删除、移动、复制和读取元数据。
+				在 Kite 中的用法
+					`src/fs.rs` 提供目录快照、搜索、排序、格式化大小和文件操作基础能力。
+				一句类比
+					文件抽屉的开关、标签和搬运工具。
+				项目关键数值
+					目录搜索结果上限：1,000 项
+					fs.rs 文件规模：1,650 行
+					文本预览读取上限：64 KiB
+				核心代码关键词
+					关键词
+						load_directory(path, sort)
+						DirectorySnapshot
+						FileEntry
+						transfer_entry
+						recycle_entry
+					过程
+						request_load ...
+						→ load_directory ...
+						→ snapshot ...
+						→ TableState/ColumnPane
+			Explorer / Finder clipboard
+				是什么
+					Windows 资源管理器和 macOS Finder 使用的系统文件剪贴板格式。
+				能做什么
+					让 Kite 与其他文件管理器共享复制、剪切和粘贴。
+				在 Kite 中的用法
+					Windows 使用 `CF_HDROP`；macOS 使用系统 Pasteboard。
+				一句类比
+					文件世界的公共托盘。
+				项目关键数值
+					支持平台：Windows + macOS，共 2 个
+					Windows 格式：CF_HDROP
+					macOS 载体：系统 Pasteboard
+				核心代码关键词
+					关键词
+						FileClipboard
+						ClipboardMode
+						CF_HDROP
+						SharedClipboard = Rc<RefCell<Option<FileClipboard>>>
+					过程
+						system clipboard ...
+						→ FileClipboard ...
+						→ paste/transfer
+			OLE drag & drop
+				是什么
+					Windows 原生拖放和剪贴板数据传输协议。
+				能做什么
+					从资源管理器拖入、向其他应用拖出，并传递真实文件路径。
+				在 Kite 中的用法
+					`file_clipboard.rs` 使用 OLE 数据对象和原生拖放，向系统投递 `WM_APP` 消息。
+				一句类比
+					文件和应用程序之间的传送带。
+				项目关键数值
+					系统文件格式：CF_HDROP，共 1 种
+					一次外部拖出：由 1 条私有 WM_APP 消息触发
+					原生拖放入口：SHDoDragDrop
+				核心代码关键词
+					关键词
+						request_file_drag(window, &paths)
+						PostMessageW(... WM_APP ...)
+						SHDoDragDrop(...)
+					过程
+						GPUI drag ...
+						→ WM_KITE_FILE_DRAG ...
+						→ SHDoDragDrop ...
+						→ effect
+			zip / tar
+				是什么
+					Rust 的压缩包读写库。
+				能做什么
+					创建和解压 ZIP、TAR.GZ，检查路径安全并统计进度。
+				在 Kite 中的用法
+					`src/archive.rs` 使用临时路径、原子重命名和安全路径检查。
+				一句类比
+					把文件夹装箱和拆箱。
+				项目关键数值
+					压缩格式：ZIP + TAR.GZ，共 2 种
+					进度窗口：独立 1 个
+					写入策略：临时路径 + 原子重命名
+					安全限制：拒绝不安全归档路径和符号链接
+				核心代码关键词
+					关键词
+						ArchiveFormat::{Zip, TarGz}
+						compress_with_progress(...)
+						extract_with_progress(...)
+					过程
+						source ...
+						→ temp dir ...
+						→ progress ...
+						→ atomic rename
+			TextView / Editor
+				是什么
+					GPUI Kit 的文本展示和编辑组件。
+				能做什么
+					显示代码、日志、Markdown 和普通文本，支持编辑、保存和语法高亮。
+				在 Kite 中的用法
+					预览窗口和文本编辑器使用这些组件展示内容与编辑结果。
+				一句类比
+					带高亮和编辑能力的记事本。
+				项目关键数值
+					文本预览读取：64 KiB；字符上限：6,000
+					日志预览读取：64 KiB
+					可编辑文本上限：8 MiB
+					包文档上限：64 MiB；实时 Markdown：256 KiB
+				核心代码关键词
+					关键词
+						read_text_preview
+						read_log_preview
+						TextDocument
+						TextView
+						Editor
+						save_text_document
+					过程
+						path ...
+						→ read_preview ...
+						→ TextView/Editor ...
+						→ save
+	10 搜索与索引
+		主题概览
+			一句话定位
+				搜索先通过索引或系统日志找候选，再用 grep 精确确认内容；索引在后台低优先级运行。
+			学完能回答
+				为什么全局搜索不必每次全盘扫描，也为什么它有自己的资源上限？
+		搜索入口
+			当前分栏搜索
+			全局名称搜索
+			全局内容搜索
+			名称 / 内容模式切换
+				名称模式
+					作用：按文件名匹配
+					Kite 中：找文件位置
+				内容模式
+					作用：按文件正文匹配
+					Kite 中：找代码、文本和日志内容
+		索引架构
+			名称索引
+				名称索引
+					作用：保存文件名、路径、类型和元数据
+					Kite 中：快速名称搜索
+			内容索引
+				内容索引
+					作用：保存文本词项和文件元数据
+					Kite 中：避免每次全盘读取正文
+			Tantivy 字段与查询
+			候选文件再精确匹配
+		增量与范围
+			USN Journal 增量变更
+			notify 文件变化监听
+			当前目录 / 收藏 / 本地磁盘 / 网络卷范围
+				当前目录
+					作用：只在当前打开的目录内搜索
+					Kite 中：当前文件夹范围
+				收藏
+					作用：在一组收藏根目录内搜索
+					Kite 中：用户常用项目目录
+				本地磁盘
+					作用：在系统报告的固定/可移除磁盘中搜索
+					Kite 中：本机范围搜索
+				网络卷
+					作用：在 UNC 或网络盘范围中搜索
+					Kite 中：Windows 网络位置
+			隐藏项、构建目录、二进制和超限文件排除
+		资源保护
+			低优先级索引线程
+			单写入线程与缓冲上限
+			文件大小 / 索引数量 / 结果数量上限
+				文件大小上限
+					作用：避免索引超大文件
+					Kite 中：默认超过 8 MiB 不索引
+				索引数量上限
+					作用：限制索引规模和资源消耗
+					Kite 中：最多 250000 个索引文件
+				结果数量上限
+					作用：限制 UI 和查询负载
+					Kite 中：名称 1000 项、内容 50 个文件
+			低功耗和内存压力暂停
+		核心能力来源
+			Rust 依赖
+				Tantivy
+				grep-searcher
+				ignore
+				walkdir
+				notify
+				sysinfo
+			Windows API
+				USN Journal
+				DeviceIoControl
+			项目代码
+				src/content_search.rs
+				src/name_index.rs
+				src/indexed_search.rs
+				src/global_search_window.rs
+			设计文档
+				docs/architecture/content-search.md
+		能力说明
+			Tantivy
+				是什么
+					Rust 实现的全文搜索索引库，思路类似 Lucene。
+				能做什么
+					建立索引，执行词项、短语、正则和范围查询，快速找候选文件。
+				在 Kite 中的用法
+					Kite 用它实现名称索引和内容索引，索引保存在用户本地数据目录。
+				一句类比
+					图书馆的目录卡和索引页。
+				项目关键数值
+					索引数量：名称 + 内容，共 2 套
+					单写入线程：1 个
+					写入缓冲：64 MiB
+					名称提交：25,000 文档或 5 秒
+					内容提交：100 文档或 1 秒
+				核心代码关键词
+					关键词
+						IndexWriter
+						IndexReader
+						TopDocs
+						BooleanQuery
+						RegexQuery
+					过程
+						documents ...
+						→ IndexWriter.commit ...
+						→ IndexReader ...
+						→ query
+			grep-searcher
+				是什么
+					高性能文本搜索库，用于在文件中精确查找内容。
+				能做什么
+					读取候选文件，返回匹配行、行号和匹配片段，并跳过二进制内容。
+				在 Kite 中的用法
+					内容索引只负责找候选，`grep-searcher` 负责确认真实匹配。
+				一句类比
+					索引告诉你哪本书，grep 帮你找到具体句子。
+				项目关键数值
+					内容结果文件上限：50 个
+					每文件片段：最多 3 行
+					每文件匹配统计：最多 10,000 行
+					片段长度：400 字符
+				核心代码关键词
+					关键词
+						RegexMatcherBuilder
+						SearcherBuilder
+						impl Sink for LineSink
+					过程
+						candidate file ...
+						→ searcher ...
+						→ Sink ...
+						→ exact lines
+			notify
+				是什么
+					跨平台文件变化监听库。
+				能做什么
+					监听创建、删除、重命名和修改事件，触发界面刷新或索引增量更新。
+				在 Kite 中的用法
+					分栏自动刷新、名称索引和内容索引都使用它。
+				一句类比
+					门口保安，有人进出就通知。
+				项目关键数值
+					分栏刷新防抖：180 ms
+					Git 仓库监听防抖：180 ms
+					全局名称查询等待：280 ms
+				核心代码关键词
+					关键词
+						RecommendedWatcher
+						RecursiveMode
+						EventKind
+					过程
+						watch(root) ...
+						→ EventKind ...
+						→ debounce ...
+						→ refresh/index
+			USN Journal
+				是什么
+					Windows NTFS 文件系统的变更日志。
+				能做什么
+					增量读取卷上发生的文件变化，避免每次重新扫描整个磁盘。
+				在 Kite 中的用法
+					名称索引使用 USN Journal 和游标维护最新文件清单。
+				一句类比
+					图书馆的借还登记簿。
+				项目关键数值
+					支持记录版本：USN v2 + v3，共 2 种
+					名称索引版本：v3
+					查询候选上限：5,000 条
+					索引文件上限：250,000 个
+				核心代码关键词
+					关键词
+						DeviceIoControl
+						FSCTL_QUERY_USN_JOURNAL
+						FSCTL_READ_UNPRIVILEGED_USN_JOURNAL
+						JournalCursor
+					过程
+						volume ...
+						→ journal query ...
+						→ cursor ...
+						→ record batch ...
+						→ index
+			DeviceIoControl
+				是什么
+					Windows 用来向设备发送控制命令的原生 API。
+				能做什么
+					读取 USN 记录、卷信息和底层文件系统状态。
+				在 Kite 中的用法
+					`src/usn_journal.rs` 通过它读取 NTFS 变更数据。
+				一句类比
+					直接向文件系统询问“最近发生了什么”。
+				项目关键数值
+					卷级日志通道：1 类
+					用途：读取 USN Journal 与卷信息
+					单次结果：无固定上限，由设备记录和缓冲决定
+				核心代码关键词
+					关键词
+						DeviceIoControl(...)
+						FSCTL_*
+						JournalInfo
+						UsnReadBatch
+					过程
+						volume handle ...
+						→ DeviceIoControl ...
+						→ UsnReadBatch
+	11 VCS、Git 与 Diff
+		主题概览
+			一句话定位
+				Git 能力通过调用用户本机 git CLI 实现，Core 负责结构化结果，GPUI 负责窗口、进度和交互。
+			学完能回答
+				为什么选择 git CLI？一次 Git 操作如何从按钮变成真实命令和进度事件？
+		VCS 状态
+			Git / SVN 状态徽标
+				Git 徽标
+					作用：显示 Git 修改、新增、删除等状态
+					Kite 中：文件行和预览
+				SVN 徽标
+					作用：显示 SVN 状态
+					Kite 中：文件行和预览
+			把状态应用到文件条目
+			工作区根路径与 VCS 可用性
+		Git 服务
+			GitService 统一入口
+			命令执行器
+			结构化错误
+			控制台与输出上限
+			凭据 Askpass Bridge
+		Git 窗口
+			Git Client
+			提交
+			提交历史与提交图
+			分支与标签
+			Stash / Reset / Revert / Cherry-pick
+				Stash
+					作用：临时保存未提交修改
+					Kite 中：切换任务前保存工作区
+				Reset
+					作用：把分支或索引移动到指定提交
+					Kite 中：撤销提交或取消暂存
+				Revert
+					作用：创建一个反向提交来撤销历史提交
+					Kite 中：安全撤销已经提交的变更
+				Cherry-pick
+					作用：把指定提交复制到当前分支
+					Kite 中：挑选其他分支的单个提交
+			Rebase
+			Remote / Fetch / Pull / Push / Clone
+				Remote
+					作用：管理远程仓库地址和名称
+					Kite 中：origin/upstream 配置
+				Fetch
+					作用：下载远程引用但不修改工作区
+					Kite 中：查看远程更新
+				Pull
+					作用：拉取远程提交并合并到当前分支
+					Kite 中：同步本地仓库
+				Push
+					作用：把本地提交上传到远程
+					Kite 中：发布本地修改
+				Clone
+					作用：从远程地址创建本地仓库
+					Kite 中：克隆项目
+		Diff 与审核
+			Diff Viewer
+			行级暂存
+			类似算法的文本差异
+			Git 事件进度与取消
+		核心能力来源
+			外部能力
+				git CLI（不链接 libgit2）
+			Rust 依赖
+				similar
+				keyring
+				notify
+				std::process
+			项目代码
+				src/git/*
+				src/git_changes.rs
+				src/git_rebase.rs
+				src/diff.rs
+				src/diff_viewer_window.rs
+				src/git_client_window.rs
+			设计文档
+				docs/architecture/git-client.md
+		能力说明
+			git CLI
+				是什么
+					调用用户本机安装的 `git` 命令，而不是链接 libgit2。
+				能做什么
+					执行 status、diff、log、commit、fetch、pull、push、clone、rebase 等操作。
+				在 Kite 中的用法
+					`src/git/command.rs` 统一配置环境变量、输出上限、进度和取消。
+				一句类比
+					让系统里的 Git 师傅干活，Kite 负责点单和查看进度。
+				项目关键数值
+					最低 Git 版本：2.30.0
+					控制台记录上限：256 条
+					单命令捕获上限：128 KiB
+					单行上限：64 KiB；Askpass 轮询：25 ms
+				核心代码关键词
+					关键词
+						GitExecutor
+						Command::new("git")
+						--no-optional-locks
+						CREATE_NO_WINDOW
+					过程
+						label ...
+						→ Command ...
+						→ stdout/stderr ...
+						→ GitEvent/结果
+			GitService
+				是什么
+					对 UI 暴露的统一 Git 能力入口。
+				能做什么
+					读取仓库状态、执行同步操作、启动后台任务、监听 `.git` 变化和返回结构化错误。
+				在 Kite 中的用法
+					GPUI、SwiftUI、CLI 和 MCP 都通过同一套 Git 服务能力工作。
+				一句类比
+					Git 师傅的调度台。
+				项目关键数值
+					长操作类型：Fetch / Pull / Push / Clone / PullThenPush，共 5 类
+					仓库监听防抖：180 ms
+					Git 客户端窗口会话上限：32 个
+				核心代码关键词
+					关键词
+						GitService
+						repository_state(...)
+						start_operation(...)
+						watch_repository(...)
+					过程
+						GitService ...
+						→ operation ...
+						→ task/event ...
+						→ result
+			similar
+				是什么
+					Rust 文本差异计算库。
+				能做什么
+					比较文本并生成行级或词级增删结果。
+				在 Kite 中的用法
+					Diff Viewer 和 Agent 文件修改审核使用它生成差异。
+				一句类比
+					对比两份稿子，标出改了什么。
+				项目关键数值
+					常规 diff：2 MiB / 20,000 行
+					大文件阈值：8 MiB
+					大文件显示：96 KiB / 160 行
+					词级高亮：64 KiB；语法高亮：32 KiB
+				核心代码关键词
+					关键词
+						TextDiff::from_lines
+						TextDiff::from_words
+						ChangeTag
+					过程
+						old/new ...
+						→ TextDiff ...
+						→ changes ...
+						→ diff rows
+			Askpass Bridge
+				是什么
+					桥接 Git/SSH 凭据提示和 UI 输入框。
+				能做什么
+					把 Git 的密码、口令或认证请求转换成界面对话框，再把用户输入写回命令。
+				在 Kite 中的用法
+					`GitCredentialCallback` 负责在 GPUI 中弹窗并返回凭据。
+				一句类比
+					Git 想问密码时，Kite 代为转达。
+				项目关键数值
+					轮询间隔：25 ms
+					提示类别：HTTPS / SSH / GPG / unknown，共 4 类
+					临时 askpass 目录：命令结束后删除
+				核心代码关键词
+					关键词
+						AskpassBridge
+						GIT_ASKPASS
+						SSH_ASKPASS
+						PINENTRY_USER_DATA
+					过程
+						git prompt ...
+						→ askpass script ...
+						→ request/response file ...
+						→ UI callback
+	12 Agent 集成
+		主题概览
+			一句话定位
+				Kite 是 Agent 宿主，不是模型运行时；它负责配置、上下文、ACP 会话、权限确认和结果审核。
+			学完能回答
+				一个外部 Agent 如何被启动、对话、暂停、取消并安全修改文件？
+		Agent Core
+			AgentProfileStore
+			配置校验与原子持久化
+			Keychain / Credential Manager 凭据
+				Keychain
+					作用：macOS 系统安全凭据存储
+					Kite 中：保存 Agent 密钥引用
+				Credential Manager
+					作用：Windows 系统安全凭据存储
+					Kite 中：保存 Agent 密钥引用
+			AgentSession 状态机
+		ACP 会话
+			JSON-RPC over stdio
+			initialize / session/new / session/prompt
+				initialize
+					作用：协商协议版本和客户端能力
+					Kite 中：Agent 启动后的首个 ACP 请求
+				session/new
+					作用：创建工作目录和上下文会话
+					Kite 中：每次新 Agent 对话
+				session/prompt
+					作用：发送用户提示词并启动一轮任务
+					Kite 中：Agent 对话发送
+			流式 session/update
+				session/update
+					作用：持续接收回答、思考、工具和计划事件
+					Kite 中：Agent 流式输出和状态更新
+			权限请求与结构化回复
+			取消、超时、进程树清理
+		Agent 表面
+			右侧 Agent 面板
+			独立 Agent 窗口
+			右键“使用 Agent”菜单
+			上下文快照与工作目录
+			会话恢复
+		结果审核
+			结构化回答 / 引用 / 文件修改
+				结构化回答
+					作用：把 Agent 输出映射为可展示的消息
+					Kite 中：Agent 结果窗口
+				引用
+					作用：记录 Agent 引用的文件、路径和行号
+					Kite 中：定位引用文件
+				文件修改
+					作用：把修改转成待审核 diff
+					Kite 中：应用、另存为或放弃修改
+			unified diff
+			应用前哈希重校验
+			审计只记录元数据
+		核心能力来源
+			Rust 依赖
+				uniffi
+				keyring
+				std::process
+				similar
+			协议
+				ACP
+				JSON-RPC over stdio
+			项目代码
+				src/agent/*
+				src/agent_review.rs
+				src/agent_panel.rs
+				src/bin/kite-cli.rs
+				src/bin/kite-mcp.rs
+			设计文档
+				docs/architecture/agent-integration.md
+				docs/architecture/agent-session.md
+				docs/architecture/agent-result-review.md
+		能力说明
+			ACP
+				是什么
+					Agent Client Protocol，客户端与 Agent 之间的通信协议。
+				能做什么
+					完成初始化、会话创建、提示词发送、流式事件接收和权限请求。
+				在 Kite 中的用法
+					`src/agent/acp.rs` 实现 ACP/JSON-RPC over stdio 适配。
+				一句类比
+					Kite 和外部 Agent 之间的对讲机。
+				项目关键数值
+					协议版本：ACP v1
+					单帧上限：256 KiB
+					协议预览：240 字符
+					stdin/stdout 读取线程：2 个
+				核心代码关键词
+					关键词
+						AcpStdioTransport
+						initialize
+						session/new
+						session/prompt
+						read_frame
+						write_frame
+					过程
+						start_process ...
+						→ initialize ...
+						→ session/new ...
+						→ session/prompt ...
+						→ session/update
+			JSON-RPC over stdio
+				是什么
+					用 JSON 表示请求、响应和通知，并通过标准输入输出传输。
+				能做什么
+					让 Kite 与子进程 Agent 双向通信，不需要额外网络端口。
+				在 Kite 中的用法
+					Agent 进程启动后，Kite 通过 stdin/stdout 发送 JSON-RPC 帧。
+				一句类比
+					一封封格式化的信件，通过管道送到对方手里。
+				项目关键数值
+					单帧上限：256 KiB
+					默认总输出上限：16 MiB
+					事件等待轮询：50 ms
+					传输方式：stdin/stdout 1 对管道
+				核心代码关键词
+					关键词
+						serde_json::Value
+						read_frame(max_frame_bytes)
+						count_output(max_output_bytes)
+					过程
+						Value ...
+						→ write_frame ...
+						→ stdout ...
+						→ read_frame ...
+						→ Output
+			AgentSession
+				是什么
+					一次 Agent 进程会话的状态机。
+				能做什么
+					管理 Idle、Starting、Ready、Running、Cancelling、Failed、Closed 等状态。
+				在 Kite 中的用法
+					`src/agent/session.rs` 负责启动进程、握手、流式事件、取消和清理。
+				一句类比
+					一次任务的完整生命周期。
+				项目关键数值
+					启动超时：10 秒
+					默认单轮超时：600 秒；默认空闲超时：60 秒
+					取消宽限：2 秒
+					默认输出上限：8 MiB；配置上限：16 MiB
+				核心代码关键词
+					关键词
+						AgentSession
+						SessionCommand
+						start_agent(...)
+						send_prompt(...)
+						cancel(...)
+					过程
+						start ...
+						→ Ready ...
+						→ send_prompt ...
+						→ wait_for_event ...
+						→ cancel/close
+			keyring
+				是什么
+					系统凭据存储库。
+				能做什么
+					把密钥、token 或密码存入 Windows Credential Manager 或 macOS Keychain。
+				在 Kite 中的用法
+					Agent 配置只保存 `keychain://` 引用，不保存明文凭据。
+				一句类比
+					系统自带的保险箱。
+				项目关键数值
+					平台后端：Windows Credential Manager + macOS Keychain，共 2 个
+					每个 Profile 凭据引用：1 个
+					Profile 上限：64 个；配置文件上限：256 KiB
+				核心代码关键词
+					关键词
+						keyring::Entry
+						save_secret
+						load_secret
+						credential_ref(...)
+					过程
+						profile ...
+						→ keyring entry ...
+						→ secret ...
+						→ credential_ref
+			diff 审核
+				是什么
+					Agent 修改文件前的只读审核流程。
+				能做什么
+					展示目标路径、增删行数、覆盖风险和 unified diff；应用前再次校验哈希。
+				在 Kite 中的用法
+					`src/agent_review.rs` 负责预检、diff、权限回复、写入和审计。
+				一句类比
+					先看草稿，确认后再签字盖章。
+				项目关键数值
+					回答上限：4 MiB；提案上限：8 MiB
+					Diff 上限：2 MiB；结果 JSON 上限：16 MiB
+					文件修改上限：64 个；引用上限：256 个
+					上下文路径/权限请求/命令：各最多 64 个
+				核心代码关键词
+					关键词
+						build_review(...)
+						apply_review_changes(...)
+						reconfirm_file_change(...)
+						hash_bytes(...)
+					过程
+						draft ...
+						→ build_review ...
+						→ diff ...
+						→ reconfirm ...
+						→ apply
+	13 Windows 平台集成
+		主题概览
+			一句话定位
+				Windows 集成把 GPUI 与 Win32、COM、Shell、WPD/MTP 连接起来，重点是对象生命周期和消息重入。
+			学完能回答
+				右键菜单、文件拖放、手机设备浏览为什么需要单独的 Windows 桥接层？
+		Shell 命名空间
+			IShellItem / IEnumShellItems
+				IShellItem
+					作用：表示一个 Shell 命名空间项目
+					Kite 中：文件、文件夹、设备和虚拟项
+				IEnumShellItems
+					作用：枚举 Shell 命名空间中的子项目
+					Kite 中：读取目录和便携设备内容
+			WPD / MTP 设备
+				WPD
+					作用：Windows Portable Devices 设备对象模型
+					Kite 中：设备枚举和 Shell 路径
+				MTP
+					作用：便携设备文件传输协议
+					Kite 中：手机、相机文件浏览和写入
+			设备路径与本地文件路径区分
+		系统右键菜单
+			ContextMenuTarget
+			ContextMenuModel
+			MenuProvider
+			Action Envelope
+			Kite 原生菜单 + Windows Shell 扩展
+				Kite 原生菜单
+					作用：Kite 自己绘制的高频文件操作
+					Kite 中：复制、剪切、重命名、压缩、Agent
+				Windows Shell 扩展
+					作用：调用系统及第三方注册的菜单项
+					Kite 中：TortoiseGit、压缩工具、系统属性
+		COM 与重入安全
+			后台线程 CoInitializeEx
+			IContextMenu2 / IContextMenu3 消息转发
+				IContextMenu2
+					作用：让旧式 Shell 扩展接收菜单消息
+					Kite 中：旧扩展的绘制和测量消息
+				IContextMenu3
+					作用：支持更完整的菜单消息处理
+					Kite 中：新扩展的弹出、绘制和字符消息
+			PostMessageW 延迟原生菜单
+			避免在 GPUI update 中嵌套 Windows 消息循环
+		系统能力
+			Explorer 文件剪贴板
+			OLE 拖放
+			回收站
+			默认文件管理器
+			更新器与开始菜单快捷方式
+		核心能力来源
+			Windows API
+				Win32
+				COM
+				Shell
+				DataExchange
+				OLE
+				Storage
+			Windows 依赖
+				windows
+				windows-sys
+				winreg
+				keyring
+			项目代码
+				src/context_menu/mod.rs
+				src/context_menu/windows.rs
+				src/file_clipboard.rs
+				src/shell_fs.rs
+				src/explorer_integration.rs
+			设计文档
+				docs/architecture/context-menu.md
+				docs/architecture/default-file-manager.md
+				docs/architecture/file-drag-drop.md
+		能力说明
+			Win32
+				是什么
+					Windows 最底层的原生 API 集合。
+				能做什么
+					访问窗口、消息、文件、线程、设备、剪贴板和系统设置。
+				在 Kite 中的用法
+					更新器、文件属性、设备枚举、窗口消息等场景使用 Win32。
+				一句类比
+					Windows 操作系统的底层插座。
+				项目关键数值
+					目标系统：Windows 10/11 x64
+					Windows 系统桥接模块：5 个
+					覆盖：窗口、文件、设备、剪贴板、Shell
+				核心代码关键词
+					关键词
+						windows::Win32::*
+						HANDLE
+						HWND
+						LPARAM
+						WPARAM
+						PostMessageW(...)
+					过程
+						Rust call ...
+						→ Win32 API ...
+						→ HANDLE/HWND ...
+						→ cleanup
+			COM
+				是什么
+					Windows 组件对象模型，用统一接口调用系统对象。
+				能做什么
+					访问 Shell、剪贴板、拖放、上下文菜单和系统服务。
+				在 Kite 中的用法
+					`src/context_menu/windows.rs`、`src/file_clipboard.rs`、`shell_fs.rs` 大量使用 COM。
+				一句类比
+					Windows 的通用插座标准。
+				项目关键数值
+					主要对象族：Shell / DataExchange / OLE，共 3 类
+					原生菜单桥接：1 条窗口消息转发路径
+					菜单消息：WM_INITMENUPOPUP / WM_DRAWITEM / WM_MEASUREITEM / WM_MENUCHAR
+				核心代码关键词
+					关键词
+						CoInitializeEx(...)
+						Interface
+						ComGuard
+						IContextMenu2
+						IContextMenu3
+					过程
+						CoInitializeEx ...
+						→ interface ...
+						→ invoke ...
+						→ Drop 释放
+			Shell namespace
+				是什么
+					Windows 资源管理器的对象体系，不只包含普通文件路径。
+				能做什么
+					表示文件、文件夹、磁盘、WPD/MTP 设备和其他虚拟项目。
+				在 Kite 中的用法
+					Kite 用 `IShellItem` 和 `IEnumShellItems` 浏览设备与系统命名空间。
+				一句类比
+					不只是文件夹，连手机和相机也能成为资源管理器对象。
+				项目关键数值
+					Shell/设备命名空间路径：固定使用 1 列
+					本地文件路径：栏数无固定上限
+					WPD/MTP 设备根目录：禁止重命名/删除
+				核心代码关键词
+					关键词
+						IShellItem
+						IEnumShellItems
+						SHCreateItemFromParsingName
+						is_shell_namespace_path(...)
+					过程
+						path ...
+						→ IShellItem ...
+						→ IEnumShellItems ...
+						→ 子项
+			WPD / MTP
+				是什么
+					Windows Portable Devices / Media Transfer Protocol。
+				能做什么
+					浏览手机、相机等便携设备中的文件和目录。
+				在 Kite 中的用法
+					`devices.rs` 和 `shell_fs.rs` 把设备路径映射到 Kite 的导航和分栏。
+				一句类比
+					把手机当作可浏览的目录。
+				项目关键数值
+					设备协议：WPD + MTP，共 2 种
+					删除语义：永久删除，不进入回收站
+					设备根目录：禁止重命名/删除
+				核心代码关键词
+					关键词
+						PortableDevice
+						shell_path
+						IShellItem
+						is_shell_namespace_path(...)
+					过程
+						device enumerate ...
+						→ shell_path ...
+						→ navigate/write
+			OLE DataExchange
+				是什么
+					Windows 剪贴板和拖放使用的数据对象格式。
+				能做什么
+					实现 `CF_HDROP` 文件拖放、拖动源和剪贴板传输。
+				在 Kite 中的用法
+					`file_clipboard.rs` 负责系统文件剪贴板和原生拖出。
+				一句类比
+					Windows 的公共文件传送带。
+				项目关键数值
+					文件数据格式：CF_HDROP，共 1 种
+					私有消息：WM_APP，共 1 个
+					系统拖放入口：SHDoDragDrop
+				核心代码关键词
+					关键词
+						CF_HDROP
+						IDropSource
+						SHDoDragDrop
+						LockedGlobal
+					过程
+						paths ...
+						→ CF_HDROP ...
+						→ IDropSource ...
+						→ SHDoDragDrop
+	14 共享 Rust Core 与跨语言边界
+		主题概览
+			一句话定位
+				Core API 是业务能力统一入口，UniFFI 是跨语言桥，CLI 和 MCP 是除 UI 外的其他外壳。
+			学完能回答
+				同一套 Rust 业务能力如何被 GPUI、SwiftUI、CLI 和 MCP 同时复用？
+		Core 约束
+			不依赖 GPUI / SwiftUI / AppKit
+				不依赖 GPUI
+					作用：保证 Core 不被 Windows UI 类型污染
+					Kite 中：Windows 直接调用
+				不依赖 SwiftUI
+					作用：保证 Core 可被 macOS 调用
+					Kite 中：Swift 通过 UniFFI 调用
+				不依赖 AppKit
+					作用：把系统 UI 能力留在 macOS 外壳
+					Kite 中：Finder、Quick Look 和菜单
+			领域规则、状态机、持久化和副作用收敛
+			UI 只做输入适配、调用编排和展示
+		UniFFI 边界
+			Record：跨语言数据传输
+				Record
+					作用：定义跨语言普通结构体
+					Kite 中：目录、文件、Git 和 Agent DTO
+			Enum：稳定状态与错误分类
+				Enum
+					作用：定义跨语言固定状态和错误分类
+					Kite 中：Agent 状态、Git 错误和操作类型
+			Object：可持有服务、任务和监视器
+				Object
+					作用：让调用方长期持有 Rust 服务对象
+					Kite 中：GitService、AgentSession 和进度监视器
+			Callback interface：Git 事件与凭据回调
+				Callback interface
+					作用：让 Rust Core 回调宿主 UI
+					Kite 中：Git 进度、凭据请求和事件通知
+		Core API
+			CoreRequest / CoreResult / CoreError
+				CoreRequest
+					作用：描述工具调用的请求类型和参数
+					Kite 中：CLI、MCP 和 UI 统一调用
+				CoreResult
+					作用：返回数据、状态、是否变更和恢复点
+					Kite 中：所有工具调用的统一结果
+				CoreError
+					作用：返回稳定错误分类、可重试性和恢复建议
+					Kite 中：CLI 退出码、MCP 错误和 UI 提示
+			ExecutionContext
+			trace_id / deadline / idempotency_key
+				trace_id
+					作用：给一次调用分配全链路追踪标识
+					Kite 中：日志、诊断和调试
+				deadline
+					作用：限制调用最长执行时间
+					Kite 中：Agent 和长任务超时
+				idempotency_key
+					作用：识别重复请求并复用结果
+					Kite 中：避免重复副作用
+			read_only / confirmed
+				read_only
+					作用：拒绝所有状态变更工具
+					Kite 中：只读 MCP 服务和查询模式
+				confirmed
+					作用：要求用户显式确认高危操作
+					Kite 中：关闭 Agent、写文件和破坏性操作
+			Tool / Resource / Prompt 注册
+				Tool
+					作用：注册可执行动作或查询
+					Kite 中：files_list、agent_session_prompt
+				Resource
+					作用：注册只读资源快照
+					Kite 中：Agent profiles、diagnostics、app state
+				Prompt
+					作用：注册标准化多步提示模板
+					Kite 中：Agent 调试和验收入口
+		多端入口
+			GPUI UI
+			SwiftUI UI
+			kite-cli
+			kite-mcp
+		核心能力来源
+			跨语言依赖
+				uniffi 0.32.2
+			项目代码
+				src/ffi.rs
+				src/core_api.rs
+				src/bin/kite-cli.rs
+				src/bin/kite-mcp.rs
+			设计文档
+				docs/architecture/platforms.md
+				docs/architecture/core-api.md
+		能力说明
+			UniFFI Record
+				是什么
+					跨语言传输用的 Rust 结构体。
+				能做什么
+					传输目录列表、文件条目、Git 结果、Agent 状态等数据。
+				在 Kite 中的用法
+					`ffi.rs` 中大量 `*Dto` 类型通过 UniFFI 暴露给 Swift。
+				一句类比
+					跨国海关的申报表，字段固定、内容可读。
+				项目关键数值
+					Record 数量：95 个
+					典型用途：目录、文件、Git、Agent、搜索结果 DTO
+					跨语言边界：Rust → Swift
+				核心代码关键词
+					关键词
+						#[derive(uniffi::Record)]
+						DirectoryEntryDto
+						GitPathSummaryDto
+						AgentReviewDto
+					过程
+						Rust struct ...
+						→ uniffi::Record ...
+						→ Swift struct
+			UniFFI Enum
+				是什么
+					跨语言传输的固定选项类型。
+				能做什么
+					稳定表达状态、错误类型、操作类型和权限决策。
+				在 Kite 中的用法
+					例如 `AgentTransportDto`、`GitErrorKindDto`。
+				一句类比
+					固定选项的下拉菜单。
+				项目关键数值
+					Enum 数量：34 个
+					典型用途：状态、错误、权限、操作类型
+					错误类型：KiteError 统一出口
+				核心代码关键词
+					关键词
+						#[derive(uniffi::Enum)]
+						KiteError
+						AgentTransportDto
+						GitErrorKindDto
+					过程
+						Rust enum ...
+						→ uniffi::Enum ...
+						→ Swift enum
+			UniFFI Object
+				是什么
+					可以由调用方长期持有的跨语言 Rust 对象。
+				能做什么
+					持有服务、会话、进度监视器、Git 任务和监听句柄。
+				在 Kite 中的用法
+					Swift 可以持有 Rust 的 `GitService`、`AgentSession` 等对象。
+				一句类比
+					一个可以在 Swift 侧拿着的 Rust 遥控器。
+				项目关键数值
+					Object 数量：6 个
+					典型对象：KiteCore、GitService、AgentSession、进度监视器
+					持有方式：Swift 侧长期持有 Rust 对象
+				核心代码关键词
+					关键词
+						#[derive(uniffi::Object)]
+						KiteCore
+						GitService
+						GitOperationHandle
+					过程
+						Rust object ...
+						→ uniffi::Object ...
+						→ Swift handle ...
+						→ close/drop
+			Core API
+				是什么
+					业务能力的统一分发层。
+				能做什么
+					做参数校验、只读/确认检查、幂等、超时、错误映射和统一结果封装。
+				在 Kite 中的用法
+					`CoreRequest`、`CoreResult`、`CoreError`、`ExecutionContext` 共同定义契约。
+				一句类比
+					前台统一接单台，所有外壳都从这里提交请求。
+				项目关键数值
+					Tools：16 个
+					Resources：3 个
+					Prompts：2 个
+					CoreRequest 变体：13 个
+				核心代码关键词
+					关键词
+						CoreApi::invoke(...)
+						CoreRequest
+						CoreResult
+						CoreError
+						ExecutionContext
+					过程
+						CoreRequest ...
+						→ CoreApi::invoke ...
+						→ CoreResult/CoreError
+			MCP
+				是什么
+					Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+				能做什么
+					让外部 Agent 通过标准协议发现并调用 Kite Core 能力。
+				在 Kite 中的用法
+					`kite-mcp` 提供 stdio MCP 服务、只读模式和确认策略。
+				一句类比
+					给外部 AI 使用的标准 USB 接口。
+				项目关键数值
+					Tools：16 个；Resources：3 个；Prompts：2 个
+					传输：stdio MCP
+					只读模式：1 个服务级开关
+					确认语义：高危工具需要 confirmed
+				核心代码关键词
+					关键词
+						tools/list
+						tools/call
+						resources/list
+						prompts/get
+						_meta.confirmed
+					过程
+						MCP client ...
+						→ tool/resource/prompt ...
+						→ CoreApi ...
+						→ JSON response
+	15 工程化、验证与复用结论
+		主题概览
+			一句话定位
+				工程化让 GPUI 功能可编译、可测试、可测量、可发布，并帮助识别哪些模式值得复用。
+			学完能回答
+				如何证明一个 GPUI 功能不仅能跑，而且可维护、可回归、可发布？
+		测试与验收
+			纯函数与状态机测试
+			分栏行为和选择测试
+			Agent fixture 集成测试
+			CLI / MCP 测试
+				CLI 测试
+					作用：验证命令解析、退出码和错误映射
+					Kite 中：Core API 终端入口
+				MCP 测试
+					作用：验证只读模式和确认策略
+					Kite 中：MCP 服务协议
+			Windows 真机截图与 UI Automation
+		持续集成与发布
+			Windows CI
+			Clippy
+			Release build
+			浏览器拖拽 E2E
+			发布包与 SHA-256
+			Windows / macOS 发布对齐
+				Windows 发布
+					作用：构建 x64 包并验证 GPUI 功能
+					Kite 中：Windows CI 和发布包
+				macOS 发布
+					作用：构建 arm64 App 并验证 SwiftUI 功能
+					Kite 中：macOS 构建和对齐检查
+		性能与可靠性
+			首内容渲染 perf trace
+			启动、目录加载、搜索、Git 性能场景
+			原子写入、哈希校验、回滚
+			取消、超时、错误恢复
+			资源上限和低功耗策略
+		可复用模式
+			Window Shell / Tab View 分层
+				Window Shell
+					作用：管理窗口、页签和跨页签共享状态
+					Kite 中：KiteWindow
+				Tab View
+					作用：管理单个页签的业务界面
+					Kite 中：KiteApp
+			Entity 持有子 Entity
+			TableDelegate 适配业务数据
+			Provider 组合右键菜单
+			Generation token 丢弃旧结果
+			Task 字段管理异步生命周期
+			UI 与 Core 严格分层
+		风险与重构机会
+			KiteApp 约 1.25 万行，编排职责过多
+			ffi.rs 约 5300 行，跨语言出口较大
+			建议拆分 NavigationState / ColumnBrowserState / SearchState
+				NavigationState
+					作用：集中当前目录、历史和路径动作
+					Kite 中：降低 KiteApp 导航职责
+				ColumnBrowserState
+					作用：集中 ColumnPane、选择和滚动
+					Kite 中：降低分栏职责
+				SearchState
+					作用：集中查询、结果、取消和恢复选择
+					Kite 中：降低搜索职责
+			建议拆分 PreviewState / FileOperationState / GitWorkflowState
+				PreviewState
+					作用：集中预览类型、缓存和加载任务
+					Kite 中：降低预览职责
+				FileOperationState
+					作用：集中复制、剪切、粘贴、压缩和进度
+					Kite 中：降低文件操作职责
+				GitWorkflowState
+					作用：集中 Git 弹窗、长任务、凭据和恢复
+					Kite 中：降低 Git 职责
+			建议拆分 AgentSurfaceState / DialogState
+				AgentSurfaceState
+					作用：集中 Agent 面板、窗口和会话展示状态
+					Kite 中：降低 Agent UI 职责
+				DialogState
+					作用：集中普通弹窗、Git 弹窗和确认流程
+					Kite 中：降低弹窗状态散落
+		核心能力来源
+			项目代码
+				src/app.rs
+				src/ffi.rs
+				src/tests
+				tests/
+			工程脚本
+				.github/workflows/*
+				build.ps1
+				scripts/performance/*
+			设计文档
+				docs/performance/*
+				docs/architecture/release-parity.md
+			项目实践
+				真实功能链路验证 GPUI、异步和系统桥接
+		能力说明
+			feature / cfg
+				是什么
+					Rust 的条件编译开关。
+				能做什么
+					只在 Windows 编译 GPUI，只在测试时编译 Agent fixture，只在性能模式编译测试工具。
+				在 Kite 中的用法
+					`Cargo.toml` 的 `windows-ui`、`agent-fixture`、`performance` 控制不同构建。
+				一句类比
+					按用途装不同配件，不需要的功能不装上车。
+				项目关键数值
+					Cargo features：windows-ui / uniffi-bindgen / agent-fixture / performance，共 4 个
+					Windows GPUI 二进制：1 个
+					agent-fixture 集成测试目标：1 个
+				核心代码关键词
+					关键词
+						#[cfg(windows)]
+						required-features = [...]
+						cfg!(target_os = "windows")
+					过程
+						Cargo feature ...
+						→ cfg 编译 ...
+						→ Windows UI/Core/测试目标
+			Clippy
+				是什么
+					Rust 官方静态代码检查工具。
+				能做什么
+					发现常见错误、代码风格问题、潜在性能和可维护性风险。
+				在 Kite 中的用法
+					CI 使用 `cargo clippy --all-targets --features windows-ui -D warnings`。
+				一句类比
+					给代码做体检。
+				项目关键数值
+					CI 命令：1 条
+					检查范围：--all-targets
+					警告策略：-D warnings
+				核心代码关键词
+					关键词
+						cargo clippy --locked --all-targets --features windows-ui -- -D warnings
+					过程
+						源码 ...
+						→ Clippy ...
+						→ warnings ...
+						→ CI failure
+			test pyramid
+				是什么
+					单元测试、集成测试和端到端验证的分层测试策略。
+				能做什么
+					快速测试业务逻辑，完整测试协议和窗口，最后用真机验证关键交互。
+				在 Kite 中的用法
+					Kite 组合纯函数测试、Agent fixture、CLI/MCP 测试和 Windows UI Automation。
+				一句类比
+					先在家练动作，再上场比赛。
+				项目关键数值
+					#[test] 出现次数：503 次
+					集成测试文件：6 个
+					性能与 Agent fixture：独立测试目标
+				核心代码关键词
+					关键词
+						#[test]
+						kite-agent-fixture
+						core_api_cli
+						core_api_mcp
+						agent_session 测试
+					过程
+						unit ...
+						→ integration ...
+						→ fixture ...
+						→ UI acceptance
+			perf_trace / performance baseline
+				是什么
+					记录关键性能时间点并与历史基线比较的工具和流程。
+				能做什么
+					发现启动、目录加载、搜索、Git 和 Agent 路径的性能回归。
+				在 Kite 中的用法
+					`perf_trace` 标记首窗口和首内容渲染，性能工作流生成 JSON 基线与聚合报告。
+				一句类比
+					给关键流程按秒表，并和历史成绩比较。
+				项目关键数值
+					Windows 首内容：p50 558.0 ms，p95 828.9 ms
+					macOS 首内容：p50 810.0 ms，p95 817.8 ms
+					Agent Windows：ACP Ready 124 ms，输出 1.56 MiB/s
+					Agent 长输出：2,000 条约 0.117 ms，清理 44 ms
+				核心代码关键词
+					关键词
+						perf_trace::mark_once(...)
+						startup.py
+						aggregate.py
+						compare.py
+					过程
+						marker ...
+						→ JSON ...
+						→ p50/p95 ...
+						→ baseline compare
+			generation token pattern
+				是什么
+					用一个递增编号识别异步任务的新旧。
+				能做什么
+					防止旧请求晚返回后覆盖新界面状态。
+				在 Kite 中的用法
+					目录、搜索、VCS、分栏和预览都采用这一模式。
+				一句类比
+					订单号码只认最新一单。
+				项目关键数值
+					KiteApp generation 计数器：7 个
+					过期结果处理：1 次 generation 比对
+					覆盖域：目录、搜索、VCS、分栏、预览
+				核心代码关键词
+					关键词
+						*_generation.wrapping_add(1)
+						if this.generation != generation { return
+						}
+					过程
+						request ...
+						→ generation++ ...
+						→ await ...
+						→ stale drop
+			Task lifecycle
+				是什么
+					管理异步任务何时存活、取消和继续运行。
+				能做什么
+					把 Task 存入字段保持任务；替换字段取消旧任务；需要脱离时调用 detach。
+				在 Kite 中的用法
+					Kite 使用 `_load_task`、`_search_task`、`_vcs_task` 等字段。
+				一句类比
+					订单小票决定这张订单是继续、取消还是留在后厨完成。
+				项目关键数值
+					KiteApp Task 字段：13 个
+					整个 src 中 Task 字段：29 个
+					window.defer 调用点：7 个
+					Task 清理入口：Task::ready(())
+				核心代码关键词
+					关键词
+						_task: Task<()>
+						self._task = cx.spawn_in(...)
+						Task::ready(())
+						detach()
+					过程
+						spawn ...
+						→ 字段持有 ...
+						→ replace/drop ...
+						→ cancel/ready
