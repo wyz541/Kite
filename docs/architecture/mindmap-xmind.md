@@ -82,6 +82,10 @@ AtomicFile 原子写入
 - 修改根主题后，其他能力和 `metadata.json` / `manifest.json` 条目不变。
 - 后续 macOS 画布用同一文件验证首屏、缩放、命中测试和视觉表现。
 
+## 快捷键
+
+跨平台键位和实现状态见 [Mindmap 快捷键映射](mindmap-shortcuts.md)。
+
 ## 下一步
 
 1. 建立 typed topic tree，同时保留 opaque 字段。

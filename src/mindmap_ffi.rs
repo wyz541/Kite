@@ -25,10 +25,39 @@ pub struct MindmapSaveResultDto {
 
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum MindmapEditDto {
-    Rename { topic_id: String, title: String },
-    AddChild { parent_id: String, title: String },
-    AddSibling { topic_id: String, title: String },
-    Delete { topic_id: String },
+    Rename {
+        topic_id: String,
+        title: String,
+    },
+    AddChild {
+        parent_id: String,
+        title: String,
+    },
+    AddSibling {
+        topic_id: String,
+        title: String,
+    },
+    InsertSiblingBefore {
+        topic_id: String,
+        title: String,
+    },
+    NewParent {
+        topic_id: String,
+        title: String,
+    },
+    MoveUp {
+        topic_id: String,
+    },
+    MoveDown {
+        topic_id: String,
+    },
+    Paste {
+        parent_id: String,
+        topic_json: String,
+    },
+    Delete {
+        topic_id: String,
+    },
 }
 
 #[uniffi::export]
@@ -129,22 +158,32 @@ fn apply_edit(content: &mut Value, edit: MindmapEditDto) -> Result<(), String> {
             ensure_attached_children(parent).push(new_topic(title));
         }
         MindmapEditDto::AddSibling { topic_id, title } => {
-            if root.get("id").and_then(Value::as_str) == Some(topic_id.as_str()) {
-                ensure_attached_children(root).push(new_topic(title));
-            } else {
-                let parent_id = find_parent_id(root, &topic_id)
-                    .ok_or_else(|| format!("找不到主题的父级 {topic_id}"))?;
-                let parent = find_topic_mut(root, &parent_id)
-                    .ok_or_else(|| format!("找不到父主题 {parent_id}"))?;
-                let children = ensure_attached_children(parent);
-                let index = children
-                    .iter()
-                    .position(|child| {
-                        child.get("id").and_then(Value::as_str) == Some(topic_id.as_str())
-                    })
-                    .ok_or_else(|| format!("找不到主题 {topic_id}"))?;
-                children.insert(index + 1, new_topic(title));
+            insert_sibling(root, &topic_id, new_topic(title), false)?;
+        }
+        MindmapEditDto::InsertSiblingBefore { topic_id, title } => {
+            insert_sibling(root, &topic_id, new_topic(title), true)?;
+        }
+        MindmapEditDto::NewParent { topic_id, title } => {
+            insert_parent(root, &topic_id, title)?;
+        }
+        MindmapEditDto::MoveUp { topic_id } => {
+            move_sibling(root, &topic_id, -1)?;
+        }
+        MindmapEditDto::MoveDown { topic_id } => {
+            move_sibling(root, &topic_id, 1)?;
+        }
+        MindmapEditDto::Paste {
+            parent_id,
+            topic_json,
+        } => {
+            let pasted: Value = serde_json::from_str(&topic_json)
+                .map_err(|error| format!("剪贴板主题不是有效 JSON：{error}"))?;
+            if !pasted.is_object() {
+                return Err("剪贴板主题必须是 JSON 对象".to_string());
             }
+            let parent = find_topic_mut(root, &parent_id)
+                .ok_or_else(|| format!("找不到父主题 {parent_id}"))?;
+            ensure_attached_children(parent).push(assign_new_ids(pasted));
         }
         MindmapEditDto::Delete { topic_id } => {
             let parent_id =
@@ -200,6 +239,83 @@ fn attached_children_mut(topic: &mut Value) -> Option<&mut Vec<Value>> {
         .get_mut("children")
         .and_then(|children| children.get_mut("attached"))
         .and_then(Value::as_array_mut)
+}
+
+fn insert_sibling(
+    root: &mut Value,
+    topic_id: &str,
+    topic: Value,
+    before: bool,
+) -> Result<(), String> {
+    if root.get("id").and_then(Value::as_str) == Some(topic_id) {
+        ensure_attached_children(root).push(topic);
+        return Ok(());
+    }
+    let parent_id =
+        find_parent_id(root, topic_id).ok_or_else(|| format!("找不到主题的父级 {topic_id}"))?;
+    let parent =
+        find_topic_mut(root, &parent_id).ok_or_else(|| format!("找不到父主题 {parent_id}"))?;
+    let children = ensure_attached_children(parent);
+    let index = children
+        .iter()
+        .position(|child| child.get("id").and_then(Value::as_str) == Some(topic_id))
+        .ok_or_else(|| format!("找不到主题 {topic_id}"))?;
+    children.insert(if before { index } else { index + 1 }, topic);
+    Ok(())
+}
+
+fn insert_parent(root: &mut Value, topic_id: &str, title: String) -> Result<(), String> {
+    let parent_id =
+        find_parent_id(root, topic_id).ok_or_else(|| "根主题不能直接添加父主题".to_string())?;
+    let parent =
+        find_topic_mut(root, &parent_id).ok_or_else(|| format!("找不到父主题 {parent_id}"))?;
+    let children = ensure_attached_children(parent);
+    let index = children
+        .iter()
+        .position(|child| child.get("id").and_then(Value::as_str) == Some(topic_id))
+        .ok_or_else(|| format!("找不到主题 {topic_id}"))?;
+    let topic = children.remove(index);
+    let mut wrapper = new_topic(title);
+    wrapper["children"] = json!({ "attached": [topic] });
+    children.insert(index, wrapper);
+    Ok(())
+}
+
+fn move_sibling(root: &mut Value, topic_id: &str, offset: isize) -> Result<(), String> {
+    let parent_id =
+        find_parent_id(root, topic_id).ok_or_else(|| "根主题不能调整同级顺序".to_string())?;
+    let parent =
+        find_topic_mut(root, &parent_id).ok_or_else(|| format!("找不到父主题 {parent_id}"))?;
+    let children = ensure_attached_children(parent);
+    let index = children
+        .iter()
+        .position(|child| child.get("id").and_then(Value::as_str) == Some(topic_id))
+        .ok_or_else(|| format!("找不到主题 {topic_id}"))?;
+    let target = index as isize + offset;
+    if target < 0 || target >= children.len() as isize {
+        return Ok(());
+    }
+    children.swap(index, target as usize);
+    Ok(())
+}
+
+fn assign_new_ids(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        if object.contains_key("id") {
+            object.insert("id".to_string(), Value::String(new_topic_id()));
+        }
+        if let Some(children) = object
+            .get_mut("children")
+            .and_then(Value::as_object_mut)
+            .and_then(|children| children.get_mut("attached"))
+            .and_then(Value::as_array_mut)
+        {
+            for child in children {
+                *child = assign_new_ids(child.clone());
+            }
+        }
+    }
+    value
 }
 
 fn ensure_attached_children(topic: &mut Value) -> &mut Vec<Value> {
@@ -287,6 +403,77 @@ mod tests {
         assert_eq!(topics[2]["id"], "b");
         assert_eq!(content[0]["rootTopic"]["unknown"]["keep"], true);
         assert_eq!(topics[0]["future"], 1);
+    }
+
+    #[test]
+    fn insertion_parenting_and_reordering_preserve_tree() {
+        let mut content = fixture();
+        apply_edit(
+            &mut content,
+            MindmapEditDto::InsertSiblingBefore {
+                topic_id: "b".to_string(),
+                title: "B0".to_string(),
+            },
+        )
+        .expect("insert before");
+        let ids: Vec<_> = content[0]["rootTopic"]["children"]["attached"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|topic| topic["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids[0], "a");
+        assert_eq!(ids[2], "b");
+
+        apply_edit(
+            &mut content,
+            MindmapEditDto::NewParent {
+                topic_id: "a".to_string(),
+                title: "Parent of A".to_string(),
+            },
+        )
+        .expect("new parent");
+        let parent_id = content[0]["rootTopic"]["children"]["attached"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            content[0]["rootTopic"]["children"]["attached"][0]["title"],
+            "Parent of A"
+        );
+        assert_eq!(
+            content[0]["rootTopic"]["children"]["attached"][0]["children"]["attached"][0]["id"],
+            "a"
+        );
+
+        apply_edit(
+            &mut content,
+            MindmapEditDto::MoveDown {
+                topic_id: parent_id,
+            },
+        )
+        .expect("move down");
+        let moved = &content[0]["rootTopic"]["children"]["attached"][1];
+        assert_eq!(moved["title"], "Parent of A");
+    }
+
+    #[test]
+    fn paste_assigns_new_ids_recursively() {
+        let mut content = fixture();
+        let pasted = content[0]["rootTopic"]["children"]["attached"][0].clone();
+        apply_edit(
+            &mut content,
+            MindmapEditDto::Paste {
+                parent_id: "b".to_string(),
+                topic_json: serde_json::to_string(&pasted).unwrap(),
+            },
+        )
+        .expect("paste");
+        let pasted_topic =
+            &content[0]["rootTopic"]["children"]["attached"][1]["children"]["attached"][0];
+        assert_ne!(pasted_topic["id"], "a");
+        assert_eq!(pasted_topic["future"], 1);
+        assert_eq!(pasted_topic["children"]["attached"][0]["id"], Value::Null);
     }
 
     #[test]

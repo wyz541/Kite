@@ -67,6 +67,9 @@ private final class MindmapEditorModel: ObservableObject {
     @Published var editingID: String?
     @Published var inlineTitle = ""
     @Published var textInputFocused = false
+    @Published var showSidebar = true
+    @Published var zenMode = false
+    @Published var searchFocusRequest = 0
     @Published var zoom: CGFloat = 0.82
     @Published var pan = CGSize.zero
     @Published var status = "正在加载…"
@@ -76,6 +79,7 @@ private final class MindmapEditorModel: ObservableObject {
 
     private var viewportSize = CGSize(width: 1_000, height: 700)
     private var didFit = false
+    private var copiedTopicJSON: String?
     private var undoStack: [MindmapSnapshot] = []
     private var redoStack: [MindmapSnapshot] = []
 
@@ -238,6 +242,107 @@ private final class MindmapEditorModel: ObservableObject {
     func addSibling() {
         guard let topicID = selectedID ?? rootID else { return }
         performEdit(.addSibling(topicId: topicID, title: "新主题"), selecting: .newest)
+    }
+
+    func addSiblingBefore() {
+        guard let topicID = selectedID ?? rootID else { return }
+        performEdit(
+            .insertSiblingBefore(topicId: topicID, title: "新主题"),
+            selecting: .newest
+        )
+    }
+
+    func addParent() {
+        guard let topicID = selectedID ?? rootID else { return }
+        performEdit(.newParent(topicId: topicID, title: "新父主题"), selecting: .newest)
+    }
+
+    func moveSelectedUp() {
+        guard let topicID = selectedID else { return }
+        performEdit(.moveUp(topicId: topicID), selecting: .keep(topicID))
+    }
+
+    func moveSelectedDown() {
+        guard let topicID = selectedID else { return }
+        performEdit(.moveDown(topicId: topicID), selecting: .keep(topicID))
+    }
+
+    func copySelected() {
+        guard let topicID = selectedID,
+              let json = Self.topicJSON(in: document.contentJson, topicID: topicID) else {
+            return
+        }
+        copiedTopicJSON = json
+        status = "已复制主题及其子级"
+    }
+
+    func cutSelected() {
+        guard selectedID != nil else { return }
+        copySelected()
+        guard copiedTopicJSON != nil else { return }
+        deleteSelected()
+    }
+
+    func pasteCopiedTopic() {
+        guard let topicJSON = copiedTopicJSON,
+              let parentID = selectedID ?? rootID else { return }
+        performEdit(
+            .paste(parentId: parentID, topicJson: topicJSON),
+            selecting: .newest
+        )
+    }
+
+    func pasteTextAsTopic() {
+        guard let value = NSPasteboard.general.string(forType: .string),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let parentID = selectedID ?? rootID else {
+            return
+        }
+        performEdit(.addChild(parentId: parentID, title: value), selecting: .newest)
+    }
+
+    func requestSearchFocus() {
+        searchFocusRequest &+= 1
+    }
+
+    func toggleSidebar() {
+        showSidebar.toggle()
+    }
+
+    func toggleZenMode() {
+        zenMode.toggle()
+    }
+
+    func zoomReset() {
+        zoom = 1
+    }
+
+    func centerRoot() {
+        guard let rootID, let root = layout.nodes[rootID] else { return }
+        pan = CGSize(
+            width: -viewportSize.width * 0.32,
+            height: -root.rect.midY * zoom
+        )
+    }
+
+    func toggleBranch() {
+        guard let selectedID, topics[selectedID]?.hasChildren == true else { return }
+        toggleCollapse(selectedID)
+    }
+
+    func expandAllDescendants() {
+        guard let selectedID else { return }
+        var ids = Set<String>()
+        func collect(_ id: String) {
+            guard let topic = topics[id] else { return }
+            ids.insert(id)
+            for child in topic.childIDs {
+                collect(child)
+            }
+        }
+        collect(selectedID)
+        collapsedIDs.subtract(ids)
+        rebuildLayout()
     }
 
     func deleteSelected() {
@@ -497,6 +602,35 @@ private final class MindmapEditorModel: ObservableObject {
         _ = measureRoot
     }
 
+    private static func topicJSON(in contentJSON: String, topicID: String) -> String? {
+        guard let data = contentJSON.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
+
+        func find(_ value: Any) -> [String: Any]? {
+            if let object = value as? [String: Any] {
+                if object["id"] as? String == topicID {
+                    return object
+                }
+                if let children = (object["children"] as? [String: Any])?["attached"] as? [Any] {
+                    for child in children {
+                        if let found = find(child) { return found }
+                    }
+                }
+            }
+            if let array = value as? [Any] {
+                for child in array {
+                    if let found = find(child) { return found }
+                }
+            }
+            return nil
+        }
+
+        guard let topic = find(root),
+              let topicData = try? JSONSerialization.data(withJSONObject: topic),
+              let json = String(data: topicData, encoding: .utf8) else { return nil }
+        return json
+    }
+
     private static func parse(contentJSON: String) throws -> (topics: [String: MindmapTopic], rootID: String?) {
         let data = Data(contentJSON.utf8)
         let rootObject = try JSONSerialization.jsonObject(with: data)
@@ -566,17 +700,23 @@ private struct KiteMindmapEditorView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                header
-                Divider().overlay(Color.white.opacity(0.08))
+                if !model.zenMode {
+                    header
+                    Divider().overlay(Color.white.opacity(0.08))
+                }
                 HStack(spacing: 0) {
-                    sidebar
-                    Rectangle()
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: 1)
+                    if model.showSidebar && !model.zenMode {
+                        sidebar
+                        Rectangle()
+                            .fill(Color.white.opacity(0.08))
+                            .frame(width: 1)
+                    }
                     canvas
                 }
-                Divider().overlay(Color.white.opacity(0.08))
-                statusBar
+                if !model.zenMode {
+                    Divider().overlay(Color.white.opacity(0.08))
+                    statusBar
+                }
             }
         }
         .preferredColorScheme(.dark)
@@ -597,6 +737,10 @@ private struct KiteMindmapEditorView: View {
         .onChange(of: inlineEditorFocused) { _ in updateTextInputFocus() }
         .onChange(of: searchFocused) { _ in updateTextInputFocus() }
         .onChange(of: inspectorTitleFocused) { _ in updateTextInputFocus() }
+        .onChange(of: model.searchFocusRequest) { _ in
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            searchFocused = true
+        }
         .alert("Mindmap 错误", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -954,11 +1098,14 @@ private struct KiteMindmapEditorView: View {
 
     private func inlineEditor(topic: MindmapTopic, node: MindmapNodeLayout, size: CGSize) -> some View {
         let rect = screenRect(node.rect, size: size)
-        return TextField("主题标题", text: $model.inlineTitle)
-            .textFieldStyle(.plain)
+        let lineCount = max(1, model.inlineTitle.split(separator: "\n", omittingEmptySubsequences: false).count)
+        let editorHeight = max(rect.height, CGFloat(min(4, lineCount)) * 18 + 14)
+        return TextEditor(text: $model.inlineTitle)
             .font(.system(size: max(10, min(14, topic.fontSize)), weight: .medium, design: .rounded))
-            .padding(.horizontal, 9)
-            .frame(width: max(110, rect.width), height: max(30, rect.height))
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 4)
+            .frame(width: max(130, rect.width), height: editorHeight)
             .background(
                 Color(red: 0.99, green: 0.985, blue: 0.96),
                 in: RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -969,7 +1116,6 @@ private struct KiteMindmapEditorView: View {
             )
             .focused($inlineEditorFocused)
             .position(x: rect.midX, y: rect.midY)
-            .onSubmit { model.commitInlineEdit() }
             .onExitCommand { model.cancelInlineEdit() }
     }
 
@@ -1259,18 +1405,137 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
     private func installKeyboardMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.window?.isKeyWindow == true else { return event }
-            if self.model.textInputFocused { return event }
 
             let command = event.modifierFlags.contains(.command)
+            let option = event.modifierFlags.contains(.option)
+            let control = event.modifierFlags.contains(.control)
             let shift = event.modifierFlags.contains(.shift)
-            let characters = event.charactersIgnoringModifiers?.lowercased()
+            let key = event.charactersIgnoringModifiers?.lowercased()
 
-            if command, characters == "z" {
-                if shift {
-                    self.model.redo()
-                } else {
-                    self.model.undo()
+            if self.model.textInputFocused {
+                if self.model.editingID != nil {
+                    if event.keyCode == 53 {
+                        self.model.cancelInlineEdit()
+                        return nil
+                    }
+                    if event.keyCode == 36 {
+                        if shift {
+                            self.model.inlineTitle += "\n"
+                        } else {
+                            self.model.commitInlineEdit()
+                        }
+                        return nil
+                    }
                 }
+                return event
+            }
+
+            if command, key == "z" {
+                shift ? self.model.redo() : self.model.undo()
+                return nil
+            }
+            if command, key == "y" {
+                self.model.redo()
+                return nil
+            }
+            if command, key == "o" {
+                KiteMindmapWindowController.chooseAndOpen()
+                return nil
+            }
+            if command, key == "s" {
+                self.model.saveCurrentContent()
+                return nil
+            }
+            if command, shift, key == "n" {
+                self.model.status = "备注尚未实现"
+                return nil
+            }
+            if command, key == "n" {
+                self.model.status = "新建 XMind 文档尚未实现"
+                return nil
+            }
+            if command, key == "f" {
+                self.model.requestSearchFocus()
+                return nil
+            }
+            if command, key == "0" {
+                self.model.zoomReset()
+                return nil
+            }
+            if command, key == "+" || (command && key == "=") {
+                self.model.zoomIn()
+                return nil
+            }
+            if command, key == "-" {
+                self.model.zoomOut()
+                return nil
+            }
+            if command, event.keyCode == 96 {
+                self.model.fit()
+                return nil
+            }
+            if command, event.keyCode == 115 {
+                self.model.centerRoot()
+                return nil
+            }
+            if command, option, key == "f" {
+                self.model.toggleSidebar()
+                return nil
+            }
+            if option, event.keyCode == 126 {
+                self.model.moveSelectedUp()
+                return nil
+            }
+            if option, event.keyCode == 125 {
+                self.model.moveSelectedDown()
+                return nil
+            }
+            if command, shift, event.keyCode == 36 || control, shift, event.keyCode == 36 {
+                self.model.addParent()
+                return nil
+            }
+            if command, key == "c", !option {
+                self.model.copySelected()
+                return nil
+            }
+            if command, key == "x" {
+                self.model.cutSelected()
+                return nil
+            }
+            if command, shift, key == "v" {
+                self.model.pasteTextAsTopic()
+                return nil
+            }
+            if command, key == "v" {
+                self.model.pasteCopiedTopic()
+                return nil
+            }
+            if command, option, key == "c" || command, option, key == "v" {
+                self.model.status = "复制/粘贴样式尚未实现"
+                return nil
+            }
+            if command, shift, key == "l" {
+                self.model.status = "自由主题尚未实现"
+                return nil
+            }
+            if command, key == "l" {
+                self.model.status = "联系线尚未实现"
+                return nil
+            }
+            if command, key == "b" {
+                self.model.status = "外框尚未实现"
+                return nil
+            }
+            if command, key == "]" {
+                self.model.status = "概要尚未实现"
+                return nil
+            }
+            if command, key == "k" {
+                self.model.status = "超链接尚未实现"
+                return nil
+            }
+            if event.keyCode == 100 {
+                self.model.toggleZenMode()
                 return nil
             }
 
@@ -1279,7 +1544,11 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
                 self.model.addChild()
                 return nil
             case 36:
-                self.model.addSibling()
+                if shift {
+                    self.model.addSiblingBefore()
+                } else {
+                    self.model.addSibling()
+                }
                 return nil
             case 49, 120:
                 self.model.beginEditingSelected()
@@ -1303,6 +1572,14 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
                 self.model.moveSelection(.up)
                 return nil
             default:
+                if key == "/" {
+                    self.model.toggleBranch()
+                    return nil
+                }
+                if key == "*" {
+                    self.model.expandAllDescendants()
+                    return nil
+                }
                 return event
             }
         }
