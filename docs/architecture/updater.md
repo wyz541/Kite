@@ -145,6 +145,7 @@ Windows Core 在下载前检查当前 EXE 文件及所在目录是否可写。
 移动失败时，助手重试。
 重试直接重命名目标文件。
 此操作兼容 Windows 加载器的共享删除权限。
+助手使用 `System.IO.Compression.ZipFile.ExtractToDirectory` 的两参数 API 解压更新包，避免 Windows PowerShell `Expand-Archive` 在部分 .NET Framework 环境调用不存在的三参数重载。
 助手复制已经校验的新 EXE。
 助手使用 .NET SHA-256 计算目标文件摘要。
 助手不依赖 `Get-FileHash` PowerShell 模块。

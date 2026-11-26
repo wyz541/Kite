@@ -73,6 +73,9 @@ jobs:
       - name: Run Agent permission UI tests
         run: cargo test --locked --lib agent_permission_ui::tests
 
+      - name: Run updater tests
+        run: cargo test --locked --lib updater::tests -- --test-threads=1
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --features windows-ui,agent-fixture -- -D warnings
 

@@ -1178,8 +1178,11 @@ try {
     if ($actualPackageHash -ne $ExpectedHash.ToLowerInvariant()) {
         throw "更新包 SHA-256 不匹配"
     }
-    New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
-    Expand-Archive -LiteralPath $Source -DestinationPath $stagingDirectory -Force
+    # Windows PowerShell's Expand-Archive can call a three-argument
+    # ExtractToDirectory overload that is unavailable on some .NET Framework
+    # installations. Use the stable two-argument ZipFile API instead.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($Source, $stagingDirectory)
     foreach ($name in @('Kite.exe', 'kensaku-cli.exe', 'kensaku-daemon.exe')) {
         $sourcePath = Join-Path $stagingDirectory $name
         if (-not (Test-Path -LiteralPath $sourcePath)) {
@@ -1380,7 +1383,6 @@ mod tests {
         assert!(helper.contains("Updated Kite launch attempt"));
         assert!(helper.contains("Installed Kite.exe SHA-256 mismatch"));
         assert!(helper.contains("Start-Sleep -Milliseconds 1000"));
-        assert!(helper.contains("Expand-Archive"));
         assert!(helper.contains("Join-Path $stagingDirectory 'Kite.exe'"));
         assert!(helper.contains("kensaku-cli.exe"));
         assert!(!helper.contains("Copy-Item -LiteralPath $Source -Destination $Target -Force"));
@@ -1530,6 +1532,18 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
         assert!(!helper.contains("Get-FileHash"));
     }
 
+    #[test]
+    fn windows_update_helper_uses_compatible_zip_extraction() {
+        let helper = windows_update_helper();
+        assert!(helper.contains("System.IO.Compression.FileSystem"));
+        assert!(
+            helper.contains(
+                "[IO.Compression.ZipFile]::ExtractToDirectory($Source, $stagingDirectory)"
+            )
+        );
+        assert!(!helper.contains("Expand-Archive -LiteralPath"));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_update_helper_has_valid_powershell_syntax() {
@@ -1557,6 +1571,55 @@ Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
             status.success(),
             "update helper contains invalid PowerShell syntax"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_update_extraction_api_works_with_windows_powershell() {
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let directory = std::env::temp_dir().join(format!(
+            "kite-update-extract-api-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create extraction API test directory");
+        let archive = directory.join("package.zip");
+        let destination = directory.join("staging");
+        let file = File::create(&archive).expect("create extraction API archive");
+        let mut writer = ZipWriter::new(file);
+        writer
+            .start_file("Kite.exe", SimpleFileOptions::default())
+            .expect("start extraction API entry");
+        writer
+            .write_all(b"updated executable")
+            .expect("write entry");
+        writer.finish().expect("finish extraction API archive");
+
+        let quote = |path: &Path| path.to_string_lossy().replace('\'', "''");
+        let command = format!(
+            "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory('{}', '{}')",
+            quote(&archive),
+            quote(&destination)
+        );
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+            .output()
+            .expect("run PowerShell extraction API check");
+        let extracted = fs::read(destination.join("Kite.exe"));
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(
+            output.status.success(),
+            "PowerShell extraction API failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(extracted.as_deref(), Ok(b"updated executable".as_slice()));
     }
 
     #[test]
