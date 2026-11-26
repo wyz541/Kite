@@ -1,0 +1,16 @@
+{
+  "path": "kite-rust-gpui-capability.xmind",
+  "sha256": "46030710c6396bd99a322c67c1f048d1820dde2abdf751bfc9c4678ed1a93a8e",
+  "format": "modern-content-json",
+  "entries": 3,
+  "sheets": 1,
+  "topics": 3019,
+  "styledTopics": 654,
+  "shapeClassProperties": 140,
+  "purpose": [
+    "ui-rendering",
+    "capability-coverage",
+    "lossless-round-trip",
+    "large-document-performance"
+  ]
+}
