@@ -444,8 +444,9 @@ function Test-BrowserUpload {
             $kiteWindow = [System.Windows.Automation.AutomationElement]::FromHandle($KiteHandle)
             $rect = $kiteWindow.Current.BoundingRectangle
             $columnHeaderBottom = Find-ColumnHeaderBottom -ProcessId $KiteProcess.Id
-            # After focus, the current file column sits between the sidebar and preview pane.
-            $fromX = [int]($rect.Left + ($rect.Width * 0.45))
+            # With the preview/Agent pane closed, the active file column is the
+            # rightmost column of the three-column layout.
+            $fromX = [int]($rect.Left + ($rect.Width * 0.75))
             if ($null -ne $columnHeaderBottom) {
                 # The first file row follows the 32 px column header and 30 px row.
                 $fromY = [int]($columnHeaderBottom + 15)
