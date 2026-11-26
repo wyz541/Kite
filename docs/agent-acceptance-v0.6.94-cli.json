@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-11-26",
+  "platform": "windows-x64",
+  "synthetic_workspace": "C:\\KiteAgentAcceptance\\final\\workspace",
+  "headless": true,
+  "runs": [
+    {
+      "path": "kite-cli agent run",
+      "profile_id": "codex-acp-local",
+      "adapter": "@agentclientprotocol/codex-acp",
+      "adapter_version": "2.12.1",
+      "prompt": "Reply exactly CLI-CODEX-OK without tools or file changes",
+      "final_output": "CLI-CODEX-OK",
+      "state": "completed",
+      "closed": true,
+      "elapsed_ms": 5895,
+      "stream_events": 4
+    },
+    {
+      "path": "kite-cli agent run",
+      "profile_id": "claude-acp-local",
+      "adapter": "claude-code-acp",
+      "adapter_version": "0.16.2",
+      "prompt": "Reply exactly CLI-CLAUDE-OK without tools or file changes",
+      "final_output": "CLI-CLAUDE-OK",
+      "state": "completed",
+      "closed": true,
+      "elapsed_ms": 7350,
+      "stream_events": 2
+    }
+  ],
+  "permission": {
+    "path": "kite-cli batch",
+    "profile_id": "claude-acp-local",
+    "request_title": "Write C:\\KiteAgentAcceptance\\final\\workspace\\cli-permission-test.txt",
+    "allowed_decisions": [
+      "reject_once",
+      "cancel"
+    ],
+    "decision": "reject_once",
+    "final_state": "completed",
+    "permission_requests_remaining": 0,
+    "closed": true,
+    "target_file_created": false,
+    "policy_notice": "只读策略已禁用允许操作"
+  },
+  "cancellation": {
+    "path": "kite-cli batch",
+    "profile_id": "codex-acp-local",
+    "state_before_cancel": "running",
+    "cancel_requested": true,
+    "final_state": "cancelled",
+    "closed": true,
+    "output_bytes_at_cancel": 0
+  },
+  "mcp": {
+    "transport": "stdio",
+    "server": "kite",
+    "version": "0.6.96",
+    "tool_count": 17,
+    "agent_tool_count": 13,
+    "call": "agent_run",
+    "final_output": "MCP-CODEX-OK",
+    "state": "completed",
+    "closed": true
+  },
+  "error_contract": {
+    "profile_id": "missing-profile",
+    "kind": "not_found",
+    "code": "profile_not_found",
+    "cli_exit_code": 4
+  },
+  "notes": [
+    "All business operations use the same Core API as the UI shells.",
+    "No GUI automation, Computer Use, screenshot OCR, or clipboard inspection was used for this acceptance record.",
+    "Auto-follow/manual scroll pause and the complete keyboard focus sequence remain UI-only acceptance items."
+  ]
+}

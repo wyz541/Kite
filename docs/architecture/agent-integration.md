@@ -97,9 +97,9 @@ Kite 不自动扫描、导入或覆盖 Agent 原生配置。
 
 ### Codex ACP
 
-- 适配器：`@zed-industries/codex-acp`。
-- 验证版本：`0.16.0`。
-- 用户需先安装适配器并完成 Codex 原生认证。
+- 适配器：`@agentclientprotocol/codex-acp`。
+- 验证版本：`2.12.1`（随包提供 `@openai/codex 0.172.0`）。
+- 用户需先安装适配器并完成 Codex 原生认证；旧 `@zed-industries/codex-acp` 已弃用。
 
 未验证的供应商不进入内置列表。
 自定义接入继续保留。
@@ -132,6 +132,23 @@ Agent 自己仍可能通过其原生工具请求权限，因此界面必须显�
 - 所有待处理权限请求以 `cancelled` 结果返回。
 - 宽限期后仍未结束，则终止完整进程树。
 - 每条错误路径都必须清理子进程和读取线程。
+
+## 无 UI 调试与验收
+
+Agent 业务逻辑优先通过 `kite-cli` 或 `kite-mcp` 验证。两者都调用同一个 Core API，不读取或依赖 GPUI/SwiftUI 视图状态。
+
+```bash
+# 一次完成启动、提示、流式事件、终态和关闭
+kite-cli agent run   --profile codex-acp-local   --cwd C:/KiteAgentAcceptance/workspace   --context C:/KiteAgentAcceptance/workspace/hello.md   --prompt "Reply with exactly CLI-OK. Do not modify files."   --timeout-ms 120000
+
+# 需要权限确认、取消或分步轮询时，使用 JSONL batch 保持同一 session
+kite-cli batch < agent-acceptance.jsonl
+
+# MCP 客户端可直接调用 agent_session_* / agent_run
+kite-mcp --read-only
+```
+
+CLI/MCP 负责业务数据、流式事件、权限决策、取消和进程清理。UI 只保留视觉、键盘焦点、滚动和平台交互验收；这些 UI-only 项不能用 CLI 结果替代。完整命令与 Schema 见 [Core API 与多端外壳](core-api.md)。
 
 ## 上下文
 

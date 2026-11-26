@@ -24,6 +24,7 @@ ALLOWED_IMAGES = {
     "docs/images/agent-acceptance-v0.6.94/windows-agent-empty.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-ready.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-streaming.png",
+    "docs/images/agent-acceptance-v0.6.94/windows-agent-codex-completed.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-completed.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-cancelled.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-error.png",
