@@ -267,7 +267,15 @@ impl RuntimeShared {
         }
         if let Ok(mut snapshot) = self.snapshot.lock() {
             snapshot.closed = true;
-            snapshot.state = AgentRuntimeState::Closed;
+            if !matches!(
+                snapshot.state,
+                AgentRuntimeState::Completed
+                    | AgentRuntimeState::Failed
+                    | AgentRuntimeState::Cancelled
+                    | AgentRuntimeState::Closed
+            ) {
+                snapshot.state = AgentRuntimeState::Closed;
+            }
             snapshot.elapsed_ms = self.started.elapsed().as_millis() as u64;
         }
         self.emit(AgentEventKind::Status, None, None);

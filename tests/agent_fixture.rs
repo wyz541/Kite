@@ -121,9 +121,8 @@ fn runtime_uses_resolved_profile_working_directory_not_caller_cwd() {
         dunce::canonicalize(&nested).expect("canonical nested directory")
     );
     runtime.shutdown();
-    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| {
-        snapshot.state == AgentRuntimeState::Closed
-    });
+    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| snapshot.closed);
+    assert_eq!(runtime.snapshot().state, AgentRuntimeState::Completed);
     thread::sleep(Duration::from_millis(100));
     fs::remove_dir_all(root).expect("remove temp directory");
 }
@@ -553,9 +552,7 @@ fn oversized_output_is_rejected() {
     });
     assert!(snapshot.output_truncated);
     runtime.shutdown();
-    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| {
-        snapshot.state == AgentRuntimeState::Closed
-    });
+    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| snapshot.closed);
 }
 
 #[test]

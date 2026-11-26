@@ -7,6 +7,17 @@
 - Gate write confirmation on the Profile's declared capabilities and keep Agent-supplied secrets redacted from diagnostics and errors.
 - Keep permission presentation and recovery behavior aligned between Windows and macOS.
 
+## Agent working directory
+
+- Resolve `SelectedItem`, `FileParent`, `RepositoryRoot`, `Fixed`, and `Ask` working-directory policies in the shared Rust Core.
+- Use the same resolved directory for the UI preview, Core API sessions, and the actual Agent child-process working directory.
+- Block invalid fixed and repository paths with an explicit recovery state instead of silently starting in the wrong directory.
+- Keep the pre-send `Ask` directory picker and policy behavior aligned between Windows and macOS.
+
+## Agent runtime reliability
+
+- Preserve completed, failed, and cancelled states after the Agent process shuts down instead of replacing the terminal result with a generic closed state.
+
 ## Archive compatibility
 
 - Restore legacy GBK/CP936 file and directory names when extracting ZIP archives that omit the UTF-8 filename flag.
