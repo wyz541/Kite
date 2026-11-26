@@ -24,6 +24,23 @@
                 <string>public.folder</string>
             </array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>XMind Mind Map</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>xmind</string>
+            </array>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.wyz541.kite.xmind</string>
+                <string>org.xmind.xmind</string>
+            </array>
+        </dict>
     </array>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
@@ -46,6 +63,23 @@
             <string>Kite File Drag Items</string>
             <key>UTTypeIdentifier</key>
             <string>com.wyz541.kite.file-items</string>
+        </dict>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>XMind Mind Map</string>
+            <key>UTTypeIdentifier</key>
+            <string>com.wyz541.kite.xmind</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>xmind</string>
+                </array>
+            </dict>
         </dict>
     </array>
     <key>LSMinimumSystemVersion</key>

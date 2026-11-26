@@ -323,3 +323,37 @@ fn test_path(label: &str) -> PathBuf {
         NEXT_PATH.fetch_add(1, Ordering::Relaxed)
     ))
 }
+
+#[test]
+fn ui_fixture_edits_round_trip_through_ffi() {
+    use kite_core::mindmap_ffi::{MindmapEditDto, edit_mindmap_document, open_mindmap_document};
+
+    let path = test_path("ui-ffi-edit");
+    fs::copy(fixture_path(UI_FIXTURE), &path).expect("copy UI fixture");
+    let opened = open_mindmap_document(path.to_string_lossy().into_owned()).expect("open via FFI");
+    let content: Value = serde_json::from_str(&opened.content_json).expect("parse FFI content");
+    let root_id = content[0]["rootTopic"]["id"]
+        .as_str()
+        .expect("root topic id")
+        .to_string();
+    assert_eq!(count_value(&content, "topic"), 3_019);
+
+    let added = edit_mindmap_document(
+        path.to_string_lossy().into_owned(),
+        opened.source_sha256,
+        MindmapEditDto::AddChild {
+            parent_id: root_id.clone(),
+            title: "UI smoke topic".to_string(),
+        },
+    )
+    .expect("add child through FFI");
+    let content: Value = serde_json::from_str(&added.content_json).expect("parse edited content");
+    assert_eq!(count_value(&content, "topic"), 3_020);
+    assert!(added.content_json.contains("UI smoke topic"));
+
+    let reopened =
+        open_mindmap_document(path.to_string_lossy().into_owned()).expect("reopen edited fixture");
+    assert!(reopened.content_json.contains("UI smoke topic"));
+
+    let _ = fs::remove_file(path);
+}

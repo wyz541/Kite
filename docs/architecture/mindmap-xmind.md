@@ -82,9 +82,43 @@ AtomicFile 原子写入
 - 修改根主题后，其他能力和 `metadata.json` / `manifest.json` 条目不变。
 - 后续 macOS 画布用同一文件验证首屏、缩放、命中测试和视觉表现。
 
+## 快捷键
+
+跨平台键位和实现状态见 [Mindmap 快捷键映射](mindmap-shortcuts.md)。
+
 ## 下一步
 
 1. 建立 typed topic tree，同时保留 opaque 字段。
 2. 增加命令/撤销模型。
 3. 增加 XMind 8 读取和迁移。
 4. 在 macOS 原生画布上加载该能力地图并记录 500～5,000 节点性能。
+
+
+## macOS 编辑器窗口
+
+第一版 macOS 编辑器位于 `apps/macos/Sources/KiteMindmapWindow.swift`。
+
+入口：
+
+- 菜单 `Mindmap > 打开 XMind…`，快捷键 `Command+Shift+M`。
+- 菜单 `Mindmap > 打开示例`。
+- Finder 或其他应用通过 `.xmind` 打开 Kite。
+- 开发启动参数 `--mindmap <path>`。
+- 开发启动参数 `--mindmap-sample`。
+
+窗口行为：
+
+- 独立 NSWindow，不阻塞 Kite 主窗口。
+- 同一路径只保留一个编辑器窗口。
+- 左侧 OUTLINE 提供可见结构树和主题搜索，可直接定位深层主题。
+- 画布显示层级连线、节点颜色、主题形状和折叠状态。
+- 单击选择；双击节点进入画布内联标题编辑；点击节点右侧 +/- 展开或折叠。
+- 拖拽平移，触控板捏合缩放。
+- `Tab` 添加子主题，`Enter` 添加同级，`Space`/`F2` 编辑标题，方向键导航，`Delete` 删除。
+- `Command+Z` / `Command+Shift+Z` 撤销和重做。历史快照仍通过 Rust Core 原子保存。
+- 节点标题编辑、添加子主题、添加同级和删除都通过 Rust Core 执行并原子保存。
+- 底部状态栏显示 Rust Core 状态、源文件哈希、快捷键、可见节点数和缩放比例。
+
+Debug 构建使用独立的 `com.wyz541.kite.mindmapdev` bundle identifier 和 `KiteMindmapDev` 可执行文件，便于与已安装的正式 Kite 同时运行。
+
+示例文件由 `apps/macos/build.sh` 复制到应用资源。首次打开示例时，会复制到 `~/Library/Application Support/Kite/Mindmaps/`，避免修改仓库内的验收基线文件。

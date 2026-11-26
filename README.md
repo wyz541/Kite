@@ -145,6 +145,7 @@ macOS 可与 Finder 共享文件剪贴板。
 - Windows 提供独立预览窗口和内置文本编辑器。
 - macOS 提供系统快速预览、原生预览卡和内置文本编辑器。
 - Markdown（`.md`、`.markdown`、`.mdx`、`.mk`）在独立编辑窗口中支持边编辑、边预览。
+- `macOS` 提供独立 XMind Mindmap 编辑器窗口，直接读取和原子保存现代 `.xmind` 文件。
 - 预览信息支持选择和复制。
 - 文本编辑器支持未保存状态保护和外部修改冲突检测。
 
@@ -383,6 +384,8 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [图标系统](docs/design/icon-system.md)
 - [搜索实现调研](docs/RUST_SEARCH_ENGINE_RESEARCH.md)
 - [文本编辑器调研](docs/TEXT_EDITOR_RESEARCH.md)
+- [Mindmap XMind Core](docs/architecture/mindmap-xmind.md)
+- [Mindmap 快捷键映射](docs/architecture/mindmap-shortcuts.md)
 - [发布对齐检查](docs/architecture/release-parity.md)
 - [性能基线与比较方法](docs/performance/README.md)
 - [截图隐私规则](docs/SCREENSHOT_POLICY.md)
