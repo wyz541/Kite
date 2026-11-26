@@ -85,6 +85,10 @@ Agent 配置保存在用户本地数据目录下的 `agent.json`。
 Kite 不自动扫描、导入或覆盖 Agent 原生配置。
 预设只填充接入元数据，认证继续由 Agent 自己的登录流程完成。
 
+从 Finder 或 Dock 启动时，macOS 可能只向应用提供最小 `PATH`。
+Core 会在继承的搜索路径后补充 Apple Silicon Homebrew 的 `/opt/homebrew/bin` 和 Intel Homebrew 的 `/usr/local/bin`，因此通过 `npm -g` 安装的 ACP 适配器无需用户在终端中启动 Kite。
+显式设置的 Profile `PATH` 优先于自动补充值，并同时用于命令解析和子进程环境。
+
 ## 内置预设
 
 首批仅列出可验证的 ACP 接入：
@@ -132,6 +136,7 @@ Agent 自己仍可能通过其原生工具请求权限，因此界面必须显�
 - 所有待处理权限请求以 `cancelled` 结果返回。
 - 宽限期后仍未结束，则终止完整进程树。
 - 每条错误路径都必须清理子进程和读取线程。
+- 诊断页的一次性连接测试与真实会话使用同一套进程隔离和清理逻辑；即使 Agent 命令是 npm 启动 wrapper，也会终止整个进程组，避免子进程持有管道导致测试挂起。
 
 ## 上下文
 

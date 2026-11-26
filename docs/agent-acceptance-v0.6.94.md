@@ -4,7 +4,8 @@
 
 该记录用于 #157 的双平台产品化验收。
 Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。
-2026-11-25 已在 Windows 上使用真实 Claude Code ACP 完成 UI、权限拒绝和取消闭环；macOS 实机、Codex ACP、自动跟随和完整键盘焦点仍需继续验收。
+2026-11-25 已在 Windows 上使用真实 Claude Code ACP 完成 UI、权限拒绝和取消闭环。
+同日已在 Apple Silicon macOS 上完成真实 Codex ACP 的 Core/CLI 闭环（提示、流式输出、取消、权限拒绝与进程清理）；macOS 原生 UI、截图和完整键盘焦点仍需继续验收。
 
 ## Windows 实机验收（2026-11-25）
 
@@ -27,37 +28,55 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。
 
 仍未完成的 Windows 验收：Codex ACP、自动跟随/手动滚动暂停、完整键盘焦点序列。上述项目不得记为通过。
 
+## macOS Apple Silicon 实机 Core/CLI 验收（2026-11-25）
+
+环境：Apple M1 Max、macOS 27.0.1、Kite v0.6.94 arm64 构建、`@zed-industries/codex-acp` `0.16.0`、`@zed-industries/claude-code-acp` `0.16.2`、只读合成工作目录。
+
+已通过：
+
+- 真实 Codex ACP 完成 ACP initialize，声明恢复会话、图片/嵌入上下文和 MCP HTTP 能力。
+- `kite-cli agent run` 使用真实 Codex 完成一次只读提示，流式事件依次输出到 `KITE-CODEX-ACP-OK`，终态为 `completed` 且会话关闭。
+- 真实 Codex 长任务在 `running` 状态取消，终态为 `cancelled`；会话关闭后没有残留 `codex-acp` 子进程。
+- 使用 Codex `read-only` 沙箱触发真实权限请求；选择拒绝后任务结束，`permission-test.txt` 未创建。
+- 真实 Claude Code ACP `0.16.2` 完成 initialize；真实提示返回 `Authentication required`，因此未记为认证或闭环通过。
+- 连接测试改为终止完整进程组后，npm wrapper 子进程不再因持有 stdout 管道导致测试挂起。
+- 修复运行进程关闭后覆盖终态的问题；失败、取消和完成状态在 `closed=true` 后仍保留，供 UI 与 CLI 正确展示。
+- 在最小 `PATH=/usr/bin:/bin` 下，Core 可通过自动补充的 Homebrew 路径解析 `codex-acp`。
+
+以上是 Core/CLI 与真实协议证据，不替代 macOS 原生 UI 截图、自动跟随和键盘验收。
+
 ## 当前自动化证据
 
-- `cargo test --locked --lib`：346 项通过，12 项按设计忽略。
-- `cargo test --locked --lib agent`：73 项通过，3 项按设计忽略，覆盖配置、预设、会话、运行时、诊断和 #156 结果审核。
+- `cargo test --locked --lib`：330 项通过，7 项按设计忽略。
+- `cargo test --locked --lib agent`：75 项通过，3 项按设计忽略，覆盖配置、预设、会话、运行时、诊断和 #156 结果审核。
 - `cargo test --locked --features windows-ui --bin kite-explorer`：98 项通过，4 项按设计忽略。
 - `cargo test --locked --test agent_fixture`：7 项通过，覆盖正常流、权限、取消、超时、超大输出、失败和进程树清理。
 - `cargo test --locked --test agent_fixture_protocol`：6 项通过，覆盖 ACP 帧、Markdown、权限、取消、重试和脱敏输入。
+- `cargo test --locked --lib agent::`：50 项通过，3 项按设计忽略；新增 Profile `PATH` 解析与 npm wrapper 进程树清理回归测试。
 - `cargo check --locked --features windows-ui --bin kite-explorer`：通过。
 - `cargo clippy --locked --all-targets --features windows-ui -- -D warnings`：通过。
 - `bash .github/scripts/check-feature-matrix.sh`：通过。
 - `python .github/scripts/check-privacy.py`：通过。
 - Windows x64 性能基线：`docs/performance/results/v0.6.94-agent-windows-x64.json`。
 
-macOS 构建和真实 Agent 验收不能在当前 Windows 主机上替代，必须使用 Apple Silicon 实机或 macOS CI 产生证据。
+macOS 原生 UI、截图、键盘和自动跟随验收仍必须在已解锁的 Apple Silicon 实机上完成；Core/CLI 证据不能替代产品壳验收。
 
 ## 真实 Agent 闭环
 
 | 检查 | Windows | macOS |
 |---|---|---|
-| 安装并认证 Claude Code ACP | 已通过（真实 ACP） | 待实机执行 |
-| 安装并认证 Codex ACP | 待实机执行 | 待实机执行 |
-| 设置中测试连接 | 已执行；ACP 初始化成功，Agent 声明需原生认证 | 待实机执行 |
-| 右键文件发起 Agent | 已通过 | 待实机执行 |
-| 流式回答 | 已通过 | 待实机执行 |
-| 停止任务 | 已通过；子进程退出 | 待实机执行 |
-| 权限确认与拒绝 | 已通过（真实 Claude ACP；拒绝后未写文件） | 待实机执行 |
-| 重试失败或取消的任务 | 已通过（取消后重试） | 待实机执行 |
-| 自动跟随与手动滚动暂停 | 待实机执行 | 待实机执行 |
-| 复制回答 | 已通过（`FINAL-OK`） | 待实机执行 |
-| 关闭后无残留子进程 | 已通过 | 待实机执行 |
-| 独立窗口关闭/重开并保持会话 | 已通过 | 待实机执行 |
+| 安装并认证 Claude Code ACP | 已通过（真实 ACP） | ACP 初始化通过；真实提示待原生认证 |
+| 安装并认证 Codex ACP | 待实机执行 | 已通过（真实 ACP Core/CLI） |
+| 设置中测试连接 | 已执行；ACP 初始化成功，Agent 声明需原生认证 | Core 探针通过；UI 待实机执行 |
+| 右键文件发起 Agent | 已通过 | 待 UI 实机执行 |
+| 流式回答 | 已通过 | CLI 已通过；UI 待实机执行 |
+| 停止任务 | 已通过；子进程退出 | CLI 已通过；UI 待实机执行 |
+| 权限确认与拒绝 | 已通过（真实 Claude ACP；拒绝后未写文件） | CLI 已通过（真实 Codex ACP；拒绝后未写文件）；UI 待实机执行 |
+| 重试失败或取消的任务 | 已通过（取消后重试） | 待 UI 实机执行 |
+| 自动跟随与手动滚动暂停 | 待实机执行 | 待 UI 实机执行 |
+| 复制回答 | 已通过（`FINAL-OK`） | 待 UI 实机执行 |
+| 关闭后无残留子进程 | 已通过 | CLI 已通过；UI 待实机执行 |
+| 独立窗口关闭/重开并保持会话 | 已通过 | 待 UI 实机执行 |
 
 验收使用真实 Agent，不使用 fixture 替代产品闭环。
 fixture 只用于自动化边界测试。

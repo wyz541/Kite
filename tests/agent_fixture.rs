@@ -163,9 +163,7 @@ fn oversized_output_is_rejected() {
     });
     assert!(snapshot.output_truncated);
     runtime.shutdown();
-    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| {
-        snapshot.state == AgentRuntimeState::Closed
-    });
+    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| snapshot.closed);
 }
 
 #[test]

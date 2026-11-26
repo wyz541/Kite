@@ -87,8 +87,8 @@ pub(crate) fn resolve_agent_command(profile: &AgentProfile, cwd: &Path) -> Resul
             .ok_or_else(|| format!("找不到 Agent 可执行文件：{command}"));
     }
 
-    let path_var = env::var_os("PATH").unwrap_or_default();
-    for directory in env::split_paths(&path_var) {
+    let search_path = effective_agent_path(profile).unwrap_or_default();
+    for directory in env::split_paths(&search_path) {
         for candidate in command_candidates(&directory, command) {
             if candidate.is_file() {
                 return Ok(candidate);
@@ -127,22 +127,48 @@ pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<
         return Err(format!("Agent 工作目录不存在：{}", cwd.display()));
     }
     let (mut command, executable) = build_agent_command(profile, cwd)?;
-
     command
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear();
+        .stderr(Stdio::piped());
+    configure_agent_process(&mut command, profile, None);
+
+    command
+        .spawn()
+        .map_err(|error| format!("无法启动 Agent {}：{error}", executable.display()))
+}
+
+pub(crate) fn configure_agent_process(
+    command: &mut Command,
+    profile: &AgentProfile,
+    credential: Option<&str>,
+) {
+    command.env_clear();
     for name in SAFE_ENV_NAMES {
         if let Some(value) = env::var_os(name) {
             command.env(name, value);
         }
     }
+    if !profile
+        .environment
+        .iter()
+        .any(|variable| variable.name.eq_ignore_ascii_case("PATH"))
+        && let Some(path) = effective_agent_path(profile)
+    {
+        command.env("PATH", path);
+    }
     for variable in &profile.environment {
         if !variable.value.is_empty() {
             command.env(variable.name.trim(), &variable.value);
         }
+    }
+    if let Some(credential) = credential {
+        let key = profile
+            .credential_env_var
+            .as_deref()
+            .unwrap_or("KITE_AGENT_TOKEN");
+        command.env(key, credential);
     }
 
     #[cfg(windows)]
@@ -155,11 +181,48 @@ pub(crate) fn spawn_agent_process(profile: &AgentProfile, cwd: &Path) -> Result<
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
-
-    command
-        .spawn()
-        .map_err(|error| format!("无法启动 Agent {}：{error}", executable.display()))
 }
+
+fn effective_agent_path(profile: &AgentProfile) -> Option<std::ffi::OsString> {
+    if let Some(path) = profile
+        .environment
+        .iter()
+        .rev()
+        .find(|variable| variable.name.eq_ignore_ascii_case("PATH"))
+        .map(|variable| variable.value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(path.into());
+    }
+
+    let inherited = env::var_os("PATH").unwrap_or_default();
+    let mut directories = env::split_paths(&inherited).collect::<Vec<_>>();
+    append_platform_agent_paths(&mut directories);
+    env::join_paths(directories).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn append_platform_agent_paths(directories: &mut Vec<PathBuf>) {
+    for path in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let path = PathBuf::from(path);
+        if !directories.contains(&path) {
+            directories.push(path);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn append_platform_agent_paths(directories: &mut Vec<PathBuf>) {
+    if let Some(app_data) = env::var_os("APPDATA") {
+        let path = PathBuf::from(app_data).join("npm");
+        if !directories.contains(&path) {
+            directories.push(path);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn append_platform_agent_paths(_directories: &mut Vec<PathBuf>) {}
 
 pub(crate) fn terminate_agent_process(child: &mut Child) {
     let pid = child.id();
@@ -496,6 +559,71 @@ mod tests {
         };
         let cwd = env::current_dir().expect("cwd");
         let _ = resolve_agent_command(&profile, &cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_a_command_from_the_profile_path() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!(
+            "kite-agent-profile-path-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create profile path");
+        let executable = directory.join("profile-agent");
+        fs::write(&executable, b"#!/bin/sh\nexit 0\n").expect("write agent");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make agent executable");
+        let profile = AgentProfile {
+            executable: Some("profile-agent".to_string()),
+            environment: vec![crate::agent::AgentEnvironmentVariable {
+                name: "PATH".to_string(),
+                value: directory.to_string_lossy().into_owned(),
+            }],
+            ..AgentProfile::default()
+        };
+
+        let resolved = resolve_agent_command(&profile, &env::temp_dir()).expect("resolve agent");
+        assert_eq!(resolved, executable);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_a_command_from_the_profile_path_on_windows() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!(
+            "kite-agent-profile-path-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create profile path");
+        let executable = directory.join("profile-agent.cmd");
+        fs::write(&executable, b"@exit /b 0\r\n").expect("write agent");
+        let profile = AgentProfile {
+            executable: Some("profile-agent".to_string()),
+            environment: vec![crate::agent::AgentEnvironmentVariable {
+                name: "PATH".to_string(),
+                value: directory.to_string_lossy().into_owned(),
+            }],
+            ..AgentProfile::default()
+        };
+
+        let resolved = resolve_agent_command(&profile, &env::temp_dir()).expect("resolve agent");
+        assert_eq!(resolved, executable);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[cfg(windows)]

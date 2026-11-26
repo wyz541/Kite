@@ -11,6 +11,9 @@
 - Optionally restore the Agent, model, working directory, context snapshot, conversation, draft, and independent window size. Missing paths expose a repair path and never block Kite startup.
 - Add a diagnostics view for command resolution, version, ACP protocol, capabilities, recent errors, configuration paths, and redacted logs.
 - Add cross-platform ACP fixtures and automated coverage for streaming output, permission requests, cancellation, timeout, oversized output, retry, process-tree cleanup, and credential redaction.
+- Use the Profile `PATH` when resolving Agent commands and add standard Homebrew locations for macOS apps launched outside a terminal.
+- Make one-shot connection tests terminate the complete Agent process tree, including npm wrapper children, so a successful ACP handshake cannot hang on an inherited output pipe.
+- Preserve `completed`, `failed`, and `cancelled` status after the Agent process closes instead of replacing the result with a generic `closed` state.
 - Windows acceptance fixes: submit the session prompt after ACP readiness, keep terminal status text aligned with completed/cancelled/failed/closed states, and defer opening the shared Agent popout until the panel update has finished so close-and-reopen no longer double-leases the panel.
 
 ## Security boundary

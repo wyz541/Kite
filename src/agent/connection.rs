@@ -1,13 +1,13 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::process::build_agent_command;
+use super::process::{build_agent_command, configure_agent_process, terminate_agent_process};
 use super::{AgentProfile, AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, credentials};
 
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
@@ -284,8 +284,7 @@ fn test_acp_stdio(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    apply_environment(&mut command, profile, credential);
-    apply_no_window(&mut command);
+    configure_agent_process(&mut command, profile, credential);
 
     let mut child = command.spawn().map_err(classify_spawn_error)?;
     let mut stdin = child.stdin.take().ok_or_else(|| {
@@ -395,7 +394,7 @@ fn test_acp_stdio(
     };
 
     drop(stdin);
-    terminate_child(&mut child);
+    terminate_agent_process(&mut child);
     let _ = stderr_thread.join();
     let _ = stdout_thread.join();
     response
@@ -500,8 +499,7 @@ fn test_generic_cli(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    apply_environment(&mut command, profile, credential);
-    apply_no_window(&mut command);
+    configure_agent_process(&mut command, profile, credential);
     let mut child = command.spawn().map_err(classify_spawn_error)?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -525,7 +523,7 @@ fn test_generic_cli(
             break status;
         }
         if Instant::now() >= deadline {
-            terminate_child(&mut child);
+            terminate_agent_process(&mut child);
             if let Some(handle) = stdout_thread {
                 let _ = handle.join();
             }
@@ -574,28 +572,6 @@ fn test_generic_cli(
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
-
-fn apply_environment(command: &mut Command, profile: &AgentProfile, credential: Option<&str>) {
-    for entry in &profile.environment {
-        command.env(&entry.name, &entry.value);
-    }
-    if let Some(credential) = credential {
-        let key = profile
-            .credential_env_var
-            .as_deref()
-            .unwrap_or("KITE_AGENT_TOKEN");
-        command.env(key, credential);
-    }
-}
-
-#[cfg(windows)]
-fn apply_no_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0800_0000);
-}
-
-#[cfg(not(windows))]
-fn apply_no_window(_command: &mut Command) {}
 
 fn read_limited<R: Read>(mut stream: R, limit: u64) -> (Vec<u8>, bool) {
     let keep = limit.saturating_add(1) as usize;
@@ -652,13 +628,6 @@ fn read_frames<R: Read>(stream: R, sender: mpsc::Sender<FrameRead>) {
             }
         }
     }
-}
-
-fn terminate_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
 }
 
 fn classify_spawn_error(error: std::io::Error) -> ConnectionFailure {
@@ -859,6 +828,74 @@ mod tests {
     fn extracts_a_version_from_cli_output() {
         assert_eq!(extract_semver("agent 1.2.3"), Some("1.2.3".to_string()));
     }
+    #[cfg(unix)]
+    #[test]
+    fn connection_probe_terminates_wrapper_process_tree() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "kite-agent-wrapper-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create wrapper directory");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join("agent-fixtures")
+            .join("acp_probe.py");
+        let quoted_fixture = fixture.to_string_lossy().replace('\'', "'\"'\"'");
+        let wrapper = directory.join("agent-wrapper.sh");
+        let child_pid = directory.join("child.pid");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\npython3 '{quoted_fixture}' <&0 &\nprintf '%s' $! > '{}'\nwait $!\n",
+                child_pid.display()
+            ),
+        )
+        .expect("write wrapper");
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+            .expect("make wrapper executable");
+        let profile = AgentProfile {
+            name: "Wrapper ACP fixture".to_string(),
+            executable: Some(wrapper.to_string_lossy().into_owned()),
+            working_directory: WorkingDirectoryPolicy::Fixed {
+                path: directory.to_string_lossy().into_owned(),
+            },
+            timeout_seconds: 5,
+            ..AgentProfile::default()
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(test_agent_connection(profile, None));
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("connection probe should terminate the wrapper tree");
+        assert!(result.success, "{}", result.message);
+
+        let pid = fs::read_to_string(&child_pid)
+            .expect("read child pid")
+            .parse::<i32>()
+            .expect("parse child pid");
+        let mut terminated = false;
+        for _ in 0..20 {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                terminated = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = fs::remove_dir_all(directory);
+        assert!(terminated, "wrapped ACP child {pid} survived the probe");
+    }
+
     #[test]
     fn probes_a_local_acp_http_endpoint() {
         use std::io::{Read as _, Write as _};
