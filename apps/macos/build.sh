@@ -64,6 +64,7 @@ xcrun swiftc \
 
 cp "$ROOT/apps/macos/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT/assets/kite.icns" "$CONTENTS/Resources/AppIcon.icns"
+cp "$ROOT/tests/fixtures/mindmap/kite-rust-gpui-capability.xmind" "$CONTENTS/Resources/"
 cp "$TARGET_DIR/libkite_core.dylib" "$CONTENTS/Frameworks/"
 install_name_tool -id @rpath/libkite_core.dylib "$CONTENTS/Frameworks/libkite_core.dylib"
 

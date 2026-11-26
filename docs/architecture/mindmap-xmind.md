@@ -88,3 +88,28 @@ AtomicFile 原子写入
 2. 增加命令/撤销模型。
 3. 增加 XMind 8 读取和迁移。
 4. 在 macOS 原生画布上加载该能力地图并记录 500～5,000 节点性能。
+
+
+## macOS 编辑器窗口
+
+第一版 macOS 编辑器位于 `apps/macos/Sources/KiteMindmapWindow.swift`。
+
+入口：
+
+- 菜单 `Mindmap > 打开 XMind…`，快捷键 `Command+Shift+M`。
+- 菜单 `Mindmap > 打开示例`。
+- Finder 或其他应用通过 `.xmind` 打开 Kite。
+- 开发启动参数 `--mindmap <path>`。
+- 开发启动参数 `--mindmap-sample`。
+
+窗口行为：
+
+- 独立 NSWindow，不阻塞 Kite 主窗口。
+- 同一路径只保留一个编辑器窗口。
+- 画布显示层级连线、节点颜色、主题形状和折叠状态。
+- 单击选择，双击展开/折叠。
+- 拖拽平移，触控板捏合缩放。
+- 节点标题编辑、添加子主题、添加同级和删除都通过 Rust Core 执行并原子保存。
+- 底部状态栏显示 Rust Core 状态、源文件哈希、可见节点数和缩放比例。
+
+示例文件由 `apps/macos/build.sh` 复制到应用资源。首次打开示例时，会复制到 `~/Library/Application Support/Kite/Mindmaps/`，避免修改仓库内的验收基线文件。
