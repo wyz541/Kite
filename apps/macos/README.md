@@ -35,6 +35,8 @@ The build script creates `apps/macos/build/Kite.app`.
 - SwiftUI column browser.
 - Column multi-selection with range and toggle selection.
 - Independent global search window for file names or indexed file content.
+- Independent XMind-compatible Mindmap editor window backed by the Rust core.
+- Mindmap outline search, inline node editing, keyboard tree operations, and undo/redo.
 - Current-folder, favorite-folder, local-disk, and root-disk scopes in both search modes.
 - Ranked name results with collapsible duplicate locations.
 - Content results with line context and highlighted matches.
@@ -81,6 +83,7 @@ Kite handles `misc/mvis` and `FNDR/show` Apple Events for reveal requests.
 - `KiteSidebar.swift`: locations, favorites, and volumes.
 - `KiteColumnBrowser.swift`: column cards, file rows, and search result views.
 - `KiteGlobalSearchWindow.swift`: separate global search window.
+- `KiteMindmapWindow.swift`: industrial canvas, topic inspector, and Rust-backed XMind edits.
 - `KiteGitClientWindow.swift`: repository-scoped Git client shell, session, and shortcuts.
 - `KitePreviewPane.swift`: Quick Look preview, actions, and metadata.
 - `GlassSurface.swift`: Liquid Glass components, fallback materials, and the Kite backdrop.

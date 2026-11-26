@@ -23,6 +23,7 @@ pub mod git_rebase;
 pub mod global_name_search;
 pub mod indexed_search;
 pub mod mindmap;
+pub mod mindmap_ffi;
 pub mod name_index;
 pub mod perf_trace;
 pub mod platform;

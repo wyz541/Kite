@@ -112,7 +112,12 @@ final class KiteAppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         NSApp.activate(ignoringOtherApps: true)
-        KiteOpenRequestRouter.shared.enqueue(urls: urls)
+        for url in urls where url.pathExtension.lowercased() == "xmind" {
+            KiteMindmapWindowController.open(path: url.path)
+        }
+        KiteOpenRequestRouter.shared.enqueue(
+            urls: urls.filter { $0.pathExtension.lowercased() != "xmind" }
+        )
     }
 }
 
@@ -130,6 +135,13 @@ struct KiteMacApp: App {
                 .onAppear {
                     model.openExternalFolders(KiteOpenRequestRouter.shared.drainFolders())
                     model.revealExternalItems(KiteOpenRequestRouter.shared.drainRevealItems())
+                    let arguments = ProcessInfo.processInfo.arguments
+                    if arguments.contains("--mindmap-sample") {
+                        KiteMindmapWindowController.openSample()
+                    } else if let index = arguments.firstIndex(of: "--mindmap"),
+                              arguments.indices.contains(index + 1) {
+                        KiteMindmapWindowController.open(path: arguments[index + 1])
+                    }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .kiteOpenFolders)) { _ in
                     model.openExternalFolders(KiteOpenRequestRouter.shared.drainFolders())
@@ -174,14 +186,19 @@ struct KiteMacApp: App {
                 }
                 .disabled(model.updateInProgress)
             }
+            CommandMenu("Mindmap") {
+                Button("打开 XMind…") {
+                    KiteMindmapWindowController.chooseAndOpen()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+
+                Button("打开示例") {
+                    KiteMindmapWindowController.openSample()
+                }
+            }
             CommandMenu("Agent") {
                 Button("审阅结构化结果…") {
                     model.presentAgentReviewFile()
-                }
-            }
-            CommandMenu("Git") {
-                Button("交互式 Rebase…") {
-                    KiteGitRebaseWindowController.show(path: model.currentPath, model: model)
                 }
             }
             CommandMenu("导航") {
@@ -206,6 +223,12 @@ struct KiteMacApp: App {
                 .keyboardShortcut("r", modifiers: [.command])
             }
             CommandMenu("Git") {
+                Button("交互式 Rebase…") {
+                    KiteGitRebaseWindowController.show(path: model.currentPath, model: model)
+                }
+
+                Divider()
+
                 Button("打开 Git 客户端…") {
                     KiteGitClientWindowController.show(model: model, repositoryPath: model.currentPath)
                 }
