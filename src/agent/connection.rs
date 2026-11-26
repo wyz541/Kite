@@ -166,14 +166,16 @@ fn resolve_credential(
     ephemeral_credential: Option<String>,
 ) -> Result<Option<String>, String> {
     if let Some(credential) = ephemeral_credential {
-        let credential = credential.trim().to_string();
-        if !credential.is_empty() {
-            return Ok(Some(credential));
+        if credential.trim().is_empty() {
+            return Ok(None);
         }
+        return credentials::validate_secret(&credential).map(|value| Some(value.to_string()));
     }
     if profile.credential_ref.is_some() {
         match credentials::load_secret(&profile.id) {
-            Ok(Some(secret)) => Ok(Some(secret)),
+            Ok(Some(secret)) => {
+                credentials::validate_secret(&secret).map(|value| Some(value.to_string()))
+            }
             Ok(None) => Err("Agent 配置引用了钥匙串凭据，但系统中找不到该条目".to_string()),
             Err(error) => Err(error),
         }

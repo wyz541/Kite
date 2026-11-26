@@ -1275,7 +1275,10 @@ impl RuntimeWorker {
 
     fn complete(&mut self, state: AgentRuntimeState, message: String) {
         self.prompt_started = None;
-        if state == AgentRuntimeState::Completed {
+        if matches!(
+            state,
+            AgentRuntimeState::Completed | AgentRuntimeState::Cancelled | AgentRuntimeState::Failed
+        ) {
             self.shared.flush_output();
         }
         let message = self.shared.redactor.redact(&message);
@@ -1301,6 +1304,7 @@ impl RuntimeWorker {
     }
 
     fn fail(&mut self, error: impl Into<String>) {
+        self.shared.flush_output();
         self.shared.set_error(error);
         self.prompt_started = None;
     }

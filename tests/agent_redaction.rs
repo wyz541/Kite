@@ -102,9 +102,7 @@ fn runtime_snapshot_events_log_copy_and_restored_session_redact_resolved_credent
     assert_eq!(restored_output, snapshot.output);
 
     runtime.shutdown();
-    wait_for(&runtime, |snapshot| {
-        snapshot.state == AgentRuntimeState::Closed
-    });
+    wait_for(&runtime, |snapshot| snapshot.closed);
 
     let error_profile = profile("secret-error");
     let error_runtime = AgentRuntime::start(
@@ -131,15 +129,75 @@ fn runtime_snapshot_events_log_copy_and_restored_session_redact_resolved_credent
         )
     });
     assert_eq!(error_snapshot.state, AgentRuntimeState::Failed);
+    assert!(error_snapshot.output.contains("tail "));
+    assert!(
+        error_snapshot.output.contains("[REDACTED]"),
+        "failed runtime output: {:?}",
+        error_snapshot.output
+    );
+    assert!(!error_snapshot.output.contains(SECRET));
     let error = error_snapshot.error.as_deref().unwrap_or_default();
     assert!(error.contains("[REDACTED]"));
     assert!(!error.contains(SECRET));
     assert_safe_snapshot(&error_snapshot);
     assert_events_are_safe(&error_events);
     error_runtime.shutdown();
-    wait_for(&error_runtime, |snapshot| {
-        snapshot.state == AgentRuntimeState::Closed
+    wait_for(&error_runtime, |snapshot| snapshot.closed);
+
+    let cancel_runtime = AgentRuntime::start(
+        profile("cancel-tail"),
+        env!("CARGO_MANIFEST_DIR").to_string(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("start cancel runtime");
+    wait_for(&cancel_runtime, |snapshot| {
+        snapshot.state == AgentRuntimeState::Ready
     });
+    cancel_runtime
+        .send_prompt("cancel after a secret prefix".to_string(), Vec::new())
+        .expect("send cancel prompt");
+    wait_for(&cancel_runtime, |snapshot| {
+        snapshot.output.contains("tail ")
+    });
+    cancel_runtime.cancel().expect("cancel secret tail");
+    let cancelled = wait_for(&cancel_runtime, |snapshot| {
+        snapshot.state == AgentRuntimeState::Cancelled
+    });
+    assert!(cancelled.output.contains("tail "));
+    assert!(cancelled.output.contains("[REDACTED]"));
+    assert!(!cancelled.output.contains(SECRET));
+    assert_safe_snapshot(&cancelled);
+    cancel_runtime.shutdown();
+    wait_for(&cancel_runtime, |snapshot| snapshot.closed);
+
+    let pattern_runtime = AgentRuntime::start(
+        profile("token-patterns"),
+        env!("CARGO_MANIFEST_DIR").to_string(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("start token pattern runtime");
+    wait_for(&pattern_runtime, |snapshot| {
+        snapshot.state == AgentRuntimeState::Ready
+    });
+    pattern_runtime
+        .send_prompt("stream split credentials".to_string(), Vec::new())
+        .expect("send token pattern prompt");
+    let pattern_snapshot = wait_for(&pattern_runtime, |snapshot| {
+        snapshot.state == AgentRuntimeState::Completed
+    });
+    assert!(pattern_snapshot.output.contains("[REDACTED]"));
+    for leaked in ["abc.def", "proj-secret", "abc123"] {
+        assert!(
+            !pattern_snapshot.output.contains(leaked),
+            "streamed pattern leaked {leaked}: {:?}",
+            pattern_snapshot.output
+        );
+    }
+    assert_safe_snapshot(&pattern_snapshot);
+    pattern_runtime.shutdown();
+    wait_for(&pattern_runtime, |snapshot| snapshot.closed);
 
     let log = fs::read_to_string(&log_path).expect("read final log");
     assert!(!log.contains(SECRET));
@@ -150,6 +208,24 @@ fn runtime_snapshot_events_log_copy_and_restored_session_redact_resolved_credent
         std::env::remove_var("KITE_AGENT_SESSION_PATH");
     }
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn short_env_credentials_are_rejected_before_runtime_start() {
+    let short_env = "KITE_AGENT_REDACTION_SHORT_SECRET";
+    unsafe { std::env::set_var(short_env, "abc") };
+    let mut short_profile = profile("secret-stream");
+    short_profile.credential_ref = Some(format!("env:{short_env}"));
+    let result = AgentRuntime::start(
+        short_profile,
+        env!("CARGO_MANIFEST_DIR").to_string(),
+        Vec::new(),
+        Vec::new(),
+    );
+    unsafe { std::env::remove_var(short_env) };
+
+    let error = result.expect_err("short credential must be rejected");
+    assert!(error.to_string().contains("至少需要 4 个字符"));
 }
 
 fn profile(scenario: &str) -> AgentProfile {

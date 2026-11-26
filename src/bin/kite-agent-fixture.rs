@@ -188,6 +188,15 @@ fn handle_prompt(
             send_chunk("```\n");
             finish_prompt(id, "end_turn");
         }
+        "token-patterns" => {
+            send_chunk("Authorization: Bear");
+            send_chunk("er abc.def done\n");
+            send_chunk("value sk");
+            send_chunk("-proj-secret done\n");
+            send_chunk("token=");
+            send_chunk("abc123 done");
+            finish_prompt(id, "end_turn");
+        }
         "secret-stream" => {
             let Some(secret) = fixture_secret() else {
                 write_json(&json!({
@@ -207,7 +216,7 @@ fn handle_prompt(
             finish_prompt(id, "end_turn");
         }
         "secret-error" => {
-            let Some(secret) = fixture_secret() else {
+            if !send_secret_prefix_tail() {
                 write_json(&json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -216,6 +225,9 @@ fn handle_prompt(
                         "message": "fixture credential is missing"
                     }
                 }));
+                return;
+            }
+            let Some(secret) = fixture_secret() else {
                 return;
             };
             write_json(&json!({
@@ -270,6 +282,31 @@ fn handle_prompt(
                 }
             }
         }
+        "cancel-tail" => {
+            if !send_secret_prefix_tail() {
+                write_json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": "fixture credential is missing"
+                    }
+                }));
+                return;
+            }
+            loop {
+                let Some(Ok(line)) = lines.next() else {
+                    return;
+                };
+                let Ok(response) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if response.get("method").and_then(Value::as_str) == Some("session/cancel") {
+                    finish_prompt(id, "cancelled");
+                    return;
+                }
+            }
+        }
         _ => {
             send_chunk("hello");
             send_chunk(" world");
@@ -283,6 +320,20 @@ fn fixture_secret() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn send_secret_prefix_tail() -> bool {
+    let Some(secret) = fixture_secret() else {
+        return false;
+    };
+    send_chunk("tail ");
+    let split = secret
+        .char_indices()
+        .nth(5)
+        .map(|(index, _)| index)
+        .unwrap_or(secret.len());
+    send_chunk(&secret[..split]);
+    true
 }
 
 fn handle_permission_scenario(
