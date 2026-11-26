@@ -89,6 +89,65 @@ fn prompt_and_wait(
 }
 
 #[test]
+fn runtime_uses_resolved_profile_working_directory_not_caller_cwd() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "kite-agent-runtime-cwd-{}-{unique}",
+        std::process::id()
+    ));
+    let nested = root.join("src");
+    let file = nested.join("main.rs");
+    fs::create_dir_all(&nested).expect("create nested directory");
+    fs::write(&file, "fn main() {}").expect("write context file");
+
+    let runtime = AgentRuntime::start(
+        fixture_profile("cwd"),
+        root.to_string_lossy().into_owned(),
+        vec![file.to_string_lossy().into_owned()],
+        Vec::new(),
+    )
+    .expect("start fixture runtime");
+    wait_for(runtime.as_ref(), READY_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Ready
+    });
+    let snapshot = prompt_and_wait(&runtime, "cwd", TURN_TIMEOUT);
+
+    assert_eq!(snapshot.state, AgentRuntimeState::Completed);
+    assert_eq!(
+        PathBuf::from(snapshot.output.trim()),
+        dunce::canonicalize(&nested).expect("canonical nested directory")
+    );
+    runtime.shutdown();
+    wait_for(&runtime, PROCESS_TIMEOUT, |snapshot| {
+        snapshot.state == AgentRuntimeState::Closed
+    });
+    thread::sleep(Duration::from_millis(100));
+    fs::remove_dir_all(root).expect("remove temp directory");
+}
+
+#[test]
+fn runtime_rejects_invalid_fixed_working_directory_before_spawn() {
+    let mut profile = fixture_profile("normal");
+    profile.working_directory = kite_core::agent::WorkingDirectoryPolicy::Fixed {
+        path: std::env::temp_dir()
+            .join("kite-missing-fixed-agent-directory")
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let error = AgentRuntime::start(
+        profile,
+        env!("CARGO_MANIFEST_DIR").to_string(),
+        vec![env!("CARGO_MANIFEST_DIR").to_string()],
+        Vec::new(),
+    )
+    .expect_err("invalid fixed directory must block startup");
+    assert!(error.to_string().contains("固定的工作目录不可用"));
+}
+
+#[test]
 fn normal_stream_completes() {
     let runtime = start(fixture_profile("normal"));
     let snapshot = prompt_and_wait(&runtime, "normal", TURN_TIMEOUT);

@@ -94,6 +94,22 @@ impl Drop for Batch {
 }
 
 #[test]
+fn core_resolves_profile_working_directory_for_the_ui_contract() {
+    let mut batch = Batch::start();
+    let resolved = batch.request(
+        "agent_working_directory_resolve",
+        json!({ "primary_path": env!("CARGO_MANIFEST_DIR") }),
+    );
+    assert_eq!(resolved["ok"], true, "resolve response: {resolved}");
+    assert_eq!(resolved["result"]["data"]["status"], "ready");
+    let expected = dunce::canonicalize(env!("CARGO_MANIFEST_DIR"))
+        .expect("canonical project directory")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(resolved["result"]["data"]["path"], Value::String(expected));
+}
+
+#[test]
 fn cli_batch_keeps_an_agent_session_alive_between_commands() {
     let mut batch = Batch::start();
     let started = batch.request(

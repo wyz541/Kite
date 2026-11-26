@@ -93,6 +93,8 @@ final class KiteAgentPanelModel: ObservableObject {
     @Published private(set) var contextPaths: [KiteAgentContextPath] = []
     @Published private(set) var primaryPath: String?
     @Published private(set) var workingDirectory = ""
+    @Published private(set) var workingDirectoryStatus: AgentWorkingDirectoryStatus = .needsSelection
+    @Published private(set) var workingDirectoryMessage: String?
     @Published var contextMode: KiteAgentContextMode = .fixed
     @Published private(set) var phase: KiteAgentSessionPhase = .empty
     @Published var prompt = ""
@@ -114,6 +116,7 @@ final class KiteAgentPanelModel: ObservableObject {
     private var restoredMessages: [AgentMessage] = []
     private var turnId: UInt64 = 0
     private var sentPrompt = ""
+    private var selectedWorkingDirectory: String?
     private var savedTerminalSnapshot = false
     private var windowWidth: UInt32 = 960
     private var windowHeight: UInt32 = 760
@@ -153,6 +156,19 @@ final class KiteAgentPanelModel: ObservableObject {
         profile != nil && profileSupportsSession && hasContext && phase != .loading && phase != .running
     }
 
+    var workingDirectoryDisplay: String {
+        switch workingDirectoryStatus {
+        case .ready:
+            return workingDirectory.isEmpty ? "—" : workingDirectory
+        case .needsSelection:
+            return "尚未选择（发送前选择）"
+        case .invalid:
+            return "不可用"
+        @unknown default:
+            return "—"
+        }
+    }
+
     var hasConfiguredAgent: Bool {
         profile != nil && profileSupportsSession
     }
@@ -187,8 +203,18 @@ final class KiteAgentPanelModel: ObservableObject {
         self.profileSupportsSession = selected.map {
             core.agentProfileCanStartSession(profile: $0)
         } ?? false
-        if phase == .unconfigured || phase == .ended {
-            phase = profileSupportsSession ? .ended : .unconfigured
+        refreshWorkingDirectory()
+        if phase != .loading && phase != .running {
+            if profile == nil || !profileSupportsSession {
+                phase = .unconfigured
+                errorMessage = nil
+            } else if hasContext && workingDirectoryStatus != .ready {
+                phase = .error
+                errorMessage = workingDirectoryMessage
+            } else {
+                phase = .ended
+                errorMessage = nil
+            }
         }
     }
 
@@ -199,8 +225,7 @@ final class KiteAgentPanelModel: ObservableObject {
     func present(
         action: KiteAgentAction,
         primary: String,
-        entries: [BrowserEntry],
-        workingDirectory: String
+        entries: [BrowserEntry]
     ) {
         guard FileManager.default.fileExists(atPath: primary) else {
             contextPaths = []
@@ -212,16 +237,15 @@ final class KiteAgentPanelModel: ObservableObject {
             return
         }
         let paths = normalizedPaths(primary: primary, entries: entries)
-        guard let first = paths.first else { return }
+        guard paths.first != nil else { return }
         contextPaths = paths
         primaryPath = primary
-        self.workingDirectory = resolvedWorkingDirectory(
-            primary: first,
-            fallback: workingDirectory
-        )
+        workingDirectory = ""
+        workingDirectoryStatus = .needsSelection
+        workingDirectoryMessage = nil
+        selectedWorkingDirectory = nil
         contextMode = .fixed
         refreshProfile()
-        phase = profile == nil ? .unconfigured : .ended
         prompt = action.prompt
         runtimeState = nil
         output = ""
@@ -233,6 +257,7 @@ final class KiteAgentPanelModel: ObservableObject {
         restoredMessages = []
         turnId = 0
         notice = nil
+        applyInitialWorkingDirectoryState()
         presentationToken += 1
     }
 
@@ -248,10 +273,12 @@ final class KiteAgentPanelModel: ObservableObject {
         }
         contextPaths = [KiteAgentContextPath(path: path, isDirectory: true)]
         primaryPath = path
-        workingDirectory = path
+        workingDirectory = ""
+        workingDirectoryStatus = .needsSelection
+        workingDirectoryMessage = nil
+        selectedWorkingDirectory = nil
         contextMode = .fixed
         refreshProfile()
-        phase = profile == nil ? .unconfigured : .ended
         prompt = action.prompt
         runtimeState = nil
         output = ""
@@ -263,20 +290,31 @@ final class KiteAgentPanelModel: ObservableObject {
         restoredMessages = []
         turnId = 0
         notice = nil
+        applyInitialWorkingDirectoryState()
         presentationToken += 1
     }
 
-    func updateFollowedSelection(entries: [BrowserEntry], currentDirectory: String) {
+    private func applyInitialWorkingDirectoryState() {
+        if profile == nil || !profileSupportsSession {
+            phase = .unconfigured
+        } else if workingDirectoryStatus != .ready {
+            phase = .error
+            errorMessage = workingDirectoryMessage
+            notice = workingDirectoryMessage
+        } else {
+            phase = .ended
+        }
+    }
+
+    func updateFollowedSelection(entries: [BrowserEntry]) {
         guard contextMode == .followSelection, let first = entries.first else { return }
         let paths = entries.map {
             KiteAgentContextPath(path: $0.path, isDirectory: $0.isDirectory)
         }
         contextPaths = paths
         primaryPath = first.path
-        workingDirectory = resolvedWorkingDirectory(
-            primary: paths[0],
-            fallback: currentDirectory
-        )
+        selectedWorkingDirectory = nil
+        refreshWorkingDirectory()
         notice = "Agent 上下文已跟随当前选择"
     }
 
@@ -295,37 +333,68 @@ final class KiteAgentPanelModel: ObservableObject {
         } else if let first = added.first {
             contextPaths = added
             primaryPath = first.path
-            workingDirectory = resolvedWorkingDirectory(primary: first, fallback: "")
-            phase = .unconfigured
+            selectedWorkingDirectory = nil
+            refreshWorkingDirectory()
+            applyInitialWorkingDirectoryState()
             notice = "已添加上下文路径"
         }
     }
 
     func removePath(_ path: String) {
+        let primaryRemoved = primaryPath == path
         contextPaths.removeAll { $0.path == path }
-        if primaryPath == path {
+        if primaryRemoved {
             primaryPath = contextPaths.first?.path
+            selectedWorkingDirectory = nil
         }
         if contextPaths.isEmpty {
             primaryPath = nil
             workingDirectory = ""
+            workingDirectoryStatus = .invalid
+            workingDirectoryMessage = nil
             phase = .empty
+        } else if primaryRemoved {
+            refreshWorkingDirectory()
         }
         notice = "已从 Agent 上下文移除"
     }
 
     func setFollowSelection(
         _ followsSelection: Bool,
-        entries: [BrowserEntry],
-        currentDirectory: String
+        entries: [BrowserEntry]
     ) {
         contextMode = followsSelection ? .followSelection : .fixed
         if followsSelection {
-            updateFollowedSelection(entries: entries, currentDirectory: currentDirectory)
+            updateFollowedSelection(entries: entries)
+        }
+    }
+
+    func chooseWorkingDirectory() {
+        guard hasContext else {
+            notice = "请先选择 Agent 上下文"
+            return
+        }
+        guard let chosen = KitePlatform.chooseDirectory(prompt: "选择 Agent 工作目录") else {
+            notice = "尚未选择工作目录，Agent 未启动"
+            return
+        }
+        selectedWorkingDirectory = chosen
+        refreshWorkingDirectory()
+        if workingDirectoryStatus == .ready {
+            if phase == .error {
+                phase = .ended
+                errorMessage = nil
+            }
+            notice = "Agent 工作目录已选择"
+        } else {
+            phase = .error
+            errorMessage = workingDirectoryMessage ?? "Agent 工作目录不可用"
+            notice = errorMessage
         }
     }
 
     func sendPrompt() {
+        refreshProfile()
         guard let profile, profileSupportsSession, hasContext else {
             phase = .unconfigured
             notice = "请先配置可运行的 ACP / JSON-RPC stdio Agent，并准备上下文"
@@ -334,6 +403,21 @@ final class KiteAgentPanelModel: ObservableObject {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             notice = "提示不能为空"
+            return
+        }
+        refreshWorkingDirectory()
+        if workingDirectoryStatus == .needsSelection {
+            guard let chosen = KitePlatform.chooseDirectory(prompt: "选择 Agent 工作目录") else {
+                notice = "尚未选择工作目录，Agent 未启动"
+                return
+            }
+            selectedWorkingDirectory = chosen
+            refreshWorkingDirectory()
+        }
+        guard workingDirectoryStatus == .ready else {
+            phase = .error
+            errorMessage = workingDirectoryMessage ?? "Agent 工作目录不可用"
+            notice = errorMessage
             return
         }
         do {
@@ -441,6 +525,29 @@ final class KiteAgentPanelModel: ObservableObject {
         refreshAgentProfiles(core: core)
     }
 
+    private func refreshWorkingDirectory() {
+        guard let profile, let primaryPath, !primaryPath.isEmpty else {
+            workingDirectory = ""
+            workingDirectoryStatus = .invalid
+            workingDirectoryMessage = "请先选择 Agent 上下文"
+            return
+        }
+        switch profile.workingDirectory {
+        case .ask:
+            break
+        default:
+            selectedWorkingDirectory = nil
+        }
+        let resolution = core.resolveAgentWorkingDirectory(
+            profile: profile,
+            primaryPath: primaryPath,
+            selectedWorkingDirectory: selectedWorkingDirectory
+        )
+        workingDirectoryStatus = resolution.status
+        workingDirectoryMessage = resolution.message
+        workingDirectory = resolution.path ?? ""
+    }
+
     private func restoreConversation() {
         let restore = core.agentSessionState()
         refreshProfile()
@@ -458,8 +565,9 @@ final class KiteAgentPanelModel: ObservableObject {
             return KiteAgentContextPath(path: path, isDirectory: isDirectory.boolValue)
         }
         primaryPath = conversation.contextPaths.first
-        workingDirectory = conversation.workingDirectory
+        selectedWorkingDirectory = nil
         contextMode = conversation.followSelection ? .followSelection : .fixed
+        refreshWorkingDirectory()
         prompt = conversation.draft
         output = conversation.messages.last(where: { $0.role == .assistant })?.content ?? ""
         conversationId = conversation.id
@@ -467,9 +575,13 @@ final class KiteAgentPanelModel: ObservableObject {
         turnId = 0
         windowWidth = conversation.windowWidth
         windowHeight = conversation.windowHeight
-        if restore.workingDirectoryMissing || !restore.missingPaths.isEmpty {
+        if !restore.missingPaths.isEmpty {
             phase = .error
             errorMessage = "恢复的 Agent 上下文包含失效路径，请检查后重试"
+            notice = errorMessage
+        } else if workingDirectoryStatus != .ready {
+            phase = .error
+            errorMessage = workingDirectoryMessage ?? "Agent 工作目录不可用"
             notice = errorMessage
         } else {
             phase = .ended
@@ -480,7 +592,7 @@ final class KiteAgentPanelModel: ObservableObject {
     }
 
     private func persistConversation() {
-        guard let profile, hasContext else { return }
+        guard let profile, hasContext, workingDirectoryStatus == .ready else { return }
         let now = UInt64(Date().timeIntervalSince1970 * 1_000)
         let userMessageId = "\(conversationId):user:\(turnId)"
         let assistantMessageId = "\(conversationId):assistant:\(turnId)"
@@ -531,7 +643,7 @@ final class KiteAgentPanelModel: ObservableObject {
     func persistWindowState(width: UInt32, height: UInt32) {
         windowWidth = min(max(width, 680), 3_840)
         windowHeight = min(max(height, 560), 2_160)
-        guard profile != nil, hasContext else { return }
+        guard profile != nil, hasContext, workingDirectoryStatus == .ready else { return }
         let restore = core.agentSessionState()
         if var conversation = restore.store.conversations.first(where: {
             $0.id == conversationId
@@ -570,17 +682,6 @@ final class KiteAgentPanelModel: ObservableObject {
             )
         }
         return paths
-    }
-
-    private func resolvedWorkingDirectory(
-        primary: KiteAgentContextPath,
-        fallback: String
-    ) -> String {
-        if primary.isDirectory {
-            return primary.path
-        }
-        let parent = URL(fileURLWithPath: primary.path).deletingLastPathComponent().path
-        return fallback.isEmpty ? parent : fallback
     }
 }
 
@@ -733,12 +834,25 @@ private struct KiteAgentPanelContent: View {
                 Text("工作目录")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
-                Text(agent.workingDirectory)
+                Text(agent.workingDirectoryDisplay)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(agent.workingDirectoryStatus == .invalid ? .red : .secondary)
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
+                if let message = agent.workingDirectoryMessage {
+                    Text(message)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if agent.workingDirectoryStatus == .needsSelection {
+                    Button("选择目录") {
+                        agent.chooseWorkingDirectory()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
             }
 
             if let notice = agent.notice {
@@ -791,8 +905,7 @@ private struct KiteAgentPanelContent: View {
                     set: { follows in
                         agent.setFollowSelection(
                             follows,
-                            entries: model.selectedColumnEntries,
-                            currentDirectory: model.currentPath
+                            entries: model.selectedColumnEntries
                         )
                     }
                 )
@@ -866,9 +979,9 @@ private struct KiteAgentPanelContent: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Color.accentColor)
             VStack(alignment: .leading, spacing: 3) {
-                Text("尚未配置可运行的 Agent")
+                Text("尚未配置 Agent")
                     .font(.system(size: 11.5, weight: .semibold))
-                Text("上下文和提示已经准备好。请保存一个 ACP / JSON-RPC stdio Profile 后发送；仅测试传输不会启用会话。")
+                Text("上下文和提示已经准备好。接入 Agent 后才会启用发送和流式输出。")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

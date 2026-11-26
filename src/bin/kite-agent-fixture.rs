@@ -227,6 +227,11 @@ fn handle_prompt(
                 }
             }));
         }
+        "cwd" => {
+            let cwd = env::current_dir().unwrap_or_default();
+            send_chunk(&cwd.to_string_lossy());
+            finish_prompt(id, "end_turn");
+        }
         "long" => {
             let chunk = "0123456789abcdef".repeat(64);
             for _ in 0..256 {

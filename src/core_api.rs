@@ -19,7 +19,9 @@ use serde_json::{Map, Value, json};
 
 use crate::agent::{
     AgentPermissionDecision, AgentProfile, AgentProfileStore, AgentRuntime, AgentRuntimeSnapshot,
-    AgentRuntimeState, agent_transport_capabilities, diagnose_agents, new_agent_conversation_id,
+    AgentRuntimeState, AgentWorkingDirectoryStatus, WorkingDirectoryPolicy,
+    agent_transport_capabilities, diagnose_agents, new_agent_conversation_id,
+    resolve_profile_working_directory, resolve_working_directory_for_context,
     test_agent_connection,
 };
 use crate::fs::{EntryKind, SortKey, SortSpec, load_directory};
@@ -234,6 +236,13 @@ pub enum CoreRequest {
         #[serde(default)]
         profile_id: Option<String>,
     },
+    AgentWorkingDirectoryResolve {
+        #[serde(default)]
+        profile_id: Option<String>,
+        primary_path: String,
+        #[serde(default)]
+        selected_working_directory: Option<String>,
+    },
     AgentSessionStart {
         #[serde(default)]
         profile_id: Option<String>,
@@ -314,6 +323,18 @@ impl CoreRequest {
             Self::AgentConnectionTest { profile_id } => {
                 ("agent_connection_test", json!({ "profile_id": profile_id }))
             }
+            Self::AgentWorkingDirectoryResolve {
+                profile_id,
+                primary_path,
+                selected_working_directory,
+            } => (
+                "agent_working_directory_resolve",
+                json!({
+                    "profile_id": profile_id,
+                    "primary_path": primary_path,
+                    "selected_working_directory": selected_working_directory,
+                }),
+            ),
             Self::AgentSessionStart {
                 profile_id,
                 working_directory,
@@ -567,6 +588,7 @@ impl CoreApi {
         match tool {
             "agent_profiles_list" => self.agent_profiles_list(),
             "agent_connection_test" => self.agent_connection_test(arguments),
+            "agent_working_directory_resolve" => self.agent_working_directory_resolve(arguments),
             "agent_session_start" => self.agent_session_start(arguments, context),
             "agent_session_prompt" => self.agent_session_prompt(arguments),
             "agent_session_status" => self.agent_session_status(arguments),
@@ -641,6 +663,23 @@ impl CoreApi {
         }))
     }
 
+    fn agent_working_directory_resolve(
+        &self,
+        arguments: &Map<String, Value>,
+    ) -> Result<Value, CoreError> {
+        let profile = self.select_profile(optional_string(arguments, "profile_id")?)?;
+        let primary_path = required_string(arguments, "primary_path")?;
+        let selected_working_directory =
+            optional_string(arguments, "selected_working_directory")?.map(PathBuf::from);
+        let resolution = resolve_profile_working_directory(
+            &profile,
+            Path::new(primary_path),
+            selected_working_directory.as_deref(),
+        );
+        serde_json::to_value(resolution)
+            .map_err(|error| CoreError::new("serialization", error.to_string()))
+    }
+
     fn agent_session_start(
         &mut self,
         arguments: &Map<String, Value>,
@@ -648,15 +687,37 @@ impl CoreApi {
     ) -> Result<Value, CoreError> {
         let profile = self.select_profile(optional_string(arguments, "profile_id")?)?;
         ensure_profile_can_start_session(&profile)?;
-        let working_directory = match optional_string(arguments, "working_directory")? {
-            Some(path) => path.to_string(),
-            None => std::env::current_dir()
-                .map_err(|error| CoreError::new("cwd", error.to_string()))?
-                .to_string_lossy()
-                .into_owned(),
-        };
-        ensure_directory(&working_directory)?;
+        let mut requested_working_directory =
+            optional_string(arguments, "working_directory")?.map(PathBuf::from);
         let context_paths = string_array(arguments, "context_paths")?;
+        if requested_working_directory.is_none()
+            && context_paths.is_empty()
+            && !matches!(&profile.working_directory, WorkingDirectoryPolicy::Ask)
+        {
+            requested_working_directory = Some(
+                std::env::current_dir()
+                    .map_err(|error| CoreError::new("cwd", error.to_string()))?,
+            );
+        }
+        let resolution = resolve_working_directory_for_context(
+            &profile,
+            &context_paths,
+            requested_working_directory.as_deref(),
+        );
+        if resolution.status != AgentWorkingDirectoryStatus::Ready {
+            return Err(CoreError::invalid_args(
+                resolution
+                    .message
+                    .unwrap_or_else(|| "Agent 工作目录不可用".to_string()),
+            )
+            .with_details(json!({
+                "status": resolution.status,
+                "policy": resolution.policy,
+            })));
+        }
+        let working_directory = resolution
+            .path
+            .ok_or_else(|| CoreError::invalid_args("Agent 工作目录解析失败"))?;
         let restored_messages = optional_agent_messages(arguments, "restored_messages")?;
         let runtime = AgentRuntime::start(
             profile.clone(),
@@ -814,15 +875,37 @@ impl CoreApi {
     fn agent_run(&mut self, arguments: &Map<String, Value>) -> Result<Value, CoreError> {
         let profile = self.select_profile(optional_string(arguments, "profile_id")?)?;
         ensure_profile_can_start_session(&profile)?;
-        let working_directory = match optional_string(arguments, "working_directory")? {
-            Some(path) => path.to_string(),
-            None => std::env::current_dir()
-                .map_err(|error| CoreError::new("cwd", error.to_string()))?
-                .to_string_lossy()
-                .into_owned(),
-        };
-        ensure_directory(&working_directory)?;
+        let mut requested_working_directory =
+            optional_string(arguments, "working_directory")?.map(PathBuf::from);
         let context_paths = string_array(arguments, "context_paths")?;
+        if requested_working_directory.is_none()
+            && context_paths.is_empty()
+            && !matches!(&profile.working_directory, WorkingDirectoryPolicy::Ask)
+        {
+            requested_working_directory = Some(
+                std::env::current_dir()
+                    .map_err(|error| CoreError::new("cwd", error.to_string()))?,
+            );
+        }
+        let resolution = resolve_working_directory_for_context(
+            &profile,
+            &context_paths,
+            requested_working_directory.as_deref(),
+        );
+        if resolution.status != AgentWorkingDirectoryStatus::Ready {
+            return Err(CoreError::invalid_args(
+                resolution
+                    .message
+                    .unwrap_or_else(|| "Agent 工作目录不可用".to_string()),
+            )
+            .with_details(json!({
+                "status": resolution.status,
+                "policy": resolution.policy,
+            })));
+        }
+        let working_directory = resolution
+            .path
+            .ok_or_else(|| CoreError::invalid_args("Agent 工作目录解析失败"))?;
         let prompt = required_string(arguments, "prompt")?;
         if prompt.trim().is_empty() {
             return Err(CoreError::invalid_args("prompt must not be empty"));
@@ -1129,6 +1212,21 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             true,
             false,
             true,
+        ),
+        spec(
+            "agent_working_directory_resolve",
+            "Resolve a profile's WorkingDirectoryPolicy for a primary path without starting an Agent.",
+            schema(
+                json!({
+                    "profile_id": { "type": "string" },
+                    "primary_path": { "type": "string" },
+                    "selected_working_directory": { "type": "string" }
+                }),
+                &["primary_path"],
+            ),
+            true,
+            false,
+            false,
         ),
         spec(
             "agent_session_start",
@@ -1560,17 +1658,6 @@ fn optional_string_array(
         Some(_) => Err(CoreError::invalid_args(format!(
             "{key} must be an array of strings"
         ))),
-    }
-}
-
-fn ensure_directory(path: &str) -> Result<(), CoreError> {
-    if Path::new(path).is_dir() {
-        Ok(())
-    } else {
-        Err(CoreError::new(
-            "working_directory_unavailable",
-            format!("working directory is unavailable: {path}"),
-        ))
     }
 }
 
