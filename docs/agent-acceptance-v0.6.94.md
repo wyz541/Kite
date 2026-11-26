@@ -4,13 +4,12 @@
 
 该记录用于 #157 的双平台产品化验收。**#157 保持 open，直至下列剩余项全部完成。**
 
-Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11-26 已在 macOS Apple Silicon 上使用真实 Claude Code ACP 与真实 Codex ACP 完成主要 UI 闭环；Codex 通过 CC Switch 的现有 DeepSeek 配置运行，Kite 未复制或保存该提供方的 token。
+Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11-26 已在 macOS Apple Silicon 与 Windows x64 上使用真实 Claude Code ACP 和真实 Codex ACP 完成主要 UI 闭环；Codex 通过现有 DeepSeek 配置运行，Kite 未复制或保存该提供方的 token。
 
 仍需完成：
 
-- Windows 上的 Codex ACP 实机闭环。
-- Windows 自动跟随/手动滚动暂停验证。
-- Windows 与 macOS 的完整键盘焦点序列，重点是权限按钮和上下文 chip。
+- Windows 自动跟随/手动滚动暂停验证；该项属于 UI-only 交互，不能由 CLI/MCP 替代。
+- Windows 与 macOS 的完整键盘焦点序列，重点是权限按钮和上下文 chip；该项属于 UI-only 无障碍验收。
 - 上述项完成后更新本记录并关闭 #157。
 
 ## macOS 实机验收（2026-11-26）
@@ -56,7 +55,7 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11
 
 ## Windows 实机验收（2026-11-25）
 
-环境：Windows x64、Kite v0.6.94、真实 Claude Code ACP `0.16.2`、只读合成工作目录 `C:\KiteAgentAcceptance\final\workspace`。
+环境：Windows x64、Kite v0.6.94、真实 Claude Code ACP `0.16.2`、真实 Codex ACP `@agentclientprotocol/codex-acp 2.12.1`、合成工作目录 `C:\KiteAgentAcceptance\final\workspace`。
 
 已通过：
 
@@ -72,12 +71,30 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11
 - 修复内层 popout 的 double-lease 崩溃：窗口创建延后到 AgentPanel 当前 update 结束之后。
 - 修复 session 启动后未发送 `AgentSessionPrompt` 的问题：轮询到 Ready 后再提交提示词，不阻塞 UI。
 - 修复终态提示残留：完成、取消、失败和关闭都有明确状态文案。
+- 使用真实 `@agentclientprotocol/codex-acp 2.12.1` 与自定义 DeepSeek provider 完成 Codex ACP 流式回答，Kite UI 最终回答为 `DEEPSEEK-WIN-OK`；旧 `@zed-industries/codex-acp 0.16.0` 因不兼容当前 `[agents]` 配置而不再列为内置预设。
+- Codex ACP 配置只保存 `node.exe`、适配器脚本、模型、工作目录和权限策略；未把 provider token 写入 Kite 配置。
 
-仍未完成的 Windows 验收：Codex ACP、自动跟随/手动滚动暂停、完整键盘焦点序列。上述项目不得记为通过。
+仍未完成的 Windows 验收：自动跟随/手动滚动暂停、完整键盘焦点序列。上述项目不得记为通过。
+
+## CLI / MCP 无 UI 验收（2026-11-26）
+
+Agent 业务闭环已改用 `kite-cli` 与 `kite-mcp` 直接验证，不操作 GUI。所有结果都来自同一个 Core API；结构化证据保存在 [`agent-acceptance-v0.6.94-cli.json`](agent-acceptance-v0.6.94-cli.json)。
+
+| 路径 | 真实结果 |
+|---|---|
+| `kite-cli agent run` / Codex ACP | `@agentclientprotocol/codex-acp 2.12.1` 完成流式回答，最终输出 `CLI-CODEX-OK`，`closed=true`。 |
+| `kite-cli agent run` / Claude Code ACP | `claude-code-acp 0.16.2` 完成流式回答，最终输出 `CLI-CLAUDE-OK`，`closed=true`。 |
+| `kite-cli batch` / 权限 | 真实 Claude Code ACP 请求写入 `cli-permission-test.txt`；`reject_once` 后终态为 `completed`，权限队列为空，目标文件不存在。 |
+| `kite-cli batch` / 取消 | 真实 Codex ACP 在 `running` 状态收到取消，终态为 `cancelled`，`closed=true`。 |
+| `kite-mcp` | stdio 初始化成功，暴露 17 个工具（其中 13 个 `agent_*`）；`agent_run` 返回 `MCP-CODEX-OK` 且关闭进程。 |
+| 错误语义 | 不存在的 Profile 返回 `profile_not_found`，CLI 退出码为 `4`。 |
+
+因此，Agent 核心业务、CLI 和 MCP 的调试不再需要 GUI。自动跟随/滚动暂停和完整键盘焦点序列仍是独立的 UI-only 验收项。
 
 ## 当前自动化证据
 
 - `cargo test --locked --lib agent -- --test-threads=1`：通过。
+- `cargo test --locked --test core_api_cli --test core_api_mcp --test core_api_agent`：通过，覆盖 CLI 退出码、MCP 工具/确认守卫、跨命令持久 session 和共享工作目录契约。
 - `cargo test --locked --test agent_fixture`：通过，覆盖正常流、权限、拒绝错误分类、取消、超时、超大输出、失败、重试和进程树清理。
 - `cargo test --locked --test agent_fixture_protocol`：7 项通过，覆盖 ACP 帧、Markdown、权限、取消、重试、连接探针子进程回收和脱敏输入。
 - `cargo test --locked --test agent_redaction`：2 项通过，覆盖短 credential 拒绝、跨 chunk secret、终态 flush、持久化与日志脱敏。
@@ -93,7 +110,8 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11
 | 检查 | Windows | macOS |
 |---|---|---|
 | 安装并认证 Claude Code ACP | 已通过（真实 ACP） | 已通过（真实 ACP） |
-| 安装并认证 Codex ACP | 待实机执行 | 已通过（真实 ACP；CC Switch DeepSeek） |
+| 安装并认证 Codex ACP | 已通过（真实 ACP；自定义 DeepSeek provider） | 已通过（真实 ACP；CC Switch DeepSeek） |
+| CLI/MCP 无 UI 一次闭环 | 已通过（Codex `CLI-CODEX-OK`、Claude `CLI-CLAUDE-OK`、MCP `MCP-CODEX-OK`） | 已通过（真实 Claude Code ACP CLI/MCP） |
 | 设置中测试连接 | 已执行；ACP 初始化成功 | 已通过；228 ms 内完成且无残留进程 |
 | 右键文件发起 Agent | 已通过 | 已通过 |
 | 流式回答 | 已通过 | 已通过 |
@@ -121,6 +139,7 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11
 | 会话路径修复 | [windows-agent-repair.png](images/agent-acceptance-v0.6.94/windows-agent-repair.png) | [macos-agent-repair.png](images/agent-acceptance-v0.6.94/macos-agent-repair.png) |
 | 诊断页 | [windows-agent-diagnostics.png](images/agent-acceptance-v0.6.94/windows-agent-diagnostics.png) | [macos-agent-diagnostics.png](images/agent-acceptance-v0.6.94/macos-agent-diagnostics.png) |
 | 窄窗口 Agent 栏 | [windows-agent-narrow.png](images/agent-acceptance-v0.6.94/windows-agent-narrow.png) | [macos-agent-narrow.png](images/agent-acceptance-v0.6.94/macos-agent-narrow.png) |
+| Codex ACP 完成态 | [windows-agent-codex-completed.png](images/agent-acceptance-v0.6.94/windows-agent-codex-completed.png) | [macos-agent-codex-completed.png](images/agent-acceptance-v0.6.94/macos-agent-codex-completed.png) |
 
 macOS 额外证据：
 [完成态（Codex/DeepSeek）](images/agent-acceptance-v0.6.94/macos-agent-codex-completed.png)、
@@ -166,3 +185,4 @@ Windows 与 macOS 必须显示相同的 Agent、模型、工作目录、权限�
 - Codex ACP 会声明 ChatGPT / API key 认证方法；连接测试因此显示“需要认证”。但 CC Switch 自定义 provider 的 profile 可继续完成真实会话，Kite 只做诊断展示，不改变 Agent 原生认证。
 - Claude Code ACP 在用户拒绝写入权限时可能返回上游 `Internal error`；Kite 现在将该终态归一化为“权限请求已拒绝”，原始细节仍保留在脱敏诊断日志。
 - 完整键盘焦点序列尚需继续修复并复验；#157 不得提前关闭。
+- 旧 `@zed-industries/codex-acp 0.16.0` 已弃用；Windows 新验收使用 `@agentclientprotocol/codex-acp 2.12.1`。macOS 的 `0.16.0` 记录保留为历史实机证据，不代表当前预设。

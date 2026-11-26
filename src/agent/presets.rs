@@ -93,15 +93,15 @@ pub fn preset_specs() -> Vec<AgentPresetSpec> {
         AgentPresetSpec {
             id: "codex-acp".to_string(),
             name: "Codex".to_string(),
-            description: "通过 Zed 维护的官方 ACP 适配器接入 Codex。".to_string(),
+            description: "通过 Agent Client Protocol 官方适配器接入 Codex。".to_string(),
             executable: "codex-acp".to_string(),
             arguments: Vec::new(),
             transport: AgentPresetTransport::AcpStdio,
             permission: AgentPresetPermission::AgentManaged,
-            install_hint: "npm install -g @zed-industries/codex-acp@0.16.0".to_string(),
-            documentation_url: "https://www.npmjs.com/package/@zed-industries/codex-acp"
+            install_hint: "npm install -g @agentclientprotocol/codex-acp@2.12.1".to_string(),
+            documentation_url: "https://www.npmjs.com/package/@agentclientprotocol/codex-acp"
                 .to_string(),
-            verified_version: "0.16.0".to_string(),
+            verified_version: "2.12.1".to_string(),
             verification_note:
                 "测试连接会执行 ACP initialize 握手；登录、额度和写入权限由 Codex 管理。"
                     .to_string(),
@@ -140,6 +140,18 @@ mod tests {
             assert!(!preset.documentation_url.contains("token="));
             assert!(!preset.arguments.iter().any(|arg| arg.contains("sk-")));
         }
+
+        let codex = preset_spec("codex-acp").expect("Codex preset must remain built in");
+        assert_eq!(codex.verified_version, "2.12.1");
+        assert!(
+            codex
+                .install_hint
+                .contains("@agentclientprotocol/codex-acp@2.12.1")
+        );
+        assert_eq!(
+            codex.documentation_url,
+            "https://www.npmjs.com/package/@agentclientprotocol/codex-acp"
+        );
     }
 
     #[test]
