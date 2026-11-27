@@ -4,49 +4,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
-private struct MindmapMarkerChip: Identifiable, Equatable {
-    let id: String
-    let family: String
-    let label: String
-}
-
-@MainActor
-private struct MindmapTopicVisualStyle: Equatable {
-    var fontFamily: String?
-    var fontSize: Double = 12.5
-    var fontWeight: String?
-    var italic = false
-    var underline = false
-    var strike = false
-    var textColorHex: String?
-    var fillColorHex: String?
-    var borderColorHex: String?
-    var borderWidth: Double = 1
-    var borderPattern: String?
-    var cornerRadius: Double?
-    var alignment: String?
-
-    var accentHex: String? { borderColorHex ?? fillColorHex ?? textColorHex }
-}
-
-@MainActor
-private struct MindmapTopic: Identifiable {
-    let id: String
-    var title: String
-    let parentID: String?
-    let depth: Int
-    let childIDs: [String]
-    let style: MindmapTopicVisualStyle
-    let shapeClass: String?
-    let markers: [MindmapMarkerChip]
-    let isComplete: Bool
-
-    var hasChildren: Bool { !childIDs.isEmpty }
-    var hasTodo: Bool { markers.contains { $0.family == "task" } }
-    var headerMarkers: [MindmapMarkerChip] { markers }
-}
-
-@MainActor
 private struct MindmapTopicFormatDraft: Equatable {
     var fontFamily = ""
     var fontSize = 12.5
@@ -827,7 +784,7 @@ private final class MindmapEditorModel: ObservableObject {
         selectionRule: SelectionRule = .specific("")
     ) {
         do {
-            let parsed = try Self.parse(contentJSON: document.contentJson)
+            let parsed = try MindmapTreeCanonicalizer.parse(contentJSON: document.contentJson)
             topics = parsed.topics
             rootID = parsed.rootID
             if initial {
@@ -1054,130 +1011,6 @@ private final class MindmapEditorModel: ObservableObject {
         return json
     }
 
-    private static func parse(contentJSON: String) throws -> (topics: [String: MindmapTopic], rootID: String?) {
-        let data = Data(contentJSON.utf8)
-        let rootObject = try JSONSerialization.jsonObject(with: data)
-        guard let sheets = rootObject as? [[String: Any]],
-              let rootTopic = sheets.first?["rootTopic"] as? [String: Any] else {
-            throw NSError(
-                domain: "KiteMindmap",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "content.json 不包含 rootTopic"]
-            )
-        }
-
-        var topics: [String: MindmapTopic] = [:]
-        var rootID: String?
-
-        func walk(_ object: [String: Any], parentID: String?, depth: Int) {
-            let id = object["id"] as? String ?? UUID().uuidString
-            if depth == 0 { rootID = id }
-            let title = (object["title"] as? String) ?? "未命名主题"
-            let properties = (object["style"] as? [String: Any])?["properties"] as? [String: Any]
-            let style = parseVisualStyle(properties)
-            let shape = (object["shape-class"] as? String) ?? (properties?["shape-class"] as? String)
-            let markerObjects = object["markers"] as? [[String: Any]] ?? []
-            let markers = markerObjects.compactMap { marker -> MindmapMarkerChip? in
-                guard let markerID = marker["markerId"] as? String else { return nil }
-                return MindmapMarkerChip(
-                    id: markerID,
-                    family: markerFamily(markerID),
-                    label: markerLabel(markerID)
-                )
-            }
-            let isComplete = markers.contains { $0.id == "task-done" }
-            let childrenObject = object["children"] as? [String: Any]
-            let childObjects = childrenObject?["attached"] as? [[String: Any]] ?? []
-            let childIDs = childObjects.compactMap { $0["id"] as? String }
-            topics[id] = MindmapTopic(
-                id: id,
-                title: title,
-                parentID: parentID,
-                depth: depth,
-                childIDs: childIDs,
-                style: style,
-                shapeClass: shape,
-                markers: markers,
-                isComplete: isComplete
-            )
-            for child in childObjects {
-                walk(child, parentID: id, depth: depth + 1)
-            }
-        }
-
-        walk(rootTopic, parentID: nil, depth: 0)
-        return (topics, rootID)
-    }
-
-    private static func parseVisualStyle(_ properties: [String: Any]?) -> MindmapTopicVisualStyle {
-        var style = MindmapTopicVisualStyle()
-        style.fontFamily = properties?["fo:font-family"] as? String
-        style.fontSize = parseFontSize(properties?["fo:font-size"])
-        style.fontWeight = properties?["fo:font-weight"] as? String
-        let fontStyle = (properties?["fo:font-style"] as? String)?.lowercased()
-        let decoration = (properties?["fo:text-decoration"] as? String)?.lowercased() ?? ""
-        style.italic = fontStyle == "italic" || fontStyle == "oblique"
-        style.underline = decoration.split(whereSeparator: \.isWhitespace).contains("underline")
-        style.strike = decoration.split(whereSeparator: \.isWhitespace).contains("line-through")
-        style.textColorHex = properties?["fo:color"] as? String
-        let fill = properties?["svg:fill"] as? String ?? properties?["fill-color"] as? String
-        style.fillColorHex = fill?.lowercased() == "none" ? nil : fill
-        style.borderColorHex = properties?["border-line-color"] as? String
-        style.borderWidth = parseMeasurement(properties?["border-line-width"]) ?? 1
-        style.borderPattern = properties?["border-line-pattern"] as? String
-        style.cornerRadius = parseMeasurement(properties?["shape-corner"])
-        style.alignment = properties?["fo:text-align"] as? String
-        return style
-    }
-
-    private static func parseFontSize(_ value: Any?) -> Double {
-        parseMeasurement(value) ?? 12.5
-    }
-
-    private static func parseMeasurement(_ value: Any?) -> Double? {
-        if let number = value as? NSNumber { return number.doubleValue }
-        guard let string = value as? String else { return nil }
-        let numeric = string.drop(while: { !$0.isNumber && $0 != "." })
-        return Double(numeric.trimmingCharacters(in: CharacterSet(charactersIn: "ptpx%em ")))
-    }
-
-    private static func markerFamily(_ markerID: String) -> String {
-        if markerID.hasPrefix("priority-") { return "priority" }
-        if markerID.hasPrefix("task-") { return "task" }
-        if markerID.hasPrefix("tag-") { return "tag" }
-        if markerID.hasPrefix("flag-") { return "flag" }
-        if markerID.hasPrefix("star-") { return "star" }
-        if markerID.hasPrefix("people-") { return "people" }
-        if markerID.hasPrefix("smiley-") { return "smiley" }
-        if markerID.hasPrefix("symbol-") || markerID.hasPrefix("symbol_") { return "symbol" }
-        return "other"
-    }
-
-    private static func markerLabel(_ markerID: String) -> String {
-        if markerID.hasPrefix("priority-") {
-            return "P\(markerID.dropFirst("priority-".count))"
-        }
-        switch markerID {
-        case "task-start": return "○"
-        case "task-oct": return "12%"
-        case "task-quarter": return "25%"
-        case "task-3oct": return "38%"
-        case "task-half": return "50%"
-        case "task-5oct": return "62%"
-        case "task-3quar": return "75%"
-        case "task-7oct": return "88%"
-        case "task-done": return "✓"
-        case "task-pause": return "Ⅱ"
-        default: break
-        }
-        if markerID.hasPrefix("flag-") { return "⚑" }
-        if markerID.hasPrefix("star-") { return "★" }
-        if markerID.hasPrefix("tag-") { return "#" }
-        if markerID.hasPrefix("people-") { return "●" }
-        if markerID.hasPrefix("smiley-") { return "☺" }
-        if markerID.hasPrefix("symbol-") || markerID.hasPrefix("symbol_") { return "!" }
-        return (markerID.split(separator: "-").last.map(String.init) ?? markerID).prefix(2).uppercased()
-    }
 }
 
 @MainActor

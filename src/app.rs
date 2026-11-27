@@ -29,6 +29,7 @@ use crate::git_branches_window;
 use crate::git_client_window;
 use crate::git_log_window;
 use crate::global_search_window;
+use crate::mindmap_actions::MindmapToggleTodo;
 use crate::mindmap_import_window;
 use crate::mindmap_window;
 use crate::platform::{default_root_path, root_directory};
@@ -2010,6 +2011,7 @@ impl KiteApp {
                 MindmapPasteTopicStyle,
                 Some("KiteMindmap"),
             ),
+            KeyBinding::new("secondary-enter", MindmapToggleTodo, Some("KiteMindmap")),
             KeyBinding::new("secondary-plus", MindmapZoomIn, Some("KiteMindmap")),
             KeyBinding::new("secondary-=", MindmapZoomIn, Some("KiteMindmap")),
             KeyBinding::new("secondary-minus", MindmapZoomOut, Some("KiteMindmap")),
@@ -3735,6 +3737,12 @@ impl KiteApp {
         }
         match action.command {
             ContextMenuCommand::Open => self.open_path(action.target.clone(), window, cx),
+            ContextMenuCommand::OpenMindmap => {
+                self.open_mindmap_path(action.target.clone(), window, cx)
+            }
+            ContextMenuCommand::ConvertDocumentToMindmap => {
+                self.open_mindmap_import_path(action.target.clone(), window, cx)
+            }
             ContextMenuCommand::OpenWithApplication => {
                 let ContextMenuActionPayload::Application(application_id) = &action.payload else {
                     self.notice = None;
@@ -3769,12 +3777,6 @@ impl KiteApp {
                 window,
                 cx,
             ),
-            ContextMenuCommand::OpenMindmap => {
-                self.open_mindmap_path(action.target.clone(), window, cx)
-            }
-            ContextMenuCommand::ConvertDocumentToMindmap => {
-                self.open_mindmap_import_path(action.target.clone(), window, cx)
-            }
             ContextMenuCommand::Agent(command) => {
                 self.open_agent_context(command, action, window, cx)
             }

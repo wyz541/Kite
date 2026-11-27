@@ -326,3 +326,20 @@ pub enum VcsMenuCommand {
     SvnCleanup,
     SvnResolveConflicts,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[std::prelude::v1::test]
+    fn mindmap_action_ids_map_to_windows_commands() {
+        assert_eq!(
+            ContextMenuCommand::from_action_id("tool.kite.mindmap", None),
+            Some(ContextMenuCommand::OpenMindmap)
+        );
+        assert_eq!(
+            ContextMenuCommand::from_action_id("tool.kite.mindmap-import", None),
+            Some(ContextMenuCommand::ConvertDocumentToMindmap)
+        );
+    }
+}

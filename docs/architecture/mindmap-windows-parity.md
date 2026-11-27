@@ -50,9 +50,14 @@ ZIP entries.
 - Flag, star, and tag generic markers.
 - TODO completion toggle and completed styling.
 - Date inserted into title or note with ISO/Chinese/English/System display modes.
-- Font family, size, bold, italic, underline, strike, text/fill/border colors,
-  border width, and node corner radius.
+- System font discovery, size, bold, italic, underline, strike, text/fill/border
+  colors, border width/pattern, node corner radius, alignment, line height, and
+  letter-spacing controls. Missing fonts remain persisted while the canvas falls
+  back to a system font and shows a warning.
 - Copy and paste topic style in addition to whole-subtree clipboard operation.
+- XMind 27.1 top-level task fields are consumed alongside legacy `task-*`
+  markers; TODO edits keep both representations synchronized while retaining
+  unknown task fields.
 
 ### Conversion flow
 
@@ -61,11 +66,16 @@ ZIP entries.
   presets.
 - Controls body splitting, paragraph-note preservation, short-fragment merging,
   table/code/image strategies.
-- Shows node/structure/content counts, maximum depth, notes, warnings, and a
-  bounded sample tree.
-- Uses a platform save dialog for output, refuses implicit overwrite, validates
-  the preview's source SHA-256 before generating, and opens the generated XMind.
-- Cancellation does not write a partial `.xmind`.
+- Shows node/structure/content counts, maximum depth, notes, warnings, split and
+  merge statistics, skipped items, TXT structure confidence, and a bounded sample
+  tree.
+- `RowsAsTopics` creates one child topic per table data row while retaining
+  caption/header context.
+- Uses a platform save dialog for output, exposes an explicit overwrite option,
+  validates the preview's source SHA-256 before generating, and opens the
+  generated XMind.
+- Cancellation does not write a partial `.xmind`; failed generation preserves an
+  existing target.
 
 ## Shared keyboard map
 
@@ -97,12 +107,16 @@ are implemented.
 
 ## Current gaps
 
-- Windows runtime interaction and screenshot acceptance in the UTM VM.
-- XMind 27.01 visual readback for the Windows-generated document.
+- Windows runtime screenshot acceptance and macOS/Windows screenshot comparison.
+- XMind 27.1 actual file/visual readback; the installed 27.1 build is currently
+  gated by its first-run EULA on the acceptance machine.
+- macOS Swift tree-parity smoke has been added but must execute on macOS CI or
+  hardware; this Windows host cannot compile SwiftUI.
 - Relation lines, boundaries, summaries, rich note editing, and hyperlink editing.
-- Exact XMind theme inheritance and text measurement parity.
-- Live preview refresh after changing every numeric option without reopening the
-  conversion window; the current UI refreshes on strategy/preset changes.
+- GPUI does not expose native letter-spacing or dotted border primitives; current
+  rendering is an explicit visual approximation while persisted semantics remain.
+- XMind 27.1 did not expose confirmed `fo:line-height` or `fo:letter-spacing`
+  handling in static resource inspection, so those fields are marked experimental.
 - Parent-TODO progress aggregation and dynamic date tokens.
 
 These gaps mean #210, #211, and #213-#217 remain open even when this slice builds.

@@ -4684,6 +4684,17 @@ mod tests {
     }
 
     #[test]
+    fn mindmap_capabilities_emit_stable_actions() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.capabilities.mindmap_available = true;
+        context.capabilities.mindmap_import_available = true;
+        let plan = compose_default_menu(&context).expect("mindmap menu");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"tool.kite.mindmap"));
+        assert!(ids.contains(&"tool.kite.mindmap-import"));
+    }
+
+    #[test]
     fn all_visible_actions_have_accessible_labels_and_disabled_reasons() {
         let contexts = [
             snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1),

@@ -1,0 +1,105 @@
+[
+  {
+    "id": "sheet-parity",
+    "title": "UI parity",
+    "rootTopic": {
+      "id": "root",
+      "title": "平台对等验收",
+      "structureClass": "org.xmind.ui.logic.right",
+      "style": {
+        "properties": {
+          "line-class": "org.xmind.branchConnection.roundedElbow",
+          "line-corner": "12",
+          "line-width": "2pt",
+          "line-color": "#33669980",
+          "line-pattern": "dash",
+          "fo:font-family": "PingFang SC",
+          "fo:font-size": "16pt",
+          "fo:font-weight": "bold",
+          "fo:text-align": "center",
+          "svg:fill": "#F6F8FA",
+          "border-line-color": "#D0D7DE",
+          "border-line-width": "2pt",
+          "border-line-pattern": "solid",
+          "shape-corner": "8"
+        }
+      },
+      "children": {
+        "attached": [
+          {
+            "id": "alpha",
+            "title": "Alpha",
+            "shape-class": "org.xmind.ui.topic.callout",
+            "markers": [
+              {"markerId": "priority-1"},
+              {"markerId": "flag-red"},
+              {"markerId": "future-marker"},
+              {"markerId": ""},
+              {"withoutMarkerId": true}
+            ],
+            "style": {
+              "properties": {
+                "fo:font-family": "Avenir Next",
+                "fo:font-size": "14pt",
+                "fo:font-weight": "600",
+                "fo:font-style": "italic",
+                "fo:text-decoration": "underline line-through",
+                "fo:color": "#1F2328",
+                "fo:text-align": "left",
+                "svg:fill": "#FFF8E1",
+                "border-line-color": "#C58A00",
+                "border-line-width": "3px",
+                "border-line-pattern": "dash",
+                "shape-corner": "18"
+              }
+            },
+            "children": {
+              "attached": [
+                {
+                  "id": "alpha-child",
+                  "title": "Alpha child",
+                  "markers": [{"markerId": "star-blue"}]
+                }
+              ]
+            }
+          },
+          {
+            "id": "modern-task",
+            "title": "Modern task wins",
+            "taskPresentation": "todo-checkbox",
+            "todoStatus": "done",
+            "todoProgress": 1,
+            "taskProgress": 0.875,
+            "taskStartDate": "2026-11-27",
+            "taskDueDate": "2026-11-30",
+            "markers": [{"markerId": "task-start"}],
+            "style": {
+              "properties": {
+                "svg:fill": "#DDF4FF",
+                "border-line-color": "#0969DA",
+                "border-line-width": "1.5pt"
+              }
+            }
+          },
+          {
+            "id": "legacy-task",
+            "title": "Legacy marker fallback",
+            "markers": [{"markerId": "task-half"}]
+          },
+          {
+            "id": "task-string-progress",
+            "title": "String progress",
+            "taskPresentation": "todo-progress",
+            "todoStatus": "paused",
+            "todoProgress": "50%"
+          },
+          {
+            "id": "empty-title",
+            "title": "   ",
+            "markers": [{"markerId": "tag-release"}]
+          }
+        ]
+      }
+    }
+  }
+]

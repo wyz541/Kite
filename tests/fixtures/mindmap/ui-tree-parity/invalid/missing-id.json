@@ -1,0 +1,13 @@
+[
+  {
+    "rootTopic": {
+      "id": "root",
+      "title": "Missing child id",
+      "children": {
+        "attached": [
+          {"title": "No id"}
+        ]
+      }
+    }
+  }
+]

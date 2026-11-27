@@ -31,6 +31,9 @@ bash apps/macos/Tests/run-open-with-smoke.sh
 echo "Testing tool registry..."
 bash apps/macos/Tests/run-tool-registry-smoke.sh
 
+echo "Testing Mindmap UI tree parity..."
+bash apps/macos/Tests/run-mindmap-tree-parity-smoke.sh
+
 echo "Building release app..."
 bash apps/macos/build.sh
 

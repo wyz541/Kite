@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "title": "Import Corpus",
+  "children": [
+    {
+      "title": "Overview",
+      "kind": {
+        "role": "structure",
+        "kind": "section"
+      },
+      "task": null,
+      "children": [
+        {
+          "title": "Overview sentence one is long enough.",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Overview sentence two is long enough;",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Overview sentence three is long enough.",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        }
+      ],
+      "notes": [
+        {
+          "text": "Overview sentence one is long enough. Overview sentence two is long enough; Overview sentence three is long enough.",
+          "format": "plain",
+          "label": "Original paragraph"
+        }
+      ],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    },
+    {
+      "title": "Planning",
+      "kind": {
+        "role": "structure",
+        "kind": {
+          "heading": {
+            "level": 2
+          }
+        }
+      },
+      "task": null,
+      "children": [
+        {
+          "title": "Build adapters",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "list_item": {
+                "ordered": false,
+                "level": 1
+              }
+            }
+          },
+          "task": "todo",
+          "children": [
+            {
+              "title": "Markdown",
+              "kind": {
+                "role": "structure",
+                "kind": {
+                  "list_item": {
+                    "ordered": false,
+                    "level": 2
+                  }
+                }
+              },
+              "task": "done",
+              "children": [],
+              "notes": [
+                {
+                  "text": "Markdown",
+                  "format": "plain",
+                  "label": "Original paragraph"
+                }
+              ],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            }
+          ],
+          "notes": [
+            {
+              "text": "Build adapters",
+              "format": "plain",
+              "label": "Original paragraph"
+            }
+          ],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Round trip",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "list_item": {
+                "ordered": false,
+                "level": 1
+              }
+            }
+          },
+          "task": "todo",
+          "children": [],
+          "notes": [
+            {
+              "text": "Round trip",
+              "format": "plain",
+              "label": "Original paragraph"
+            }
+          ],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Details",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "heading": {
+                "level": 3
+              }
+            }
+          },
+          "task": null,
+          "children": [
+            {
+              "title": "Read the design.",
+              "kind": {
+                "role": "content",
+                "kind": "sentence",
+                "split_from_paragraph": true
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "Keep v1.2.3 intact.",
+              "kind": {
+                "role": "content",
+                "kind": "sentence",
+                "split_from_paragraph": true
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "Code block · rust",
+              "kind": {
+                "role": "content",
+                "kind": "code_block",
+                "split_from_paragraph": false
+              },
+              "task": null,
+              "children": [],
+              "notes": [
+                {
+                  "text": "fn main() {}",
+                  "format": "plain",
+                  "label": "Code (rust)"
+                }
+              ],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "diagram",
+              "kind": {
+                "role": "content",
+                "kind": "sentence",
+                "split_from_paragraph": true
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "Image: diagram",
+              "kind": {
+                "role": "content",
+                "kind": {
+                  "other": "image"
+                },
+                "split_from_paragraph": false
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [
+                {
+                  "label": "diagram",
+                  "target": "https://example.com/diagram.png",
+                  "kind": "image"
+                }
+              ],
+              "attachments": [
+                {
+                  "name": "diagram.png",
+                  "media_type": null,
+                  "uri": "https://example.com/diagram.png",
+                  "data": null
+                }
+              ],
+              "tables": []
+            }
+          ],
+          "notes": [
+            {
+              "text": "Read the design. Keep v1.2.3 intact.",
+              "format": "plain",
+              "label": "Original paragraph"
+            },
+            {
+              "text": "diagram",
+              "format": "plain",
+              "label": "Original paragraph"
+            }
+          ],
+          "links": [
+            {
+              "label": "the design",
+              "target": "https://example.com/design",
+              "kind": "hyperlink"
+            }
+          ],
+          "attachments": [],
+          "tables": [
+            {
+              "caption": null,
+              "headers": [
+                "Field",
+                "Value"
+              ],
+              "rows": [
+                [
+                  "Nodes",
+                  "3000"
+                ]
+              ]
+            }
+          ]
+        }
+      ],
+      "notes": [],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    }
+  ],
+  "notes": [],
+  "links": [],
+  "attachments": [],
+  "tables": [],
+  "warnings": [
+    {
+      "code": "unsupported_element",
+      "severity": "warning",
+      "message": "Image is represented as a link; no external resource was fetched"
+    }
+  ],
+  "stats": {
+    "split_fragments": 6,
+    "merged_fragments": 0,
+    "truncated_titles": 0,
+    "skipped_items": 0
+  }
+}

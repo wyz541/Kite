@@ -41,6 +41,7 @@ pub struct MindmapImportWindow {
     options: MindmapConversionOptionsDto,
     preview: Option<MindmapConversionPreviewDto>,
     output_input: Entity<InputState>,
+    overwrite_existing_output: bool,
     loading: bool,
     converting: bool,
     status: SharedString,
@@ -66,6 +67,7 @@ impl MindmapImportWindow {
             options: MindmapConversionOptionsDto::default(),
             preview: None,
             output_input,
+            overwrite_existing_output: false,
             loading: true,
             converting: false,
             status: "正在分析源文档…".into(),
@@ -173,6 +175,7 @@ impl MindmapImportWindow {
         let source_path = self.source.path.clone();
         let options = self.options.clone();
         let expected_sha = preview.source_sha256.clone();
+        let overwrite_existing_output = self.overwrite_existing_output;
         self.converting = true;
         self.error = None;
         self.status = "正在生成 .xmind…".into();
@@ -184,7 +187,7 @@ impl MindmapImportWindow {
                         source_path,
                         expected_sha,
                         output_path,
-                        false,
+                        overwrite_existing_output,
                         options,
                     )
                 })
@@ -405,7 +408,15 @@ impl MindmapImportWindow {
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.choose_output(window, cx)
                             })),
-                    ),
+                    )
+                    .child(toggle_row(
+                        "允许覆盖已有 .xmind",
+                        self.overwrite_existing_output,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.overwrite_existing_output = !this.overwrite_existing_output;
+                            cx.notify();
+                        }),
+                    )),
             )
             .child(div().flex_1())
             .child(
@@ -448,14 +459,36 @@ impl MindmapImportWindow {
                     } else {
                         cx.theme().muted_foreground
                     };
-                    h_flex()
-                        .gap_2()
+                    let location = warning
+                        .location
+                        .clone()
+                        .unwrap_or_else(|| "文档级".to_string());
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().title_bar.opacity(0.45))
+                        .p_2()
                         .child(
-                            div()
-                                .text_xs()
-                                .font_family("monospace")
-                                .text_color(color)
-                                .child(warning.severity.clone()),
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .flex_wrap()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_family("monospace")
+                                        .text_color(color)
+                                        .child(format!("{} · {}", warning.code, warning.severity)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(location),
+                                ),
                         )
                         .child(
                             div()
@@ -471,8 +504,38 @@ impl MindmapImportWindow {
                 .and_then(|value| serde_json::to_string_pretty(&value).ok())
                 .unwrap_or_else(|| preview.sample_tree_json.clone());
             let sample = sample.chars().take(12_000).collect::<String>();
+            let confidence_label = structure_confidence_label(&preview.structure_confidence);
             v_flex()
                 .gap_4()
+                .when(preview.structure_confidence == "low", |this| {
+                    this.child(
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(0xD5A143))
+                            .bg(rgb(0x2B2416))
+                            .p_3()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0xF0C36A))
+                                    .child("TXT 结构置信度低"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xD8C7A0))
+                                    .child(format!(
+                                        "推断标题 {} 个，模糊短行 {} 行。请先核对样本树和全部警告，再生成 Mindmap。",
+                                        preview.inferred_heading_count,
+                                        preview.ambiguous_short_line_count
+                                    )),
+                            ),
+                    )
+                })
                 .child(
                     h_flex()
                         .gap_2()
@@ -490,7 +553,38 @@ impl MindmapImportWindow {
                         ))
                         .child(metric("最大层级", preview.max_depth.to_string(), cx))
                         .child(metric("备注", preview.note_count.to_string(), cx))
-                        .child(metric("警告", preview.warnings.len().to_string(), cx)),
+                        .child(metric("警告", preview.warnings.len().to_string(), cx))
+                        .child(metric(
+                            "拆句",
+                            preview.split_fragments.to_string(),
+                            cx,
+                        ))
+                        .child(metric(
+                            "合并",
+                            preview.merged_fragments.to_string(),
+                            cx,
+                        ))
+                        .child(metric(
+                            "标题截断",
+                            preview.truncated_titles.to_string(),
+                            cx,
+                        ))
+                        .child(metric(
+                            "跳过内容",
+                            preview.skipped_items.to_string(),
+                            cx,
+                        ))
+                        .child(metric("结构置信度", confidence_label.to_string(), cx))
+                        .child(metric(
+                            "推断标题",
+                            preview.inferred_heading_count.to_string(),
+                            cx,
+                        ))
+                        .child(metric(
+                            "模糊短行",
+                            preview.ambiguous_short_line_count.to_string(),
+                            cx,
+                        )),
                 )
                 .child(section("有界样本树"))
                 .child(
@@ -506,8 +600,15 @@ impl MindmapImportWindow {
                         .child(div().text_xs().font_family("monospace").child(sample)),
                 )
                 .when(!warnings.is_empty(), |this| {
-                    this.child(section("警告"))
-                        .child(v_flex().gap_1().children(warnings))
+                    this.child(section("警告 / 跳过内容"))
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .max_h(px(220.))
+                                .overflow_y_scrollbar()
+                                .gap_1()
+                                .children(warnings),
+                        )
                 })
                 .into_any_element()
         } else if self.loading {
@@ -574,6 +675,15 @@ impl Render for MindmapImportWindow {
                     .child(options)
                     .child(preview),
             )
+    }
+}
+
+fn structure_confidence_label(value: &str) -> &'static str {
+    match value {
+        "low" => "低",
+        "medium" => "中",
+        "high" => "高",
+        _ => "未知",
     }
 }
 

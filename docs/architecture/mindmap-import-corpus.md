@@ -89,13 +89,15 @@ tests/fixtures/mindmap/import/
 - 不包含 macOS/Windows 条件编译。
 - 语料路径通过 `CARGO_MANIFEST_DIR` 解析，不依赖当前工作目录或平台路径分隔符。
 - 测试不依赖字体、系统语言、网络或外部 XMind 安装。
-- macOS ARM64 本机已执行：
+- 固定语料通过 `.gitattributes` 的 `tests/fixtures/mindmap/** -text` 保持逐字节检出，避免 Windows `core.autocrlf=true` 改变 manifest 哈希。
+- Windows x64 本机已执行：
   - `cargo test --test mindmap_import_corpus`
-  - 6 tests passed
-- Windows x64 尚未在本 worktree 本机执行，必须在 PR CI 中完成同一命令后才满足 #211 的双平台自动验收。
-- XMind macOS `27.01.05089` 的人工打开和视觉回读不属于本测试文件能独立证明的范围，仍是对标发布前的人工闸门。
+  - 9 tests passed，包含五格式保存重开、警告/统计精确断言、跨平台树 golden 和性能 sanity。
+- macOS ARM64 曾执行同一语料测试；本轮新增 `.github/workflows/mindmap-macos.yml`，在 macOS CI 上运行同一组 Mindmap 测试。
+- `tests/fixtures/mindmap/expected/` 和 `tests/fixtures/mindmap/ui-tree-parity/expected.canonical.json` 是已提交 golden；Windows Rust UI parser 和 macOS Swift canonicalizer 都对齐同一份输出。
+- XMind 27.1 的人工打开和视觉回读不属于本测试文件能独立证明的范围，仍是发布前人工闸门。
 
-在 Windows CI 和 XMind 27.01 人工验证完成前，#211 不应关闭。
+在 XMind 27.1 人工验证完成前，#211 不应关闭。
 
 ## 验证命令
 
