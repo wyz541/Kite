@@ -135,6 +135,19 @@ fn node_to_json(node: &OutlineNode, source_key: &str, path: &str, max_title_char
     let id = stable_id(&format!("topic|{source_key}|{path}|{}", node.title));
     let mut object = topic_object(&id, &node.title, max_title_chars, &node.links);
 
+    if let Some(task) = node.task.as_ref() {
+        object.insert(
+            "taskPresentation".to_string(),
+            Value::String("todo-checkbox".to_string()),
+        );
+        let (status, progress) = match task {
+            TaskState::Todo => ("todo", 0),
+            TaskState::Done => ("done", 1),
+        };
+        object.insert("todoStatus".to_string(), Value::String(status.to_string()));
+        object.insert("todoProgress".to_string(), json!(progress));
+    }
+
     if has_topic_notes(node) {
         object.insert(
             "notes".to_string(),

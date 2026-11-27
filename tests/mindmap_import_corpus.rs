@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use kite_core::mindmap::{CONTENT_JSON_ENTRY, XmindPackage};
 use kite_core::mindmap_import::{
-    ContentKind, ConversionOptions, ConversionWarningCode, DocxAdapter, HtmlAdapter, ImportError,
-    MarkdownAdapter, OpmlAdapter, OutlineAdapter, OutlineDocument, OutlineNode, OutlineNodeKind,
-    SourceFormat, SourceInput, TaskState, TextAdapter, write_xmind_bytes,
+    ContentKind, ConversionOptions, ConversionWarning, ConversionWarningCode, DocxAdapter,
+    HtmlAdapter, ImportError, MarkdownAdapter, OpmlAdapter, OutlineAdapter, OutlineDocument,
+    OutlineNode, OutlineNodeKind, SourceFormat, SourceInput, TaskState, TextAdapter,
+    write_xmind_bytes,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -379,27 +380,201 @@ fn normal_corpus_has_expected_hierarchy_notes_warnings_and_round_trips() {
         1
     );
 
-    for path in [
-        "markdown-normal.md",
-        "docx-normal.docx",
-        "html-normal.html",
-        "opml-normal.opml",
-        "text-normal.txt",
-    ] {
+    let cases = [
+        (
+            "markdown-normal.md",
+            6,
+            vec![ConversionWarningCode::UnsupportedElement],
+            vec![
+                ConversionWarningCode::UnsupportedElement,
+                ConversionWarningCode::TableFlattened,
+                ConversionWarningCode::AttachmentReferenceOnly,
+            ],
+        ),
+        ("docx-normal.docx", 4, vec![], vec![]),
+        (
+            "html-normal.html",
+            5,
+            vec![
+                ConversionWarningCode::UnsupportedElement,
+                ConversionWarningCode::UnsupportedElement,
+            ],
+            vec![
+                ConversionWarningCode::UnsupportedElement,
+                ConversionWarningCode::UnsupportedElement,
+                ConversionWarningCode::TableFlattened,
+                ConversionWarningCode::AttachmentReferenceOnly,
+            ],
+        ),
+        ("opml-normal.opml", 0, vec![], vec![]),
+        ("text-normal.txt", 4, vec![], vec![]),
+    ];
+    for (path, expected_split_fragments, adapter_warnings, writer_warnings) in cases {
         let document = document(&manifest, path);
-        let first = write_xmind_bytes(&document, &options)
-            .unwrap_or_else(|error| panic!("write {path}: {error}"));
-        let second = write_xmind_bytes(&document, &options)
-            .unwrap_or_else(|error| panic!("rewrite {path}: {error}"));
         assert_eq!(
-            first.bytes, second.bytes,
-            "non-deterministic output for {path}"
+            document.stats.split_fragments, expected_split_fragments,
+            "split fragment count drift for {path}"
         );
-        let package = XmindPackage::from_bytes(first.bytes)
-            .unwrap_or_else(|error| panic!("reopen generated {path}: {error}"));
-        assert!(package.content()[0]["rootTopic"]["title"].is_string());
-        assert!(package.content()[0]["rootTopic"].get("children").is_some());
+        assert_eq!(
+            document.stats.merged_fragments, 0,
+            "merged drift for {path}"
+        );
+        assert_eq!(
+            document.stats.truncated_titles, 0,
+            "truncated title drift for {path}"
+        );
+        assert_eq!(
+            document.stats.skipped_items, 0,
+            "skipped item drift for {path}"
+        );
+        assert_eq!(
+            warning_codes(&document.warnings),
+            adapter_warnings,
+            "adapter warning code/order drift for {path}"
+        );
+        assert_xmind_round_trip(path, &document, &options, &writer_warnings);
     }
+}
+
+#[test]
+fn warning_and_stats_contracts_cover_skip_merge_and_truncation_exactly() {
+    let manifest = load_manifest();
+
+    let docx_entry = fixture_entry(&manifest, "docx-normal.docx");
+    let docx_path = corpus_root().join(&docx_entry.path);
+    let docx_bytes = fs::read(&docx_path).expect("read DOCX fixture");
+    let docx_options = ConversionOptions {
+        split_content: false,
+        merge_short_fragments: false,
+        min_fragment_chars: 1,
+        ..ConversionOptions::default()
+    };
+    let docx_format = SourceFormat::Docx;
+    let docx_document = DocxAdapter::default()
+        .extract(
+            SourceInput {
+                path: Some(&docx_path),
+                bytes: &docx_bytes,
+                format: &docx_format,
+            },
+            &docx_options,
+        )
+        .expect("extract DOCX with content splitting disabled");
+    assert_eq!(docx_document.stats.split_fragments, 0);
+    assert_eq!(docx_document.stats.merged_fragments, 0);
+    assert_eq!(docx_document.stats.truncated_titles, 0);
+    assert_eq!(docx_document.stats.skipped_items, 2);
+    assert_eq!(
+        warning_codes(&docx_document.warnings),
+        vec![
+            ConversionWarningCode::ContentSkipped,
+            ConversionWarningCode::ContentSkipped,
+        ]
+    );
+
+    let merge_bytes = b"# Merge Contract\n\nHi. This second sentence is long enough.";
+    let merge_options = ConversionOptions {
+        split_content: true,
+        preserve_original_paragraphs: true,
+        merge_short_fragments: true,
+        min_fragment_chars: 12,
+        ..corpus_options()
+    };
+    let markdown_format = SourceFormat::Markdown;
+    let merged = MarkdownAdapter
+        .extract(
+            SourceInput {
+                path: None,
+                bytes: merge_bytes,
+                format: &markdown_format,
+            },
+            &merge_options,
+        )
+        .expect("extract merge contract");
+    assert_eq!(merged.stats.split_fragments, 1);
+    assert_eq!(merged.stats.merged_fragments, 1);
+    assert_eq!(merged.stats.truncated_titles, 0);
+    assert_eq!(merged.stats.skipped_items, 0);
+    assert_eq!(warning_codes(&merged.warnings), Vec::new());
+
+    let truncate_bytes = b"# Truncate Contract\n\n## A heading that must be truncated";
+    let truncate_options = ConversionOptions {
+        split_content: true,
+        preserve_original_paragraphs: true,
+        merge_short_fragments: false,
+        min_fragment_chars: 1,
+        max_title_chars: 16,
+        ..ConversionOptions::default()
+    };
+    let truncated = MarkdownAdapter
+        .extract(
+            SourceInput {
+                path: None,
+                bytes: truncate_bytes,
+                format: &markdown_format,
+            },
+            &truncate_options,
+        )
+        .expect("extract truncation contract");
+    assert_eq!(truncated.stats.split_fragments, 0);
+    assert_eq!(truncated.stats.merged_fragments, 0);
+    assert_eq!(truncated.stats.truncated_titles, 1);
+    assert_eq!(truncated.stats.skipped_items, 0);
+    assert_eq!(
+        warning_codes(&truncated.warnings),
+        vec![ConversionWarningCode::TitleTruncated]
+    );
+}
+
+#[test]
+fn task_state_writes_top_level_todo_fields_and_preserves_notes() {
+    let manifest = load_manifest();
+    let options = corpus_options();
+    let markdown = document(&manifest, "markdown-normal.md");
+    let written = write_xmind_bytes(&markdown, &options).expect("write Markdown tasks");
+    let mut package =
+        XmindPackage::from_bytes(written.bytes).expect("open generated Markdown package");
+    let root = &package.content()[0]["rootTopic"];
+
+    let todo = find_xmind_topic(root, "Build adapters").expect("todo topic");
+    assert_todo_topic(todo, "todo", 0);
+    assert!(xmind_plain_note(todo).is_some_and(|note| note.contains("Task status: todo")));
+    let done = find_xmind_topic(root, "Markdown").expect("done topic");
+    assert_todo_topic(done, "done", 1);
+    assert!(xmind_plain_note(done).is_some_and(|note| note.contains("Task status: done")));
+
+    let path = temp_path("todo-task-fields.xmind");
+    package
+        .save_as(&path)
+        .expect("save generated Markdown tasks");
+    let reopened = XmindPackage::open(&path).expect("reopen saved Markdown tasks");
+    let root = &reopened.content()[0]["rootTopic"];
+    assert_todo_topic(
+        find_xmind_topic(root, "Build adapters").expect("reopened todo topic"),
+        "todo",
+        0,
+    );
+    assert_todo_topic(
+        find_xmind_topic(root, "Markdown").expect("reopened done topic"),
+        "done",
+        1,
+    );
+    let _ = fs::remove_file(path);
+
+    let opml = document(&manifest, "opml-normal.opml");
+    let written = write_xmind_bytes(&opml, &options).expect("write OPML tasks");
+    let package = XmindPackage::from_bytes(written.bytes).expect("open generated OPML package");
+    let root = &package.content()[0]["rootTopic"];
+    assert_todo_topic(
+        find_xmind_topic(root, "Platforms").expect("OPML todo topic"),
+        "todo",
+        0,
+    );
+    assert_todo_topic(
+        find_xmind_topic(root, "macOS").expect("OPML done topic"),
+        "done",
+        1,
+    );
 }
 
 #[test]
@@ -652,6 +827,120 @@ fn large_synthetic_import_matches_the_bounded_performance_baseline() {
         topic_count(&package.content()[0]["rootTopic"]),
         baseline.expected_package_topics
     );
+}
+
+fn xmind_topic_children(topic: &Value) -> &[Value] {
+    topic
+        .get("children")
+        .and_then(|children| children.get("attached"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn find_xmind_topic<'a>(topic: &'a Value, title: &str) -> Option<&'a Value> {
+    if topic.get("title").and_then(Value::as_str) == Some(title) {
+        return Some(topic);
+    }
+    xmind_topic_children(topic)
+        .iter()
+        .find_map(|child| find_xmind_topic(child, title))
+}
+
+fn assert_todo_topic(topic: &Value, status: &str, progress: i64) {
+    assert_eq!(topic["taskPresentation"], json!("todo-checkbox"));
+    assert_eq!(topic["todoStatus"], json!(status));
+    assert_eq!(topic["todoProgress"], json!(progress));
+}
+
+fn xmind_plain_note(topic: &Value) -> Option<&str> {
+    topic
+        .get("notes")
+        .and_then(|notes| notes.get("plain"))
+        .and_then(|plain| plain.get("content"))
+        .and_then(Value::as_str)
+}
+
+fn warning_codes(warnings: &[ConversionWarning]) -> Vec<ConversionWarningCode> {
+    warnings
+        .iter()
+        .map(|warning| warning.code.clone())
+        .collect()
+}
+
+fn assert_xmind_round_trip(
+    path: &str,
+    document: &OutlineDocument,
+    options: &ConversionOptions,
+    expected_writer_warnings: &[ConversionWarningCode],
+) {
+    let first = write_xmind_bytes(document, options)
+        .unwrap_or_else(|error| panic!("write {path}: {error}"));
+    let second = write_xmind_bytes(document, options)
+        .unwrap_or_else(|error| panic!("rewrite {path}: {error}"));
+    assert_eq!(
+        first.bytes, second.bytes,
+        "non-deterministic output for {path}"
+    );
+    assert_eq!(first.report, second.report, "report drift for {path}");
+    assert_eq!(
+        warning_codes(&first.report.warnings),
+        expected_writer_warnings,
+        "writer warning code/order drift for {path}"
+    );
+    assert_eq!(
+        &first.report.warnings[..document.warnings.len()],
+        document.warnings.as_slice(),
+        "adapter warnings were reordered or dropped for {path}"
+    );
+
+    let augmented = add_unknown_fields_and_entry(&first.bytes);
+    let mut package = XmindPackage::from_bytes(augmented)
+        .unwrap_or_else(|error| panic!("open augmented {path}: {error}"));
+    package
+        .edit_content_json(|content| {
+            content[0]["futureRoundTripField"] = json!({ "fixture": path });
+            Ok(())
+        })
+        .expect("add round-trip marker");
+    let expected_content = package.content().clone();
+
+    let output = temp_path(&format!("{path}-roundtrip.xmind"));
+    let save_report = package
+        .save_as(&output)
+        .unwrap_or_else(|error| panic!("save {path}: {error}"));
+    assert_eq!(
+        save_report.rewritten_entries,
+        vec![CONTENT_JSON_ENTRY.to_string()]
+    );
+    let saved =
+        XmindPackage::open(&output).unwrap_or_else(|error| panic!("reopen saved {path}: {error}"));
+    assert_eq!(
+        saved.content(),
+        &expected_content,
+        "structure/notes/links/tables/unknown fields drifted for {path}"
+    );
+    assert_eq!(
+        saved.content()[0]["futureImportField"],
+        json!({ "kept": true })
+    );
+    assert_eq!(
+        saved.content()[0]["rootTopic"]["futureTopicField"],
+        json!(["a", "b"])
+    );
+    assert_eq!(
+        saved.content()[0]["futureRoundTripField"],
+        json!({ "fixture": path })
+    );
+    assert_eq!(
+        read_zip_entry(
+            &fs::read(&output).expect("read saved round-trip"),
+            "resources/future-import.bin"
+        ),
+        b"\0future\0".to_vec()
+    );
+
+    let _ = fs::remove_file(output);
 }
 
 fn synthetic_markdown(topic_count: usize) -> String {

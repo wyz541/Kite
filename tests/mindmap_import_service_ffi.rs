@@ -26,6 +26,62 @@ fn temp_dir(label: &str) -> PathBuf {
     path
 }
 
+fn rows_table_fixture(root: &Path) -> PathBuf {
+    let path = root.join("rows-table.html");
+    fs::write(
+        &path,
+        "<html><head><title>Rows Table</title></head><body><h1>Details</h1><table><caption>Matrix</caption><tr><th>Platform</th><th>Status</th></tr><tr><td>macOS</td><td>Done</td></tr><tr><td>Windows</td><td>Pending</td></tr></table></body></html>",
+    )
+    .expect("write HTML table");
+    path
+}
+
+fn topic_children(topic: &serde_json::Value) -> &[serde_json::Value] {
+    topic
+        .get("children")
+        .and_then(|children| {
+            children.as_array().or_else(|| {
+                children
+                    .get("attached")
+                    .and_then(serde_json::Value::as_array)
+            })
+        })
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn plain_note(topic: &serde_json::Value) -> Option<&str> {
+    topic
+        .get("notes")
+        .and_then(|notes| notes.get("plain"))
+        .and_then(|plain| plain.get("content"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn find_topic_by_kind<'a>(
+    topic: &'a serde_json::Value,
+    kind: &str,
+) -> Option<&'a serde_json::Value> {
+    if topic.get("kind").and_then(serde_json::Value::as_str) == Some(kind) {
+        return Some(topic);
+    }
+    topic_children(topic)
+        .iter()
+        .find_map(|child| find_topic_by_kind(child, kind))
+}
+
+fn find_topic_with_note<'a>(
+    topic: &'a serde_json::Value,
+    expected_note: &str,
+) -> Option<&'a serde_json::Value> {
+    if plain_note(topic) == Some(expected_note) {
+        return Some(topic);
+    }
+    topic_children(topic)
+        .iter()
+        .find_map(|child| find_topic_with_note(child, expected_note))
+}
+
 fn markdown_fixture(root: &Path) -> PathBuf {
     let path = root.join("release-notes.md");
     fs::write(
@@ -151,6 +207,86 @@ fn markdown_preview_and_conversion_are_safe_and_openable() {
     assert_eq!(
         fs::read(root.join("release-notes.xmind")).expect("output after retry"),
         output_before
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rows_as_topics_expands_each_data_row_with_header_and_caption_context() {
+    let root = temp_dir("rows-as-topics");
+    let source_path = rows_table_fixture(&root);
+    let options = MindmapConversionOptionsDto {
+        table_strategy: MindmapImportTableStrategyDto::RowsAsTopics,
+        ..MindmapConversionOptionsDto::default()
+    };
+
+    let preview =
+        preview_mindmap_conversion(source_path.to_string_lossy().into_owned(), options.clone())
+            .expect("preview rows as topics");
+    assert_eq!(preview.table_count, 0);
+    assert_eq!(
+        preview
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "TableFlattened")
+            .count(),
+        1
+    );
+    assert!(preview.warnings.iter().any(|warning| {
+        warning.code == "TableFlattened"
+            && warning.message.contains("one topic per data row")
+            && warning.message.contains("header/caption context")
+    }));
+
+    let sample: serde_json::Value =
+        serde_json::from_str(&preview.sample_tree_json).expect("preview JSON");
+    let sampled_table = find_topic_by_kind(&sample, "table").expect("sampled table topic");
+    assert_eq!(sampled_table["childCount"], 2);
+    assert_eq!(
+        topic_children(sampled_table)
+            .iter()
+            .map(|child| child["title"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["macOS | Done", "Windows | Pending"]
+    );
+
+    let result = convert_mindmap_file(
+        source_path.to_string_lossy().into_owned(),
+        preview.source_sha256,
+        preview.output_path,
+        false,
+        options,
+    )
+    .expect("convert rows as topics");
+    assert_eq!(
+        result
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "TableFlattened")
+            .count(),
+        1
+    );
+
+    let package = XmindPackage::open(Path::new(&result.output_path)).expect("generated XMind");
+    let root_topic = &package.content()[0]["rootTopic"];
+    let table = find_topic_with_note(root_topic, "Caption: Matrix\nHeaders: Platform | Status")
+        .expect("table topic with caption and header context");
+    assert_eq!(
+        plain_note(table),
+        Some("Caption: Matrix\nHeaders: Platform | Status")
+    );
+    assert_eq!(
+        topic_children(table)
+            .iter()
+            .map(|child| child["title"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["macOS | Done", "Windows | Pending"]
+    );
+    assert_eq!(plain_note(&topic_children(table)[0]), Some("macOS | Done"));
+    assert_eq!(
+        plain_note(&topic_children(table)[1]),
+        Some("Windows | Pending")
     );
 
     let _ = fs::remove_dir_all(root);
