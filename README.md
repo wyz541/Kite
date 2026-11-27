@@ -146,6 +146,8 @@ macOS 可与 Finder 共享文件剪贴板。
 - macOS 提供系统快速预览、原生预览卡和内置文本编辑器。
 - Markdown（`.md`、`.markdown`、`.mdx`、`.mk`）在独立编辑窗口中支持边编辑、边预览。
 - `macOS` 提供独立 XMind Mindmap 编辑器窗口，直接读取和原子保存现代 `.xmind` 文件。
+- Mindmap 支持图结构、连线样式、markers、TODO、日期和字体格式编辑。
+- Mindmap 可将 Markdown、DOCX、TXT、HTML、OPML 转换为新的 `.xmind`，正文可按句号、分号拆分并保留原段落备注。
 - 预览信息支持选择和复制。
 - 文本编辑器支持未保存状态保护和外部修改冲突检测。
 
@@ -391,6 +393,11 @@ cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 - [文本编辑器调研](docs/TEXT_EDITOR_RESEARCH.md)
 - [Mindmap XMind Core](docs/architecture/mindmap-xmind.md)
 - [Mindmap 快捷键映射](docs/architecture/mindmap-shortcuts.md)
+- [Mindmap XMind 格式兼容性审计](docs/architecture/mindmap-xmind-format-audit.md)
+- [Mindmap markers 与 TODO](docs/architecture/mindmap-markers-todo.md)
+- [Mindmap 日期与主题样式](docs/architecture/mindmap-topic-style-date.md)
+- [Mindmap macOS 格式 UI](docs/architecture/mindmap-macos-format-ui.md)
+- [Mindmap 文档转换语料](docs/architecture/mindmap-import-corpus.md)
 - [发布对齐检查](docs/architecture/release-parity.md)
 - [性能基线与比较方法](docs/performance/README.md)
 - [截图隐私规则](docs/SCREENSHOT_POLICY.md)

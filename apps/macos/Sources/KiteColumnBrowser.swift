@@ -1812,6 +1812,13 @@ struct KiteGlobalSearchResults: View {
                     Label("使用 Mindmap 编辑", systemImage: "point.3.connected.trianglepath.dotted")
                 }
             }
+            if !entry.isDirectory && KitePlatform.isMindmapImportFile(entry.path) {
+                Button {
+                    KitePlatform.openMindmapConversion(entry.path)
+                } label: {
+                    Label("转换为 Mindmap…", systemImage: "arrow.triangle.branch")
+                }
+            }
             Button("在 Finder 中显示") {
                 KitePlatform.revealInFinder(entry.path)
             }
@@ -1931,6 +1938,14 @@ private struct KiteEntryMenu: View {
                 KiteMindmapWindowController.open(path: entry.path)
             } label: {
                 Label("使用 Mindmap 编辑", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+        }
+
+        if !entry.isDirectory && KitePlatform.isMindmapImportFile(entry.path) {
+            Button {
+                KitePlatform.openMindmapConversion(entry.path)
+            } label: {
+                Label("转换为 Mindmap…", systemImage: "arrow.triangle.branch")
             }
         }
 

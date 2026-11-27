@@ -20,3 +20,9 @@
 - 后续 macOS SwiftUI/AppKit 画布把它作为首屏、缩放、命中测试和视觉验收输入。
 
 除非明确更新视觉基线，不要替换此文件。
+
+## `import/`
+
+`import/` 是 Markdown、DOCX、TXT、HTML、OPML 转换的固定跨平台语料。每个格式包含 normal、edge、malformed 三类文件，`import/manifest.json` 记录大小、SHA-256 和语料总哈希。
+
+说明与验收边界见 `docs/architecture/mindmap-import-corpus.md`。除非同步更新哈希和结构/警告断言，不要修改这些文件。

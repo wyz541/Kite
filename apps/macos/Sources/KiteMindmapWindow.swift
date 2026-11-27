@@ -4,17 +4,78 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
+private struct MindmapMarkerChip: Identifiable, Equatable {
+    let id: String
+    let family: String
+    let label: String
+}
+
+@MainActor
+private struct MindmapTopicVisualStyle: Equatable {
+    var fontFamily: String?
+    var fontSize: Double = 12.5
+    var fontWeight: String?
+    var italic = false
+    var underline = false
+    var strike = false
+    var textColorHex: String?
+    var fillColorHex: String?
+    var borderColorHex: String?
+    var borderWidth: Double = 1
+    var borderPattern: String?
+    var cornerRadius: Double?
+    var alignment: String?
+
+    var accentHex: String? { borderColorHex ?? fillColorHex ?? textColorHex }
+}
+
+@MainActor
 private struct MindmapTopic: Identifiable {
     let id: String
     var title: String
     let parentID: String?
     let depth: Int
     let childIDs: [String]
-    let colorHex: String?
-    let fontSize: Double
+    let style: MindmapTopicVisualStyle
     let shapeClass: String?
+    let markers: [MindmapMarkerChip]
+    let isComplete: Bool
 
     var hasChildren: Bool { !childIDs.isEmpty }
+    var hasTodo: Bool { markers.contains { $0.family == "task" } }
+    var headerMarkers: [MindmapMarkerChip] { markers }
+}
+
+@MainActor
+private struct MindmapTopicFormatDraft: Equatable {
+    var fontFamily = ""
+    var fontSize = 12.5
+    var fontWeight = "normal"
+    var italic = false
+    var underline = false
+    var strike = false
+    var textColorHex = "#1F2328"
+    var fillColorHex = "#F6F8FA"
+    var borderColorHex = "#D0D7DE"
+    var borderWidth = 1.0
+    var borderPattern = "solid"
+    var cornerRadius = 4.0
+}
+
+@MainActor
+private struct MindmapGraphDraft: Equatable {
+    var structure: MindmapGraphStructureDto = .logicRight
+    var connectorKind: MindmapConnectorKindDto = .curved
+    var cornerRadius = 12.0
+}
+
+@MainActor
+private struct MindmapDateDraft: Equatable {
+    var date = Date()
+    var style: MindmapDateStyleDto = .iso
+    var precision: MindmapDatePrecisionDto = .dateOnly
+    var target: MindmapDateTargetDto = .title
+    var placement: MindmapDatePlacementDto = .end
 }
 
 @MainActor
@@ -76,6 +137,13 @@ private final class MindmapEditorModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var isWorking = false
     @Published var searchText = ""
+    @Published var graphDraft = MindmapGraphDraft()
+    @Published var topicFormat = MindmapTopicFormatDraft()
+    @Published var topicMarkers: [MindmapMarkerChip] = []
+    @Published var priorityLevel = 0
+    @Published var taskProgressMarkerID = ""
+    @Published var topicIsComplete = false
+    @Published var dateDraft = MindmapDateDraft()
 
     private var viewportSize = CGSize(width: 1_000, height: 700)
     private var didFit = false
@@ -86,6 +154,9 @@ private final class MindmapEditorModel: ObservableObject {
     init(path: String) throws {
         self.path = URL(fileURLWithPath: path).standardizedFileURL.path
         self.document = try openMindmapDocument(path: self.path)
+        if let style = try? readMindmapDocumentStyle(path: self.path, sheetIndex: 0) {
+            graphDraft = Self.graphDraft(from: style)
+        }
         rebuildFromDocument(initial: true)
         status = "Rust Core 已读取 \(topics.count) 个主题"
     }
@@ -149,6 +220,7 @@ private final class MindmapEditorModel: ObservableObject {
     func select(_ id: String?) {
         selectedID = id
         titleDraft = id.flatMap { topics[$0]?.title } ?? ""
+        seedInspector(from: id.flatMap { topics[$0] })
     }
 
     func beginEditingSelected() {
@@ -309,6 +381,166 @@ private final class MindmapEditorModel: ObservableObject {
         showSidebar.toggle()
     }
 
+    func applyDocumentStyle() {
+        guard let structure = graphDraft.structure.supportedStructure,
+              let connectorKind = graphDraft.connectorKind.supportedConnector else {
+            errorMessage = "当前文档的图结构或连线样式未知，Kite 不会覆盖原值"
+            return
+        }
+        performDocumentOperation(status: "已更新图结构与连线", fitAfter: true) {
+            try updateMindmapDocumentStyle(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                patch: MindmapDocumentStylePatchDto(
+                    structure: structure,
+                    connectorKind: connectorKind,
+                    connectorCornerRadius: UInt16(max(0, min(256, self.graphDraft.cornerRadius)))
+                )
+            )
+        }
+    }
+
+    func applyPriority(_ level: Int) {
+        guard let topicID = selectedID else { return }
+        performDocumentOperation(status: level == 0 ? "已清除优先级" : "已设置优先级 P\(level)") {
+            try setMindmapPriority(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                topicId: topicID,
+                level: UInt8(max(0, min(9, level)))
+            )
+        }
+    }
+
+    func applyTaskProgress() {
+        guard let topicID = selectedID else { return }
+        performDocumentOperation(status: taskProgressMarkerID.isEmpty ? "已清除任务进度" : "已更新任务进度") {
+            try setMindmapTaskProgress(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                topicId: topicID,
+                markerId: self.taskProgressMarkerID
+            )
+        }
+    }
+
+    func addMarker(_ markerID: String) {
+        guard let topicID = selectedID else { return }
+        performDocumentOperation(status: "已添加标记 \(markerID)") {
+            try addMindmapMarker(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                topicId: topicID,
+                markerId: markerID
+            )
+        }
+    }
+
+    func removeMarker(_ markerID: String) {
+        guard let topicID = selectedID else { return }
+        performDocumentOperation(status: "已移除标记 \(markerID)") {
+            try removeMindmapMarker(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                topicId: topicID,
+                markerId: markerID
+            )
+        }
+    }
+
+    func setTodoCompletion(_ completed: Bool) {
+        guard completed != topicIsComplete else { return }
+        toggleTodo()
+    }
+
+    func toggleTodo() {
+        guard let topicID = selectedID else { return }
+        if taskProgressMarkerID.isEmpty {
+            taskProgressMarkerID = topicIsComplete ? "task-start" : "task-done"
+            applyTaskProgress()
+            return
+        }
+        performDocumentOperation(status: topicIsComplete ? "已恢复为未完成" : "已标记完成") {
+            try toggleMindmapTodo(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                topicId: topicID
+            )
+        }
+    }
+
+    func insertDate() {
+        guard let topicID = selectedID else { return }
+        let calendar = Calendar.current
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: dateDraft.date)
+        guard let year = components.year,
+              let month = components.month,
+              let day = components.day else { return }
+        let date = String(format: "%04d-%02d-%02d", year, month, day)
+        let time = String(
+            format: "%02d:%02d:%02d",
+            components.hour ?? 0,
+            components.minute ?? 0,
+            components.second ?? 0
+        )
+        let systemPattern = Self.systemDatePattern()
+        let request = MindmapDateRequestDto(
+            date: date,
+            time: dateDraft.precision == .dateOnly ? nil : time,
+            style: dateDraft.style,
+            precision: dateDraft.precision,
+            target: dateDraft.target,
+            placement: dateDraft.placement,
+            systemDateOrder: systemPattern?.0,
+            systemDateSeparator: systemPattern?.1
+        )
+        performDocumentOperation(status: "已插入日期") {
+            try insertMindmapDate(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                topicId: topicID,
+                request: request
+            ).document
+        }
+    }
+
+    func applyTopicFormat() {
+        guard let topicID = selectedID else { return }
+        let style = MindmapTopicStyleDto(
+            fontFamily: topicFormat.fontFamily.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil
+                : topicFormat.fontFamily,
+            fontSize: topicFormat.fontSize,
+            fontWeight: topicFormat.fontWeight,
+            italic: topicFormat.italic,
+            underline: topicFormat.underline,
+            strike: topicFormat.strike,
+            textColor: topicFormat.textColorHex,
+            alignment: "left",
+            nodeFill: topicFormat.fillColorHex,
+            borderColor: topicFormat.borderColorHex,
+            borderWidth: topicFormat.borderWidth,
+            borderPattern: topicFormat.borderPattern,
+            cornerRadius: UInt16(max(0, min(512, topicFormat.cornerRadius)))
+        )
+        performDocumentOperation(status: "已更新文字与节点格式") {
+            try updateMindmapTopicStyle(
+                path: self.path,
+                expectedSourceSha256: self.document.sourceSha256,
+                sheetIndex: 0,
+                topicId: topicID,
+                style: style
+            )
+        }
+    }
+
     func toggleZenMode() {
         zenMode.toggle()
     }
@@ -441,6 +673,93 @@ private final class MindmapEditorModel: ObservableObject {
         case newest
     }
 
+    private func performDocumentOperation(
+        status successStatus: String,
+        fitAfter: Bool = false,
+        operation: () throws -> MindmapDocumentDto
+    ) {
+        isWorking = true
+        defer { isWorking = false }
+        let previousIDs = Set(topics.keys)
+        let snapshot = MindmapSnapshot(
+            contentJson: document.contentJson,
+            sourceSha256: document.sourceSha256
+        )
+        do {
+            document = try operation()
+            undoStack.append(snapshot)
+            redoStack.removeAll()
+            rebuildFromDocument(
+                initial: false,
+                previousIDs: previousIDs,
+                selectionRule: .keep(selectedID ?? rootID ?? "")
+            )
+            if fitAfter { fit() }
+            status = "\(successStatus) · 已保存"
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            status = "格式编辑未保存"
+        }
+    }
+
+    private func seedInspector(from topic: MindmapTopic?) {
+        guard let topic else {
+            topicFormat = MindmapTopicFormatDraft()
+            topicMarkers = []
+            priorityLevel = 0
+            taskProgressMarkerID = ""
+            topicIsComplete = false
+            return
+        }
+        topicMarkers = topic.markers
+        topicIsComplete = topic.isComplete
+        priorityLevel = topic.markers.first(where: { $0.family == "priority" })
+            .flatMap { Int($0.id.split(separator: "-").last ?? "") } ?? 0
+        taskProgressMarkerID = topic.markers.first(where: { $0.family == "task" })?.id ?? ""
+        topicFormat = MindmapTopicFormatDraft(
+            fontFamily: topic.style.fontFamily ?? "",
+            fontSize: topic.style.fontSize,
+            fontWeight: topic.style.fontWeight ?? "normal",
+            italic: topic.style.italic,
+            underline: topic.style.underline,
+            strike: topic.style.strike,
+            textColorHex: topic.style.textColorHex ?? "#1F2328",
+            fillColorHex: topic.style.fillColorHex ?? (topic.parentID == nil ? "#1B1D20" : "#F6F8FA"),
+            borderColorHex: topic.style.borderColorHex ?? "#D0D7DE",
+            borderWidth: topic.style.borderWidth,
+            borderPattern: topic.style.borderPattern ?? "solid",
+            cornerRadius: topic.style.cornerRadius ?? (topic.shapeClass?.contains("rounded") == true ? 8 : 2)
+        )
+    }
+
+    private func refreshGraphDraft() {
+        if let style = try? readMindmapDocumentStyle(path: path, sheetIndex: 0) {
+            graphDraft = Self.graphDraft(from: style)
+        }
+    }
+
+    private static func graphDraft(from style: MindmapDocumentStyleDto) -> MindmapGraphDraft {
+        MindmapGraphDraft(
+            structure: style.structure == .unknown ? .logicRight : style.structure,
+            connectorKind: style.connectorKind == .unknown ? .curved : style.connectorKind,
+            cornerRadius: Double(style.connectorCornerRadius ?? 12)
+        )
+    }
+
+    private static func systemDatePattern() -> (MindmapDatePartOrderDto, String)? {
+        let pattern = DateFormatter.dateFormat(
+            fromTemplate: "yMd",
+            options: 0,
+            locale: Locale.current
+        ) ?? "y/M/d"
+        let separator = pattern.first(where: { !$0.isLetter && !$0.isNumber }).map(String.init) ?? "/"
+        let stripped = pattern.filter { $0 == "y" || $0 == "M" || $0 == "d" }
+        if stripped.hasPrefix("y") { return (.yearMonthDay, separator) }
+        if stripped.hasPrefix("M") { return (.monthDayYear, separator) }
+        return (.dayMonthYear, separator)
+    }
+
     private func performEdit(_ edit: MindmapEditDto, selecting rule: SelectionRule) {
         isWorking = true
         defer { isWorking = false }
@@ -475,11 +794,14 @@ private final class MindmapEditorModel: ObservableObject {
                 contentJson: snapshot.contentJson
             )
             document = try openMindmapDocument(path: path)
+            let previousGraphDraft = graphDraft
+            refreshGraphDraft()
             rebuildFromDocument(
                 initial: false,
                 previousIDs: Set(topics.keys),
                 selectionRule: .keep(selectedID ?? rootID ?? "")
             )
+            if previousGraphDraft != graphDraft { fit() }
             status = "已恢复历史版本"
             errorMessage = nil
             return true
@@ -538,9 +860,6 @@ private final class MindmapEditorModel: ObservableObject {
             layout = MindmapLayout(nodes: [:], order: [], bounds: .zero)
             return
         }
-        var heights: [String: CGFloat] = [:]
-        let gap: CGFloat = 12
-        let column: CGFloat = 320
 
         func visibleChildren(_ id: String) -> [String] {
             guard !collapsedIDs.contains(id), let topic = topics[id] else { return [] }
@@ -548,35 +867,48 @@ private final class MindmapEditorModel: ObservableObject {
         }
 
         func nodeSize(_ topic: MindmapTopic) -> CGSize {
+            let newlineCount = topic.title.split(separator: "\n", omittingEmptySubsequences: false).count
             let characters = max(6, topic.title.count)
-            let width = min(344, max(112, 58 + CGFloat(characters) * 7.3))
-            let height: CGFloat = topic.title.count > 34 ? 54 : 36
+            let markerAllowance = topic.markers.isEmpty ? 0 : 28
+            let width = min(390, max(112, 58 + CGFloat(characters) * 7.3 + CGFloat(markerAllowance)))
+            var height: CGFloat = newlineCount > 2 ? 68 : newlineCount > 1 ? 52 : 38
+            if !topic.markers.isEmpty { height += 16 }
             return CGSize(width: width, height: height)
         }
 
-        func measure(_ id: String) -> CGFloat {
+        var nodes: [String: MindmapNodeLayout] = [:]
+        var order: [String] = []
+        let gap: CGFloat = 12
+        let column: CGFloat = 320
+
+        var heights: [String: CGFloat] = [:]
+        func measureHeight(_ id: String) -> CGFloat {
             if let cached = heights[id] { return cached }
             guard let topic = topics[id] else { return 0 }
             let own = nodeSize(topic).height
             let children = visibleChildren(id)
             let childTotal = children.isEmpty
                 ? 0
-                : children.map(measure).reduce(0, +) + gap * CGFloat(children.count - 1)
+                : children.map(measureHeight).reduce(0, +) + gap * CGFloat(children.count - 1)
             let value = max(own, childTotal)
             heights[id] = value
             return value
         }
 
-        var nodes: [String: MindmapNodeLayout] = [:]
-        var order: [String] = []
-        let measureRoot = measure(rootID)
-
-        func place(_ id: String, depth: Int, top: CGFloat) {
+        func placeHorizontal(_ id: String, depth: Int, top: CGFloat, direction: CGFloat) {
             guard let topic = topics[id] else { return }
-            let subtreeHeight = heights[id] ?? measure(id)
+            let subtreeHeight = heights[id] ?? measureHeight(id)
             let size = nodeSize(topic)
+            let x: CGFloat
+            if depth == 0 {
+                x = 0
+            } else if direction > 0 {
+                x = CGFloat(depth) * column
+            } else {
+                x = -CGFloat(depth) * column - size.width
+            }
             let rect = CGRect(
-                x: CGFloat(depth) * column,
+                x: x,
                 y: top + (subtreeHeight - size.height) / 2,
                 width: size.width,
                 height: size.height
@@ -586,20 +918,111 @@ private final class MindmapEditorModel: ObservableObject {
 
             let children = visibleChildren(id)
             guard !children.isEmpty else { return }
-            let childHeights = children.map { heights[$0] ?? measure($0) }
+            let childHeights = children.map { heights[$0] ?? measureHeight($0) }
             let total = childHeights.reduce(0, +) + gap * CGFloat(children.count - 1)
             var cursor = top + (subtreeHeight - total) / 2
             for (index, child) in children.enumerated() {
-                place(child, depth: depth + 1, top: cursor)
+                placeHorizontal(child, depth: depth + 1, top: cursor, direction: direction)
                 cursor += childHeights[index] + gap
             }
         }
 
-        place(rootID, depth: 0, top: 0)
+        switch graphDraft.structure {
+        case .logicLeft:
+            _ = measureHeight(rootID)
+            placeHorizontal(rootID, depth: 0, top: 0, direction: -1)
+        case .mindMap:
+            _ = measureHeight(rootID)
+            guard let rootTopic = topics[rootID] else { break }
+            let rootSize = nodeSize(rootTopic)
+            nodes[rootID] = MindmapNodeLayout(
+                id: rootID,
+                rect: CGRect(x: 0, y: -rootSize.height / 2, width: rootSize.width, height: rootSize.height),
+                parentID: nil
+            )
+            order.append(rootID)
+            let children = visibleChildren(rootID)
+            let rightChildren = children.enumerated().filter { $0.offset.isMultiple(of: 2) }.map(\.element)
+            let leftChildren = children.enumerated().filter { !$0.offset.isMultiple(of: 2) }.map(\.element)
+            placeForest(rightChildren, direction: 1, depth: 1)
+            placeForest(leftChildren, direction: -1, depth: 1)
+
+            func placeForest(_ ids: [String], direction: CGFloat, depth: Int) {
+                guard !ids.isEmpty else { return }
+                let childHeights = ids.map { heights[$0] ?? measureHeight($0) }
+                let total = childHeights.reduce(0, +) + gap * CGFloat(ids.count - 1)
+                var cursor = -total / 2
+                for (index, child) in ids.enumerated() {
+                    placeHorizontal(child, depth: depth, top: cursor, direction: direction)
+                    cursor += childHeights[index] + gap
+                }
+            }
+        case .orgChart:
+            layoutOrgChart(rootID: rootID, nodeSize: nodeSize, visibleChildren: visibleChildren)
+            return
+        case .logicRight, .tree, .unknown:
+            _ = measureHeight(rootID)
+            placeHorizontal(rootID, depth: 0, top: 0, direction: 1)
+        }
+
         let rects = nodes.values.map(\.rect)
         let bounds = rects.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -80, dy: -80)
         layout = MindmapLayout(nodes: nodes, order: order, bounds: bounds)
-        _ = measureRoot
+    }
+
+    private func layoutOrgChart(
+        rootID: String,
+        nodeSize: (MindmapTopic) -> CGSize,
+        visibleChildren: (String) -> [String]
+    ) {
+        let gap: CGFloat = 22
+        let rowHeight: CGFloat = 92
+        var widths: [String: CGFloat] = [:]
+        var nodes: [String: MindmapNodeLayout] = [:]
+        var order: [String] = []
+
+        func measureWidth(_ id: String) -> CGFloat {
+            if let cached = widths[id] { return cached }
+            guard let topic = topics[id] else { return 0 }
+            let own = nodeSize(topic).width
+            let children = visibleChildren(id)
+            let childTotal = children.isEmpty
+                ? 0
+                : children.map(measureWidth).reduce(0, +) + gap * CGFloat(children.count - 1)
+            let value = max(own, childTotal)
+            widths[id] = value
+            return value
+        }
+
+        func place(_ id: String, depth: Int, left: CGFloat) {
+            guard let topic = topics[id] else { return }
+            let subtreeWidth = widths[id] ?? measureWidth(id)
+            let size = nodeSize(topic)
+            let rect = CGRect(
+                x: left + (subtreeWidth - size.width) / 2,
+                y: CGFloat(depth) * rowHeight,
+                width: size.width,
+                height: size.height
+            )
+            nodes[id] = MindmapNodeLayout(id: id, rect: rect, parentID: topic.parentID)
+            order.append(id)
+
+            let children = visibleChildren(id)
+            guard !children.isEmpty else { return }
+            let childWidths = children.map { widths[$0] ?? measureWidth($0) }
+            let total = childWidths.reduce(0, +) + gap * CGFloat(children.count - 1)
+            var cursor = left + (subtreeWidth - total) / 2
+            for (index, child) in children.enumerated() {
+                place(child, depth: depth + 1, left: cursor)
+                cursor += childWidths[index] + gap
+            }
+        }
+
+        _ = measureWidth(rootID)
+        place(rootID, depth: 0, left: 0)
+        let rects = nodes.values.map(\.rect)
+        let bounds = rects.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -80, dy: -80)
+        layout = MindmapLayout(nodes: nodes, order: order, bounds: bounds)
     }
 
     private static func topicJSON(in contentJSON: String, topicID: String) -> String? {
@@ -651,11 +1074,18 @@ private final class MindmapEditorModel: ObservableObject {
             if depth == 0 { rootID = id }
             let title = (object["title"] as? String) ?? "未命名主题"
             let properties = (object["style"] as? [String: Any])?["properties"] as? [String: Any]
-            let color = properties?["svg:fill"] as? String
-                ?? properties?["fo:color"] as? String
-                ?? properties?["fill-color"] as? String
-            let font = parseFontSize(properties?["fo:font-size"])
+            let style = parseVisualStyle(properties)
             let shape = (object["shape-class"] as? String) ?? (properties?["shape-class"] as? String)
+            let markerObjects = object["markers"] as? [[String: Any]] ?? []
+            let markers = markerObjects.compactMap { marker -> MindmapMarkerChip? in
+                guard let markerID = marker["markerId"] as? String else { return nil }
+                return MindmapMarkerChip(
+                    id: markerID,
+                    family: markerFamily(markerID),
+                    label: markerLabel(markerID)
+                )
+            }
+            let isComplete = markers.contains { $0.id == "task-done" }
             let childrenObject = object["children"] as? [String: Any]
             let childObjects = childrenObject?["attached"] as? [[String: Any]] ?? []
             let childIDs = childObjects.compactMap { $0["id"] as? String }
@@ -665,9 +1095,10 @@ private final class MindmapEditorModel: ObservableObject {
                 parentID: parentID,
                 depth: depth,
                 childIDs: childIDs,
-                colorHex: color,
-                fontSize: font,
-                shapeClass: shape
+                style: style,
+                shapeClass: shape,
+                markers: markers,
+                isComplete: isComplete
             )
             for child in childObjects {
                 walk(child, parentID: id, depth: depth + 1)
@@ -678,10 +1109,74 @@ private final class MindmapEditorModel: ObservableObject {
         return (topics, rootID)
     }
 
+    private static func parseVisualStyle(_ properties: [String: Any]?) -> MindmapTopicVisualStyle {
+        var style = MindmapTopicVisualStyle()
+        style.fontFamily = properties?["fo:font-family"] as? String
+        style.fontSize = parseFontSize(properties?["fo:font-size"])
+        style.fontWeight = properties?["fo:font-weight"] as? String
+        let fontStyle = (properties?["fo:font-style"] as? String)?.lowercased()
+        let decoration = (properties?["fo:text-decoration"] as? String)?.lowercased() ?? ""
+        style.italic = fontStyle == "italic" || fontStyle == "oblique"
+        style.underline = decoration.split(whereSeparator: \.isWhitespace).contains("underline")
+        style.strike = decoration.split(whereSeparator: \.isWhitespace).contains("line-through")
+        style.textColorHex = properties?["fo:color"] as? String
+        let fill = properties?["svg:fill"] as? String ?? properties?["fill-color"] as? String
+        style.fillColorHex = fill?.lowercased() == "none" ? nil : fill
+        style.borderColorHex = properties?["border-line-color"] as? String
+        style.borderWidth = parseMeasurement(properties?["border-line-width"]) ?? 1
+        style.borderPattern = properties?["border-line-pattern"] as? String
+        style.cornerRadius = parseMeasurement(properties?["shape-corner"])
+        style.alignment = properties?["fo:text-align"] as? String
+        return style
+    }
+
     private static func parseFontSize(_ value: Any?) -> Double {
-        guard let string = value as? String else { return 12.5 }
+        parseMeasurement(value) ?? 12.5
+    }
+
+    private static func parseMeasurement(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        guard let string = value as? String else { return nil }
         let numeric = string.drop(while: { !$0.isNumber && $0 != "." })
-        return Double(numeric.trimmingCharacters(in: CharacterSet(charactersIn: "ptpx "))) ?? 12.5
+        return Double(numeric.trimmingCharacters(in: CharacterSet(charactersIn: "ptpx%em ")))
+    }
+
+    private static func markerFamily(_ markerID: String) -> String {
+        if markerID.hasPrefix("priority-") { return "priority" }
+        if markerID.hasPrefix("task-") { return "task" }
+        if markerID.hasPrefix("tag-") { return "tag" }
+        if markerID.hasPrefix("flag-") { return "flag" }
+        if markerID.hasPrefix("star-") { return "star" }
+        if markerID.hasPrefix("people-") { return "people" }
+        if markerID.hasPrefix("smiley-") { return "smiley" }
+        if markerID.hasPrefix("symbol-") || markerID.hasPrefix("symbol_") { return "symbol" }
+        return "other"
+    }
+
+    private static func markerLabel(_ markerID: String) -> String {
+        if markerID.hasPrefix("priority-") {
+            return "P\(markerID.dropFirst("priority-".count))"
+        }
+        switch markerID {
+        case "task-start": return "○"
+        case "task-oct": return "12%"
+        case "task-quarter": return "25%"
+        case "task-3oct": return "38%"
+        case "task-half": return "50%"
+        case "task-5oct": return "62%"
+        case "task-3quar": return "75%"
+        case "task-7oct": return "88%"
+        case "task-done": return "✓"
+        case "task-pause": return "Ⅱ"
+        default: break
+        }
+        if markerID.hasPrefix("flag-") { return "⚑" }
+        if markerID.hasPrefix("star-") { return "★" }
+        if markerID.hasPrefix("tag-") { return "#" }
+        if markerID.hasPrefix("people-") { return "●" }
+        if markerID.hasPrefix("smiley-") { return "☺" }
+        if markerID.hasPrefix("symbol-") || markerID.hasPrefix("symbol_") { return "!" }
+        return (markerID.split(separator: "-").last.map(String.init) ?? markerID).prefix(2).uppercased()
     }
 }
 
@@ -905,9 +1400,12 @@ private struct KiteMindmapEditorView: View {
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .tracking(1.3)
                     .foregroundStyle(.secondary)
-                Text("节点检查器")
+                Text("格式与语义")
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
             }
+
+            documentStylePanel
+            Divider().overlay(Color.white.opacity(0.08))
 
             if let topic = model.selectedTopic {
                 VStack(alignment: .leading, spacing: 7) {
@@ -933,12 +1431,16 @@ private struct KiteMindmapEditorView: View {
                 }
 
                 Divider().overlay(Color.white.opacity(0.08))
+                topicSemanticPanel
+                Divider().overlay(Color.white.opacity(0.08))
+                topicFormatPanel
+                Divider().overlay(Color.white.opacity(0.08))
 
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 7) {
                     metaRow("深度", "\(topic.depth)")
                     metaRow("子主题", "\(topic.childIDs.count)")
                     metaRow("形状", topic.shapeClass ?? "默认")
-                    metaRow("字号", String(format: "%.1f pt", topic.fontSize))
+                    metaRow("字体", topic.style.fontFamily ?? "系统")
                 }
 
                 HStack(spacing: 6) {
@@ -988,6 +1490,209 @@ private struct KiteMindmapEditorView: View {
         }
     }
 
+    private var documentStylePanel: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            sectionHeader("DOCUMENT GRAPH")
+            Picker("结构", selection: $model.graphDraft.structure) {
+                Text("思维导图").tag(MindmapGraphStructureDto.mindMap)
+                Text("右向逻辑图").tag(MindmapGraphStructureDto.logicRight)
+                Text("左向逻辑图").tag(MindmapGraphStructureDto.logicLeft)
+                Text("组织架构图").tag(MindmapGraphStructureDto.orgChart)
+                Text("树形图").tag(MindmapGraphStructureDto.tree)
+            }
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            Picker("连线", selection: $model.graphDraft.connectorKind) {
+                Text("曲线").tag(MindmapConnectorKindDto.curved)
+                Text("直线").tag(MindmapConnectorKindDto.straight)
+                Text("直角折线").tag(MindmapConnectorKindDto.elbow)
+                Text("圆角折线").tag(MindmapConnectorKindDto.roundedElbow)
+            }
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            if model.graphDraft.connectorKind == .roundedElbow {
+                HStack {
+                    Text("拐角半径")
+                    Slider(value: $model.graphDraft.cornerRadius, in: 0...48, step: 1)
+                    Text("\(Int(model.graphDraft.cornerRadius))")
+                        .font(.system(size: 9, design: .monospaced))
+                        .frame(width: 24, alignment: .trailing)
+                }
+                .font(.system(size: 10))
+            }
+            Button("应用图结构") { model.applyDocumentStyle() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+    }
+
+    private var topicSemanticPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("MARKERS · TODO · DATE")
+            if !model.topicMarkers.isEmpty {
+                FlowMarkerRow(markers: model.topicMarkers) { markerID in
+                    model.removeMarker(markerID)
+                }
+            }
+
+            HStack(spacing: 6) {
+                Toggle(isOn: Binding(
+                    get: { model.topicIsComplete },
+                    set: { model.setTodoCompletion($0) }
+                )) {
+                    Text("TODO 完成")
+                        .font(.system(size: 10))
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+                Button(model.topicIsComplete ? "设为未完成" : "设为完成") { model.toggleTodo() }
+                    .controlSize(.mini)
+            }
+
+            HStack(spacing: 5) {
+                Picker("优先级", selection: $model.priorityLevel) {
+                    Text("无").tag(0)
+                    ForEach(1...5, id: \.self) { level in
+                        Text("P\(level)").tag(level)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                Button("应用") { model.applyPriority(model.priorityLevel) }
+                    .controlSize(.mini)
+            }
+
+            HStack(spacing: 5) {
+                Picker("任务进度", selection: $model.taskProgressMarkerID) {
+                    Text("无").tag("")
+                    Text("未开始").tag("task-start")
+                    Text("25%").tag("task-quarter")
+                    Text("50%").tag("task-half")
+                    Text("75%").tag("task-3quar")
+                    Text("完成").tag("task-done")
+                    Text("暂停").tag("task-pause")
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                Button("应用") { model.applyTaskProgress() }
+                    .controlSize(.mini)
+            }
+
+            Menu("添加通用标记") {
+                Button("红旗") { model.addMarker("flag-red") }
+                Button("黄旗") { model.addMarker("flag-yellow") }
+                Button("星标") { model.addMarker("star-yellow") }
+                Button("警示") { model.addMarker("symbol-attention") }
+                Button("标签") { model.addMarker("tag-red") }
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(.small)
+
+            HStack(spacing: 6) {
+                DatePicker(
+                    "",
+                    selection: $model.dateDraft.date,
+                    displayedComponents: model.dateDraft.precision == .dateOnly ? [.date] : [.date, .hourAndMinute]
+                )
+                .labelsHidden()
+                Picker("", selection: $model.dateDraft.style) {
+                    Text("ISO").tag(MindmapDateStyleDto.iso)
+                    Text("中文").tag(MindmapDateStyleDto.chinese)
+                    Text("English").tag(MindmapDateStyleDto.englishUs)
+                    Text("系统").tag(MindmapDateStyleDto.system)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                Button("插入") { model.insertDate() }
+                    .controlSize(.mini)
+            }
+            HStack(spacing: 6) {
+                Picker("位置", selection: $model.dateDraft.target) {
+                    Text("标题").tag(MindmapDateTargetDto.title)
+                    Text("备注").tag(MindmapDateTargetDto.note)
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+                Picker("精度", selection: $model.dateDraft.precision) {
+                    Text("日期").tag(MindmapDatePrecisionDto.dateOnly)
+                    Text("分钟").tag(MindmapDatePrecisionDto.minutes)
+                    Text("秒").tag(MindmapDatePrecisionDto.seconds)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var topicFormatPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("TEXT · NODE")
+            HStack(spacing: 6) {
+                TextField("字体族", text: $model.topicFormat.fontFamily)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 7)
+                    .frame(height: 26)
+                    .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
+                Stepper(value: $model.topicFormat.fontSize, in: 8...72, step: 1) {
+                    Text("\(Int(model.topicFormat.fontSize)) pt")
+                        .font(.system(size: 9, design: .monospaced))
+                        .frame(width: 42, alignment: .trailing)
+                }
+                .controlSize(.mini)
+            }
+            HStack(spacing: 6) {
+                Picker("", selection: $model.topicFormat.fontWeight) {
+                    Text("Regular").tag("normal")
+                    Text("Medium").tag("500")
+                    Text("Semibold").tag("600")
+                    Text("Bold").tag("bold")
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                Toggle("I", isOn: $model.topicFormat.italic).toggleStyle(.button)
+                Toggle("U", isOn: $model.topicFormat.underline).toggleStyle(.button)
+                Toggle("S", isOn: $model.topicFormat.strike).toggleStyle(.button)
+            }
+            ColorPicker("文字", selection: colorBinding(\.textColorHex), supportsOpacity: false)
+            ColorPicker("节点背景", selection: colorBinding(\.fillColorHex), supportsOpacity: false)
+            ColorPicker("节点边框", selection: colorBinding(\.borderColorHex), supportsOpacity: false)
+            HStack(spacing: 8) {
+                Stepper(value: $model.topicFormat.borderWidth, in: 0...8, step: 0.5) {
+                    Text("边框 \(model.topicFormat.borderWidth, specifier: "%.1f")")
+                }
+                Stepper(value: $model.topicFormat.cornerRadius, in: 0...32, step: 1) {
+                    Text("圆角 \(Int(model.topicFormat.cornerRadius))")
+                }
+            }
+            .font(.system(size: 9.5))
+            .controlSize(.mini)
+            Button("应用文字与节点格式") { model.applyTopicFormat() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+    }
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .tracking(1.1)
+            .foregroundStyle(.secondary)
+    }
+
+    private func colorBinding(_ keyPath: WritableKeyPath<MindmapTopicFormatDraft, String>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: model.topicFormat[keyPath: keyPath]) ?? .black },
+            set: { color in
+                if let hex = color.hexString {
+                    model.topicFormat[keyPath: keyPath] = hex
+                }
+            }
+        )
+    }
+
     private var canvas: some View {
         GeometryReader { proxy in
             ZStack(alignment: .bottomTrailing) {
@@ -1020,7 +1725,7 @@ private struct KiteMindmapEditorView: View {
                       let topic = model.topics[id],
                       let parentID = node.parentID,
                       let parent = model.layout.nodes[parentID] else { continue }
-                drawEdge(context: &scene, parent: parent, child: node, colorHex: topic.colorHex)
+                drawEdge(context: &scene, parent: parent, child: node, colorHex: topic.style.accentHex, isComplete: topic.isComplete)
             }
             for id in model.layout.order {
                 guard let node = model.layout.nodes[id],
@@ -1057,9 +1762,12 @@ private struct KiteMindmapEditorView: View {
                     let point = worldPoint(value.location, size: size)
                     if let hit = model.layout.order.reversed().first(where: {
                         model.layout.nodes[$0]?.rect.contains(point) == true
-                    }), let node = model.layout.nodes[hit] {
+                    }), let node = model.layout.nodes[hit], let topic = model.topics[hit] {
                         if toggleBadgeRect(for: node).contains(point) {
                             model.toggleCollapse(hit)
+                        } else if topic.hasTodo && todoCheckboxRect(for: node).contains(point) {
+                            model.select(hit)
+                            model.toggleTodo()
                         } else {
                             model.select(hit)
                         }
@@ -1073,10 +1781,13 @@ private struct KiteMindmapEditorView: View {
                     let point = worldPoint(value.location, size: size)
                     if let hit = model.layout.order.reversed().first(where: {
                         model.layout.nodes[$0]?.rect.contains(point) == true
-                    }), let node = model.layout.nodes[hit] {
+                    }), let node = model.layout.nodes[hit], let topic = model.topics[hit] {
                         if toggleBadgeRect(for: node).contains(point) {
                             model.select(hit)
                             model.toggleCollapse(hit)
+                        } else if topic.hasTodo && todoCheckboxRect(for: node).contains(point) {
+                            model.select(hit)
+                            model.toggleTodo()
                         } else {
                             model.beginEditing(hit)
                         }
@@ -1101,7 +1812,7 @@ private struct KiteMindmapEditorView: View {
         let lineCount = max(1, model.inlineTitle.split(separator: "\n", omittingEmptySubsequences: false).count)
         let editorHeight = max(rect.height, CGFloat(min(4, lineCount)) * 18 + 14)
         return TextEditor(text: $model.inlineTitle)
-            .font(.system(size: max(10, min(14, topic.fontSize)), weight: .medium, design: .rounded))
+            .font(.system(size: max(10, min(14, topic.style.fontSize)), weight: .medium, design: .rounded))
             .scrollContentBackground(.hidden)
             .padding(.horizontal, 5)
             .padding(.vertical, 4)
@@ -1170,56 +1881,202 @@ private struct KiteMindmapEditorView: View {
         context: inout GraphicsContext,
         parent: MindmapNodeLayout,
         child: MindmapNodeLayout,
-        colorHex: String?
+        colorHex: String?,
+        isComplete: Bool
     ) {
-        let start = CGPoint(x: parent.rect.maxX, y: parent.rect.midY)
-        let end = CGPoint(x: child.rect.minX, y: child.rect.midY)
-        let midX = (start.x + end.x) / 2
+        let isVertical = model.graphDraft.structure == .orgChart
+        let start: CGPoint
+        let end: CGPoint
+        if isVertical {
+            start = CGPoint(x: parent.rect.midX, y: parent.rect.maxY)
+            end = CGPoint(x: child.rect.midX, y: child.rect.minY)
+        } else if child.rect.midX >= parent.rect.midX {
+            start = CGPoint(x: parent.rect.maxX, y: parent.rect.midY)
+            end = CGPoint(x: child.rect.minX, y: child.rect.midY)
+        } else {
+            start = CGPoint(x: parent.rect.minX, y: parent.rect.midY)
+            end = CGPoint(x: child.rect.maxX, y: child.rect.midY)
+        }
+
         var path = Path()
         path.move(to: start)
-        path.addCurve(
-            to: end,
-            control1: CGPoint(x: midX, y: start.y),
-            control2: CGPoint(x: midX, y: end.y)
-        )
+        switch model.graphDraft.connectorKind {
+        case .straight:
+            path.addLine(to: end)
+        case .elbow:
+            if isVertical {
+                let midY = (start.y + end.y) / 2
+                path.addLine(to: CGPoint(x: start.x, y: midY))
+                path.addLine(to: CGPoint(x: end.x, y: midY))
+            } else {
+                let midX = (start.x + end.x) / 2
+                path.addLine(to: CGPoint(x: midX, y: start.y))
+                path.addLine(to: CGPoint(x: midX, y: end.y))
+            }
+            path.addLine(to: end)
+        case .roundedElbow:
+            appendRoundedElbow(to: &path, start: start, end: end, vertical: isVertical)
+        case .curved, .unknown:
+            if isVertical {
+                let midY = (start.y + end.y) / 2
+                path.addCurve(
+                    to: end,
+                    control1: CGPoint(x: start.x, y: midY),
+                    control2: CGPoint(x: end.x, y: midY)
+                )
+            } else {
+                let midX = (start.x + end.x) / 2
+                path.addCurve(
+                    to: end,
+                    control1: CGPoint(x: midX, y: start.y),
+                    control2: CGPoint(x: midX, y: end.y)
+                )
+            }
+        }
         let color = Color(hex: colorHex) ?? Color(red: 0.24, green: 0.25, blue: 0.24)
-        context.stroke(path, with: .color(color.opacity(0.55)), lineWidth: 1.25)
+        context.stroke(
+            path,
+            with: .color(color.opacity(isComplete ? 0.28 : 0.58)),
+            lineWidth: 1.25
+        )
+    }
+
+    private func appendRoundedElbow(to path: inout Path, start: CGPoint, end: CGPoint, vertical: Bool) {
+        let requested = CGFloat(max(0, min(64, model.graphDraft.cornerRadius)))
+        if vertical {
+            let midY = (start.y + end.y) / 2
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let radius = min(requested, abs(dx) / 2, abs(dy) / 2)
+            let xSign: CGFloat = dx >= 0 ? 1 : -1
+            let ySign: CGFloat = dy >= 0 ? 1 : -1
+            path.addLine(to: CGPoint(x: start.x, y: midY - ySign * radius))
+            path.addQuadCurve(
+                to: CGPoint(x: start.x + xSign * radius, y: midY),
+                control: CGPoint(x: start.x, y: midY)
+            )
+            path.addLine(to: CGPoint(x: end.x - xSign * radius, y: midY))
+            path.addQuadCurve(
+                to: CGPoint(x: end.x, y: midY + ySign * radius),
+                control: CGPoint(x: end.x, y: midY)
+            )
+            path.addLine(to: end)
+        } else {
+            let midX = (start.x + end.x) / 2
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let radius = min(requested, abs(dx) / 2, abs(dy) / 2)
+            let xSign: CGFloat = dx >= 0 ? 1 : -1
+            let ySign: CGFloat = dy >= 0 ? 1 : -1
+            path.addLine(to: CGPoint(x: midX - xSign * radius, y: start.y))
+            path.addQuadCurve(
+                to: CGPoint(x: midX, y: start.y + ySign * radius),
+                control: CGPoint(x: midX, y: start.y)
+            )
+            path.addLine(to: CGPoint(x: midX, y: end.y - ySign * radius))
+            path.addQuadCurve(
+                to: CGPoint(x: midX + xSign * radius, y: end.y),
+                control: CGPoint(x: midX, y: end.y)
+            )
+            path.addLine(to: end)
+        }
     }
 
     private func drawNode(context: inout GraphicsContext, topic: MindmapTopic, layout: MindmapNodeLayout) {
         let rect = layout.rect
+        let style = topic.style
         let selected = model.selectedID == topic.id
         let isRoot = topic.parentID == nil
-        let accent = Color(hex: topic.colorHex) ?? Color(red: 0.72, green: 0.34, blue: 0.15)
-        let fill = isRoot
-            ? Color(red: 0.10, green: 0.105, blue: 0.11)
-            : Color(red: 0.985, green: 0.98, blue: 0.95)
-        let textColor = isRoot ? Color.white : Color(red: 0.12, green: 0.125, blue: 0.12)
-        let radius = topic.shapeClass?.contains("rounded") == true ? min(10, rect.height / 2) : 3
-        let nodePath = Path(roundedRect: rect, cornerRadius: radius)
-        context.fill(nodePath, with: .color(fill))
-        context.stroke(
-            nodePath,
-            with: .color(selected ? accent : .black.opacity(isRoot ? 0.65 : 0.16)),
-            lineWidth: selected ? 2.2 : 1
-        )
+        let accent = Color(hex: style.accentHex) ?? Color(red: 0.72, green: 0.34, blue: 0.15)
+        let fill = Color(hex: style.fillColorHex)
+            ?? (isRoot
+                ? Color(red: 0.10, green: 0.105, blue: 0.11)
+                : Color(red: 0.985, green: 0.98, blue: 0.95))
+        let textColor = Color(hex: style.textColorHex)
+            ?? (isRoot ? .white : Color(red: 0.12, green: 0.125, blue: 0.12))
+        let borderColor = Color(hex: style.borderColorHex)
+            ?? (isRoot ? .black.opacity(0.65) : .black.opacity(0.16))
+        let radius = CGFloat(style.cornerRadius ?? (topic.shapeClass?.contains("rounded") == true ? 8 : 3))
+        let nodePath = Path(roundedRect: rect, cornerRadius: max(0, min(radius, rect.height / 2)))
 
-        if !isRoot {
-            let bar = CGRect(x: rect.minX, y: rect.minY + 5, width: 3, height: rect.height - 10)
-            context.fill(Path(roundedRect: bar, cornerRadius: 1.5), with: .color(accent))
+        context.fill(nodePath, with: .color(fill.opacity(topic.isComplete ? 0.68 : 1)))
+        if style.borderWidth > 0 {
+            context.stroke(
+                nodePath,
+                with: .color(selected ? accent : borderColor.opacity(topic.isComplete ? 0.55 : 0.9)),
+                lineWidth: selected ? 2.2 : max(0.6, min(4, style.borderWidth))
+            )
+        } else if selected {
+            context.stroke(nodePath, with: .color(accent), lineWidth: 2.2)
         }
 
-        let font = Font.system(
-            size: max(9.5, min(13.5, topic.fontSize * 0.82)),
-            weight: isRoot ? .semibold : .medium,
-            design: .rounded
-        )
-        let text = Text(topic.title)
+        if !isRoot && style.borderWidth <= 0 {
+            context.fill(
+                Path(roundedRect: CGRect(x: rect.minX, y: rect.minY + 5, width: 3, height: rect.height - 10), cornerRadius: 1.5),
+                with: .color(accent.opacity(topic.isComplete ? 0.45 : 0.9))
+            )
+        }
+
+        var markerX = rect.minX + 9
+        if !topic.markers.isEmpty {
+            let markerY = rect.minY + 4
+            for marker in topic.markers.prefix(8) {
+                let markerRect = CGRect(x: markerX, y: markerY, width: markerWidth(marker), height: 13)
+                let markerColor = markerColor(marker)
+                context.fill(Path(roundedRect: markerRect, cornerRadius: 4), with: .color(markerColor.opacity(0.92)))
+                context.draw(
+                    Text(marker.label)
+                        .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                        .foregroundColor(.white),
+                    at: CGPoint(x: markerRect.midX, y: markerRect.midY - 0.3),
+                    anchor: .center
+                )
+                markerX += markerRect.width + 4
+            }
+        }
+
+        let textStartX: CGFloat
+        if topic.hasTodo {
+            let checkboxRect = todoCheckboxRect(for: layout)
+            context.fill(Path(roundedRect: checkboxRect, cornerRadius: 3), with: .color(topic.isComplete ? accent : fill))
+            context.stroke(Path(roundedRect: checkboxRect, cornerRadius: 3), with: .color(accent), lineWidth: 1)
+            if topic.isComplete {
+                context.draw(
+                    Text("✓").font(.system(size: 9, weight: .bold)).foregroundColor(.white),
+                    at: CGPoint(x: checkboxRect.midX, y: checkboxRect.midY - 0.5),
+                    anchor: .center
+                )
+            }
+            textStartX = checkboxRect.maxX + 6
+        } else {
+            textStartX = rect.minX + 11
+        }
+
+        let font = topicFont(topic, isRoot: isRoot)
+        var text = Text(topic.title)
             .font(font)
-            .foregroundColor(textColor)
+            .foregroundColor(textColor.opacity(topic.isComplete ? 0.58 : 1))
+            .underline(style.underline)
+            .strikethrough(style.strike || topic.isComplete)
+        if topic.markers.isEmpty && topic.hasTodo {
+            text = text.font(.system(size: max(9.5, min(14, style.fontSize * 0.9)), weight: fontWeight(style.fontWeight, root: isRoot)))
+        }
         var textContext = context
         textContext.clip(to: nodePath)
-        textContext.draw(text, at: CGPoint(x: rect.minX + 12, y: rect.midY), anchor: .leading)
+        let textY: CGFloat = topic.markers.isEmpty ? rect.midY : rect.minY + 30
+        let resolvedText = context.resolve(text)
+        let alignment = style.alignment ?? "left"
+        let textX: CGFloat
+        switch alignment {
+        case "center": textX = rect.midX
+        case "right": textX = rect.maxX - 22
+        default: textX = textStartX
+        }
+        context.draw(
+            resolvedText,
+            at: CGPoint(x: textX, y: textY),
+            anchor: alignment == "center" ? .center : alignment == "right" ? .trailing : .leading
+        )
 
         if topic.hasChildren {
             let badge = CGRect(x: rect.maxX - 18, y: rect.midY - 6, width: 12, height: 12)
@@ -1231,6 +2088,58 @@ private struct KiteMindmapEditorView: View {
                 anchor: .center
             )
         }
+    }
+
+    private func topicFont(_ topic: MindmapTopic, isRoot: Bool) -> Font {
+        let size = max(9.5, min(24, topic.style.fontSize * 0.86))
+        let weight = fontWeight(topic.style.fontWeight, root: isRoot)
+        let family = topic.style.fontFamily?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var font = family?.isEmpty == false
+            ? Font.custom(family!, size: size).weight(weight)
+            : Font.system(size: size, weight: weight, design: .rounded)
+        if topic.style.italic {
+            font = font.italic()
+        }
+        return font
+    }
+
+    private func fontWeight(_ value: String?, root: Bool) -> Font.Weight {
+        switch value?.lowercased() {
+        case "bold", "700", "800", "900": return .bold
+        case "600", "semibold": return .semibold
+        case "500", "medium": return .medium
+        case "300", "light": return .light
+        default: return root ? .semibold : .medium
+        }
+    }
+
+    private func markerWidth(_ marker: MindmapMarkerChip) -> CGFloat {
+        marker.label.count <= 2 ? 21 : max(24, CGFloat(marker.label.count) * 7)
+    }
+
+    private func markerColor(_ marker: MindmapMarkerChip) -> Color {
+        switch marker.id {
+        case "flag-red", "priority-1": return Color(red: 0.73, green: 0.16, blue: 0.12)
+        case "flag-yellow", "star-yellow", "priority-2": return Color(red: 0.82, green: 0.52, blue: 0.08)
+        case "priority-3": return Color(red: 0.46, green: 0.42, blue: 0.18)
+        case "task-done": return Color(red: 0.18, green: 0.52, blue: 0.31)
+        case "task-pause": return Color(red: 0.43, green: 0.45, blue: 0.49)
+        default:
+            switch marker.family {
+            case "priority": return Color(red: 0.72, green: 0.34, blue: 0.15)
+            case "task": return Color(red: 0.23, green: 0.42, blue: 0.56)
+            case "flag": return Color(red: 0.72, green: 0.22, blue: 0.18)
+            case "star": return Color(red: 0.78, green: 0.56, blue: 0.10)
+            case "people": return Color(red: 0.30, green: 0.48, blue: 0.36)
+            case "symbol": return Color(red: 0.50, green: 0.31, blue: 0.58)
+            default: return Color(red: 0.34, green: 0.36, blue: 0.38)
+            }
+        }
+    }
+
+    private func todoCheckboxRect(for node: MindmapNodeLayout) -> CGRect {
+        let y = node.rect.midY - 7
+        return CGRect(x: node.rect.minX + 9, y: y, width: 14, height: 14)
     }
 
     private func worldPoint(_ point: CGPoint, size: CGSize) -> CGPoint {
@@ -1586,15 +2495,78 @@ final class KiteMindmapWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+private struct FlowMarkerRow: View {
+    let markers: [MindmapMarkerChip]
+    let remove: (String) -> Void
+
+    private let columns = [GridItem(.adaptive(minimum: 68), spacing: 4, alignment: .leading)]
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
+            ForEach(markers) { marker in
+                HStack(spacing: 3) {
+                    Text(marker.label)
+                        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    Button {
+                        remove(marker.id)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 6.5, weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 6)
+                .frame(height: 20)
+                .background(Color.white.opacity(0.08), in: Capsule())
+            }
+        }
+    }
+}
+
+private extension MindmapGraphStructureDto {
+    var supportedStructure: MindmapGraphStructureDto? {
+        self == .unknown ? nil : self
+    }
+}
+
+private extension MindmapConnectorKindDto {
+    var supportedConnector: MindmapConnectorKindDto? {
+        self == .unknown ? nil : self
+    }
+}
+
 private extension Color {
     init?(hex: String?) {
-        guard let hex, hex.hasPrefix("#") else { return nil }
-        let value = String(hex.dropFirst())
-        guard value.count == 6, let number = UInt32(value, radix: 16) else { return nil }
+        guard let hex else { return nil }
+        let value = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.hasPrefix("#") else { return nil }
+        let digits = String(value.dropFirst())
+        let number: UInt64
+        switch digits.count {
+        case 6:
+            guard let parsed = UInt64(digits, radix: 16) else { return nil }
+            number = parsed << 8 | 0xFF
+        case 8:
+            guard let parsed = UInt64(digits, radix: 16) else { return nil }
+            number = parsed
+        default:
+            return nil
+        }
         self.init(
-            red: Double((number >> 16) & 0xFF) / 255,
-            green: Double((number >> 8) & 0xFF) / 255,
-            blue: Double(number & 0xFF) / 255
+            red: Double((number >> 24) & 0xFF) / 255,
+            green: Double((number >> 16) & 0xFF) / 255,
+            blue: Double((number >> 8) & 0xFF) / 255,
+            opacity: Double(number & 0xFF) / 255
+        )
+    }
+
+    var hexString: String? {
+        guard let color = NSColor(self).usingColorSpace(.sRGB) else { return nil }
+        return String(
+            format: "#%02X%02X%02X",
+            Int(round(color.redComponent * 255)),
+            Int(round(color.greenComponent * 255)),
+            Int(round(color.blueComponent * 255))
         )
     }
 }

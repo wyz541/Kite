@@ -197,6 +197,10 @@ struct KiteMacApp: App {
                     KiteMindmapWindowController.chooseAndOpen()
                 }
 
+                Button("转换文档为 Mindmap…") {
+                    KiteMindmapImportWindowController.chooseSource()
+                }
+
                 Button("打开示例") {
                     KiteMindmapWindowController.openSample()
                 }

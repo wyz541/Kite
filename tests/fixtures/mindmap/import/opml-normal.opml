@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>OPML Import Corpus</title></head>
+  <body>
+    <outline text="Platforms" _note="Shared Rust Core." _task="todo">
+      <outline text="Rust Core" url="https://example.com/rust" />
+      <outline text="macOS" checked="true" />
+      <outline text="Windows" _task="todo" />
+    </outline>
+    <outline text="Delivery" description="One deterministic pipeline." />
+  </body>
+</opml>

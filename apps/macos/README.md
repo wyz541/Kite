@@ -38,6 +38,8 @@ The build script creates `apps/macos/build/Kite.app`.
 - Independent XMind-compatible Mindmap editor window backed by the Rust core.
 - Mindmap entry points in the main toolbar, File menu, `.xmind` context menu, and file double-click.
 - Mindmap outline search, inline node editing, keyboard tree operations, and undo/redo.
+- Mindmap graph/connector styles, markers, TODO completion, date insertion, and font/node formatting.
+- Document import preview for Markdown, DOCX, TXT, HTML, and OPML into new `.xmind` files.
 - Current-folder, favorite-folder, local-disk, and root-disk scopes in both search modes.
 - Ranked name results with collapsible duplicate locations.
 - Content results with line context and highlighted matches.

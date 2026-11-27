@@ -4,6 +4,43 @@
 //! first compatibility slice. Every other entry is copied through the ZIP writer
 //! without decoding so that future XMind features and attachments survive a save.
 
+pub mod date;
+pub mod graph_style;
+pub mod topic_markers;
+pub mod topic_style;
+pub mod topic_todo;
+
+pub use date::{
+    DateDisplayFormat, DateFormatError, DateInsertionError, DateInsertionPlacement,
+    DateInsertionRequest, DateInsertionResult, DateInsertionTarget, DateLocale, DatePartOrder,
+    DatePrecision, DateStyle, StaticDateValue, SystemDatePattern, insert_date_into_topic,
+};
+pub use graph_style::{
+    ConnectorColor, ConnectorCornerRadius, ConnectorKind, ConnectorLinePattern, ConnectorStyle,
+    ConnectorStylePatch, ConnectorWidth, DocumentGraphStyle, DocumentGraphStylePatch,
+    GraphStructure, GraphStyleError, apply_document_graph_style as apply_graph_style_to_content,
+    read_document_graph_style as read_graph_style_from_content,
+};
+pub use topic_markers::{
+    MarkerEntry, MarkerFamily, MarkerKind, OpaqueMarkerEntry, PriorityMarker, SlotUpdate,
+    TaskProgress, TopicHeaderMarker, TopicHeaderMarkers, TopicMarker, TopicMarkerError,
+    TopicMarkerPatch, TopicMarkerSet, apply_topic_markers as apply_topic_markers_to_content,
+    read_topic_markers as read_topic_markers_from_content,
+};
+pub use topic_style::{
+    BorderLinePattern, FontFamily, FontSize, FontStyle, FontWeight, MissingFontAction,
+    MissingFontPolicy, MissingFontResolution, MissingFontWarning, NodeCornerRadius, NodeStylePatch,
+    StyleColor, StyleMeasurement, StyleUnit, TextAlignment, TextDecoration, TextStylePatch,
+    TopicNodeStyle, TopicStyle, TopicStyleError, TopicStylePatch, TopicTextStyle,
+    apply_topic_style, read_topic_style,
+};
+pub use topic_todo::{
+    CompletionRendering, OpacitySemantics, TextDecoration as TodoTextDecoration, TodoStatus,
+    TodoUpdate, TopicTodoError, TopicTodoPatch, TopicTodoState, VisualTone,
+    apply_topic_todo as apply_topic_todo_to_content,
+    read_topic_todo as read_topic_todo_from_content,
+};
+
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
@@ -195,6 +232,100 @@ impl XmindPackage {
 
     pub fn entries(&self) -> &[XmindEntryInfo] {
         &self.entries
+    }
+
+    /// Read the typed graph structure and connector style for one sheet.
+    pub fn document_graph_style(
+        &self,
+        sheet_index: usize,
+    ) -> Result<DocumentGraphStyle, GraphStyleError> {
+        graph_style::read_document_graph_style(&self.content, sheet_index)
+    }
+
+    /// Apply a document-level graph style patch atomically in memory.
+    ///
+    /// The package only becomes dirty if the resulting `content.json` differs from
+    /// its source. Unknown JSON fields and unknown ZIP entries remain untouched.
+    pub fn apply_document_graph_style(
+        &mut self,
+        sheet_index: usize,
+        patch: &DocumentGraphStylePatch,
+    ) -> Result<(), GraphStyleError> {
+        let mut next = self.content.clone();
+        graph_style::apply_document_graph_style(&mut next, sheet_index, patch)?;
+        self.replace_content(next);
+        Ok(())
+    }
+
+    /// Read the ordered marker set for one topic.
+    pub fn topic_markers(
+        &self,
+        sheet_index: usize,
+        topic_id: &str,
+    ) -> Result<TopicMarkerSet, TopicMarkerError> {
+        topic_markers::read_topic_markers(&self.content, sheet_index, topic_id)
+    }
+
+    /// Read UI-ready topic-header marker metadata.
+    pub fn topic_header_markers(
+        &self,
+        sheet_index: usize,
+        topic_id: &str,
+    ) -> Result<TopicHeaderMarkers, TopicMarkerError> {
+        self.topic_markers(sheet_index, topic_id)
+            .map(|markers| markers.header())
+    }
+
+    /// Apply a marker edit atomically in memory.
+    pub fn apply_topic_markers(
+        &mut self,
+        sheet_index: usize,
+        topic_id: &str,
+        patch: &TopicMarkerPatch,
+    ) -> Result<(), TopicMarkerError> {
+        let mut next = self.content.clone();
+        topic_markers::apply_topic_markers(&mut next, sheet_index, topic_id, patch)?;
+        self.replace_content(next);
+        Ok(())
+    }
+
+    /// Remove one marker by ID while preserving every other marker entry.
+    pub fn remove_topic_marker(
+        &mut self,
+        sheet_index: usize,
+        topic_id: &str,
+        marker_id: &str,
+    ) -> Result<(), TopicMarkerError> {
+        self.apply_topic_markers(
+            sheet_index,
+            topic_id,
+            &TopicMarkerPatch {
+                remove: vec![marker_id.to_owned()],
+                ..TopicMarkerPatch::default()
+            },
+        )
+    }
+
+    /// Read the canonical TODO state for one topic.
+    pub fn topic_todo(
+        &self,
+        sheet_index: usize,
+        topic_id: &str,
+    ) -> Result<TopicTodoState, TopicTodoError> {
+        topic_todo::read_topic_todo(&self.content, sheet_index, topic_id)
+    }
+
+    /// Apply a TODO edit atomically and return the resulting state.
+    pub fn apply_topic_todo(
+        &mut self,
+        sheet_index: usize,
+        topic_id: &str,
+        patch: &TopicTodoPatch,
+    ) -> Result<TopicTodoState, TopicTodoError> {
+        let mut next = self.content.clone();
+        let state = topic_todo::apply_topic_todo(&mut next, sheet_index, topic_id, patch)?;
+        self.replace_content(next);
+        Ok(state)
     }
 
     pub fn is_dirty(&self) -> bool {
