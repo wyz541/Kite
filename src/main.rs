@@ -4,6 +4,8 @@
 mod actions;
 #[cfg(windows)]
 mod agent_review_window;
+#[cfg(windows)]
+mod mindmap_actions;
 
 #[cfg(windows)]
 mod agent_panel;

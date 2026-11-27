@@ -6,13 +6,14 @@ use serde_json::{Value, json};
 
 use crate::ffi::KiteError;
 use crate::mindmap::{
-    BorderLinePattern, ConnectorCornerRadius, ConnectorKind, ConnectorStylePatch,
-    DateDisplayFormat, DateInsertionPlacement, DateInsertionRequest, DateInsertionTarget,
-    DateLocale, DatePartOrder, DatePrecision, DateStyle, DocumentGraphStylePatch, FontFamily,
-    FontSize, FontStyle, FontWeight, GraphStructure, MarkerFamily, MarkerKind, NodeCornerRadius,
-    NodeStylePatch, PriorityMarker, SlotUpdate, StaticDateValue, StyleColor, StyleMeasurement,
-    SystemDatePattern, TaskProgress, TextAlignment, TextStylePatch, TodoStatus, TodoUpdate,
-    TopicMarkerPatch, TopicStylePatch, XmindPackage, insert_date_into_topic,
+    BorderLinePattern, ConnectorColor, ConnectorCornerRadius, ConnectorKind, ConnectorLinePattern,
+    ConnectorStylePatch, ConnectorWidth, DateDisplayFormat, DateInsertionPlacement,
+    DateInsertionRequest, DateInsertionTarget, DateLocale, DatePartOrder, DatePrecision, DateStyle,
+    DocumentGraphStylePatch, FontFamily, FontSize, FontStyle, FontWeight, GraphStructure,
+    MarkerFamily, MarkerKind, NodeCornerRadius, NodeStylePatch, PriorityMarker, SlotUpdate,
+    StaticDateValue, StyleColor, StyleMeasurement, StyleUnit, SystemDatePattern, TaskProgress,
+    TextAlignment, TextStylePatch, TodoStatus, TodoUpdate, TopicMarkerPatch, TopicStylePatch,
+    XmindPackage, insert_date_into_topic, insert_text_into_topic,
 };
 use crate::mindmap_import::{
     CodeStrategy, ContentStrategies, ConversionOptions, ConversionPreset, ImageStrategy,
@@ -183,11 +184,14 @@ pub struct MindmapDocumentStyleDto {
     pub connector_pattern: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MindmapDocumentStylePatchDto {
     pub structure: MindmapGraphStructureDto,
     pub connector_kind: MindmapConnectorKindDto,
     pub connector_corner_radius: Option<u16>,
+    pub connector_width: Option<String>,
+    pub connector_color: Option<String>,
+    pub connector_pattern: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -213,11 +217,17 @@ pub enum MindmapTodoStatusDto {
     Done,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct MindmapTodoDto {
     pub status: MindmapTodoStatusDto,
     pub progress_eighths: Option<u32>,
     pub is_complete: bool,
+    /// XMind 27.1 `taskPresentation`, for example `todo-checkbox` or `todo-progress`.
+    pub task_presentation: Option<String>,
+    /// Normalized XMind 27.1 `todoStatus` (`todo` / `done`).
+    pub todo_status: Option<String>,
+    /// Normalized XMind 27.1 `todoProgress` in the inclusive 0..1 range.
+    pub todo_progress: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, uniffi::Record)]
@@ -230,6 +240,8 @@ pub struct MindmapTopicStyleDto {
     pub strike: Option<bool>,
     pub text_color: Option<String>,
     pub alignment: Option<String>,
+    pub line_height: Option<String>,
+    pub letter_spacing: Option<String>,
     pub node_fill: Option<String>,
     pub border_color: Option<String>,
     pub border_width: Option<f64>,
@@ -265,6 +277,12 @@ pub enum MindmapDatePlacementDto {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MindmapDateKindDto {
+    Date,
+    Due,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MindmapDatePartOrderDto {
     YearMonthDay,
     MonthDayYear,
@@ -279,6 +297,7 @@ pub struct MindmapDateRequestDto {
     pub precision: MindmapDatePrecisionDto,
     pub target: MindmapDateTargetDto,
     pub placement: MindmapDatePlacementDto,
+    pub kind: MindmapDateKindDto,
     pub system_date_order: Option<MindmapDatePartOrderDto>,
     pub system_date_separator: Option<String>,
 }
@@ -494,6 +513,26 @@ pub fn update_mindmap_document_style(
         .map_err(|error| KiteError::OperationFailed {
             message: error.to_string(),
         })?;
+    let width = patch
+        .connector_width
+        .filter(|value| !value.trim().is_empty())
+        .map(ConnectorWidth::new)
+        .transpose()
+        .map_err(|error| KiteError::OperationFailed {
+            message: error.to_string(),
+        })?;
+    let color = patch
+        .connector_color
+        .filter(|value| !value.trim().is_empty())
+        .map(ConnectorColor::new)
+        .transpose()
+        .map_err(|error| KiteError::OperationFailed {
+            message: error.to_string(),
+        })?;
+    let pattern = patch
+        .connector_pattern
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| ConnectorLinePattern::from_xmind_value(&value));
     mutate_mindmap_document(path, expected_source_sha256, |package| {
         package
             .apply_document_graph_style(
@@ -503,7 +542,9 @@ pub fn update_mindmap_document_style(
                     connector: Some(ConnectorStylePatch {
                         kind: Some(connector_kind),
                         corner_radius,
-                        ..ConnectorStylePatch::default()
+                        width,
+                        color,
+                        pattern,
                     }),
                 },
             )
@@ -639,7 +680,11 @@ pub fn read_mindmap_topic_todo(
         .map_err(|error| KiteError::OperationFailed {
             message: error.to_string(),
         })?;
-    Ok(todo_dto(state.status))
+    let mut dto = todo_dto(state.status);
+    if let Some(topic) = find_topic_in_sheet(package.content(), sheet_index as usize, &topic_id) {
+        merge_modern_task_fields(&mut dto, topic);
+    }
+    Ok(dto)
 }
 
 #[uniffi::export]
@@ -690,7 +735,7 @@ pub fn insert_mindmap_date(
     }
     let format = date_format_from_dto(&request)?;
     let insertion = DateInsertionRequest {
-        value,
+        value: value.clone(),
         format,
         target: date_target_from_dto(request.target),
         placement: date_placement_from_dto(request.placement),
@@ -710,9 +755,18 @@ pub fn insert_mindmap_date(
                 let topic = find_topic_mut(root, &topic_id).ok_or_else(|| {
                     crate::mindmap::XmindError::Save(format!("找不到主题 {topic_id}"))
                 })?;
-                let result = insert_date_into_topic(topic, &insertion)
-                    .map_err(|error| crate::mindmap::XmindError::Save(error.to_string()))?;
-                rendered = result.text;
+                if matches!(request.kind, MindmapDateKindDto::Due) {
+                    let text = value
+                        .format(format)
+                        .map_err(|error| crate::mindmap::XmindError::Save(error.to_string()))?;
+                    rendered = format!("截止 {text}");
+                    insert_text_into_topic(topic, &rendered, insertion.target, insertion.placement)
+                        .map_err(|error| crate::mindmap::XmindError::Save(error.to_string()))?;
+                } else {
+                    let result = insert_date_into_topic(topic, &insertion)
+                        .map_err(|error| crate::mindmap::XmindError::Save(error.to_string()))?;
+                    rendered = result.text;
+                }
                 Ok(())
             })
             .map_err(|error| error.to_string())
@@ -924,22 +978,65 @@ fn todo_dto(status: TodoStatus) -> MindmapTodoDto {
             status: MindmapTodoStatusDto::NotStarted,
             progress_eighths: Some(0),
             is_complete: false,
+            task_presentation: None,
+            todo_status: Some("todo".to_string()),
+            todo_progress: Some(0.0),
         },
         TodoStatus::InProgress { eighths } => MindmapTodoDto {
             status: MindmapTodoStatusDto::InProgress,
             progress_eighths: Some(u32::from(eighths)),
             is_complete: false,
+            task_presentation: None,
+            todo_status: Some("todo".to_string()),
+            todo_progress: Some(f64::from(eighths) / 8.0),
         },
         TodoStatus::Paused => MindmapTodoDto {
             status: MindmapTodoStatusDto::Paused,
             progress_eighths: None,
             is_complete: false,
+            task_presentation: None,
+            todo_status: Some("todo".to_string()),
+            todo_progress: None,
         },
         TodoStatus::Done => MindmapTodoDto {
             status: MindmapTodoStatusDto::Done,
             progress_eighths: Some(8),
             is_complete: true,
+            task_presentation: None,
+            todo_status: Some("done".to_string()),
+            todo_progress: Some(1.0),
         },
+    }
+}
+
+fn merge_modern_task_fields(dto: &mut MindmapTodoDto, topic: &Value) {
+    if let Some(presentation) = topic.get("taskPresentation").and_then(Value::as_str) {
+        dto.task_presentation = Some(presentation.to_string());
+    }
+    if let Some(status) = topic.get("todoStatus").and_then(Value::as_str) {
+        dto.todo_status = Some(status.to_string());
+        if status.eq_ignore_ascii_case("done") {
+            dto.status = MindmapTodoStatusDto::Done;
+            dto.is_complete = true;
+            dto.progress_eighths = Some(8);
+        } else {
+            dto.status = MindmapTodoStatusDto::NotStarted;
+            dto.is_complete = false;
+        }
+    }
+    if let Some(progress) = topic.get("todoProgress").and_then(Value::as_f64) {
+        let progress = progress.clamp(0.0, 1.0);
+        dto.todo_progress = Some(progress);
+        dto.progress_eighths = Some((progress * 8.0).round() as u32);
+        if progress > 0.0
+            && progress < 1.0
+            && dto
+                .todo_status
+                .as_deref()
+                .is_none_or(|status| !status.eq_ignore_ascii_case("done"))
+        {
+            dto.status = MindmapTodoStatusDto::InProgress;
+        }
     }
 }
 
@@ -1049,6 +1146,8 @@ fn topic_style_dto(style: crate::mindmap::TopicStyle) -> MindmapTopicStyleDto {
             .as_ref()
             .map(|color| color.as_str().to_owned()),
         alignment,
+        line_height: style.text.line_height.map(style_measurement_to_dto),
+        letter_spacing: style.text.letter_spacing.map(style_measurement_to_dto),
         node_fill: style
             .node
             .background
@@ -1110,6 +1209,16 @@ fn topic_style_patch_from_dto(style: MindmapTopicStyleDto) -> Result<TopicStyleP
         "left" => TextAlignment::Left,
         value => TextAlignment::Other(value.to_owned()),
     });
+    let line_height = style
+        .line_height
+        .as_deref()
+        .map(parse_style_measurement)
+        .transpose()?;
+    let letter_spacing = style
+        .letter_spacing
+        .as_deref()
+        .map(parse_style_measurement)
+        .transpose()?;
     let background = style
         .node_fill
         .map(StyleColor::new)
@@ -1151,7 +1260,8 @@ fn topic_style_patch_from_dto(style: MindmapTopicStyleDto) -> Result<TopicStyleP
             strike: style.strike,
             color,
             alignment,
-            ..TextStylePatch::default()
+            line_height,
+            letter_spacing,
         },
         node: NodeStylePatch {
             background,
@@ -1161,6 +1271,39 @@ fn topic_style_patch_from_dto(style: MindmapTopicStyleDto) -> Result<TopicStyleP
             corner_radius,
         },
     })
+}
+
+fn style_measurement_to_dto(measurement: StyleMeasurement) -> String {
+    let unit = match measurement.unit {
+        StyleUnit::Unitless => "",
+        StyleUnit::Points => "pt",
+        StyleUnit::Pixels => "px",
+        StyleUnit::Percent => "%",
+        StyleUnit::Em => "em",
+    };
+    format!("{}{unit}", measurement.value)
+}
+
+fn parse_style_measurement(value: &str) -> Result<StyleMeasurement, KiteError> {
+    let value = value.trim();
+    let (number, unit) = if let Some(number) = value.strip_suffix('%') {
+        (number, StyleUnit::Percent)
+    } else if let Some(number) = value.strip_suffix("pt") {
+        (number, StyleUnit::Points)
+    } else if let Some(number) = value.strip_suffix("px") {
+        (number, StyleUnit::Pixels)
+    } else if let Some(number) = value.strip_suffix("em") {
+        (number, StyleUnit::Em)
+    } else {
+        (value, StyleUnit::Unitless)
+    };
+    let number = number
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| KiteError::OperationFailed {
+            message: format!("无效的文本度量：{value}"),
+        })?;
+    StyleMeasurement::new(number, unit).map_err(style_error)
 }
 
 fn style_error(error: crate::mindmap::TopicStyleError) -> KiteError {
@@ -1672,6 +1815,9 @@ mod tests {
                 status: MindmapTodoStatusDto::InProgress,
                 progress_eighths: Some(4),
                 is_complete: false,
+                task_presentation: None,
+                todo_status: Some("todo".to_string()),
+                todo_progress: Some(0.5),
             }
         );
         assert_eq!(
@@ -1680,6 +1826,9 @@ mod tests {
                 status: MindmapTodoStatusDto::Done,
                 progress_eighths: Some(8),
                 is_complete: true,
+                task_presentation: None,
+                todo_status: Some("done".to_string()),
+                todo_progress: Some(1.0),
             }
         );
     }

@@ -29,6 +29,7 @@ use crate::git_branches_window;
 use crate::git_client_window;
 use crate::git_log_window;
 use crate::global_search_window;
+use crate::mindmap_actions::MindmapToggleTodo;
 use crate::mindmap_import_window;
 use crate::mindmap_window;
 use crate::platform::{default_root_path, root_directory};
@@ -2010,6 +2011,7 @@ impl KiteApp {
                 MindmapPasteTopicStyle,
                 Some("KiteMindmap"),
             ),
+            KeyBinding::new("secondary-enter", MindmapToggleTodo, Some("KiteMindmap")),
             KeyBinding::new("secondary-plus", MindmapZoomIn, Some("KiteMindmap")),
             KeyBinding::new("secondary-=", MindmapZoomIn, Some("KiteMindmap")),
             KeyBinding::new("secondary-minus", MindmapZoomOut, Some("KiteMindmap")),
