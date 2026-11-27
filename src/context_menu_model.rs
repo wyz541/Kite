@@ -2516,8 +2516,8 @@ impl ActionProvider for SystemActionProvider {
         if context.capabilities.properties_available && context.target_set.targets.len() == 1 {
             candidates.push(ActionCandidate::available("system.properties"));
         }
-        if context.capabilities.mindmap_import_available && context.target_set.targets.len() == 1 {
-            candidates.push(ActionCandidate::available("tool.kite.mindmap-import"));
+        if context.capabilities.mindmap_available && context.target_set.targets.len() == 1 {
+            candidates.push(ActionCandidate::available("tool.kite.mindmap"));
         }
         candidates.push(ActionCandidate::with_availability(
             "system.native-menu",

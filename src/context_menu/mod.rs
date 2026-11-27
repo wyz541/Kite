@@ -352,6 +352,15 @@ impl ContextMenuTarget {
             };
             load_vcs_menu_snapshot(&vcs_paths, &self.working_directory)
         };
+        let primary_path = paths.first().unwrap_or(&self.path);
+        let mindmap_available = paths.len() == 1
+            && !self.is_shell_namespace
+            && !self.is_dir
+            && is_xmind_path(primary_path);
+        let mindmap_import_available = paths.len() == 1
+            && !self.is_shell_namespace
+            && !self.is_dir
+            && is_supported_mindmap_import_path(primary_path);
         ContextSnapshot {
             schema_version: kite_core::context_menu_model::CONTEXT_MENU_SCHEMA_VERSION,
             snapshot_id: format!("windows-context-menu:{}", self.path.display()),
@@ -377,8 +386,8 @@ impl ContextMenuTarget {
                 share_available: self.supports_share,
                 properties_available: self.supports_properties,
                 text_editor_available: false,
-                mindmap_available: false,
-                mindmap_import_available: false,
+                mindmap_available,
+                mindmap_import_available,
                 is_shell_namespace: self.is_shell_namespace,
                 native_plane_available: true,
             },
@@ -429,6 +438,16 @@ impl ContextMenuTarget {
         };
         target
     }
+}
+
+fn is_xmind_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xmind"))
+}
+
+fn is_supported_mindmap_import_path(path: &Path) -> bool {
+    kite_core::mindmap_import::detect_source(path).is_some_and(|source| source.format.supported)
 }
 
 fn build_plan(target: &ContextMenuTarget, policy: ContextMenuPolicy) -> MenuPlan {
