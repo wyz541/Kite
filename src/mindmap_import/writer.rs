@@ -12,7 +12,7 @@ use crate::mindmap::XmindPackage;
 use crate::mindmap_import::model::{
     ConversionOptions, ConversionReport, ConversionWarning, ConversionWarningCode, ImportError,
     OutlineAttachment, OutlineDocument, OutlineLink, OutlineNode, OutlineNote, OutlineTable,
-    SourceLocation, stable_id, truncate_text,
+    SourceLocation, TaskState, stable_id, truncate_text,
 };
 
 pub const CONTENT_ENTRY: &str = "content.json";
@@ -66,6 +66,7 @@ pub fn write_xmind_bytes(
             &document.attachments,
             &document.tables,
             Some(provenance_note(document, options)),
+            None,
         )),
     );
 
@@ -143,6 +144,7 @@ fn node_to_json(node: &OutlineNode, source_key: &str, path: &str, max_title_char
                 &node.attachments,
                 &node.tables,
                 None,
+                node.task.clone(),
             )),
         );
     }
@@ -195,6 +197,7 @@ fn has_topic_notes(node: &OutlineNode) -> bool {
         || !node.links.is_empty()
         || !node.attachments.is_empty()
         || !node.tables.is_empty()
+        || node.task.is_some()
 }
 
 fn topic_notes_object(
@@ -203,6 +206,7 @@ fn topic_notes_object(
     attachments: &[OutlineAttachment],
     tables: &[OutlineTable],
     suffix: Option<String>,
+    task: Option<TaskState>,
 ) -> Map<String, Value> {
     let mut sections = Vec::<String>::new();
     for note in notes {
@@ -237,6 +241,16 @@ fn topic_notes_object(
 
     for table in tables {
         sections.push(table_as_markdown(table));
+    }
+
+    if let Some(task) = task {
+        sections.push(format!(
+            "Task status: {}",
+            match task {
+                TaskState::Todo => "todo",
+                TaskState::Done => "done",
+            }
+        ));
     }
 
     if let Some(suffix) = suffix.filter(|value| !value.trim().is_empty()) {

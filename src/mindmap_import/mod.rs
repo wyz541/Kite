@@ -4,17 +4,25 @@
 //! XMind writer then applies deterministic mapping, reporting, and package
 //! validation for every supported source format.
 
+mod adapter_support;
+mod html;
+mod markdown;
 mod model;
+mod opml;
 mod segment;
 mod writer;
 
+pub use html::HtmlAdapter;
+pub use markdown::MarkdownAdapter;
 pub use model::{
     AdapterDescriptor, ContentKind, ConversionOptions, ConversionPreset, ConversionReport,
     ConversionStats, ConversionWarning, ConversionWarningCode, IMPORT_PIPELINE_VERSION,
     ImportError, LinkKind, NoteFormat, OutlineAdapter, OutlineAttachment, OutlineDocument,
     OutlineLink, OutlineNode, OutlineNodeKind, OutlineNote, OutlineTable, SourceFormat,
-    SourceInput, SourceLocation, SourceProvenance, StructureKind, WarningSeverity, truncate_text,
+    SourceInput, SourceLocation, SourceProvenance, StructureKind, TaskState, WarningSeverity,
+    truncate_text,
 };
+pub use opml::OpmlAdapter;
 pub use segment::{
     ParagraphExpansionReport, SentenceSplitOptions, TextFragment, add_paragraph_as_content_nodes,
     segment_sentences,

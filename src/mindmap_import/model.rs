@@ -139,6 +139,13 @@ pub enum ContentKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    Todo,
+    Done,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum OutlineNodeKind {
     Structure {
@@ -240,6 +247,7 @@ pub struct OutlineTable {
 pub struct OutlineNode {
     pub title: String,
     pub kind: OutlineNodeKind,
+    pub task: Option<TaskState>,
     pub children: Vec<OutlineNode>,
     pub notes: Vec<OutlineNote>,
     pub links: Vec<OutlineLink>,
@@ -253,6 +261,7 @@ impl OutlineNode {
         Self {
             title: title.into(),
             kind: OutlineNodeKind::Structure { kind },
+            task: None,
             children: Vec::new(),
             notes: Vec::new(),
             links: Vec::new(),
@@ -269,6 +278,7 @@ impl OutlineNode {
                 kind,
                 split_from_paragraph: false,
             },
+            task: None,
             children: Vec::new(),
             notes: Vec::new(),
             links: Vec::new(),

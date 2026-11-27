@@ -172,6 +172,7 @@ pub fn add_paragraph_as_content_nodes(
                 kind: ContentKind::Sentence,
                 split_from_paragraph: true,
             },
+            task: None,
             children: Vec::new(),
             notes: Vec::new(),
             links: Vec::new(),
