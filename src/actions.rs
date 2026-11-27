@@ -197,8 +197,6 @@ impl ContextMenuCommand {
             "tool.kite.mindmap" => Self::OpenMindmap,
             "tool.kite.mindmap-import" => Self::ConvertDocumentToMindmap,
             "system.native-menu" => Self::SystemMenu,
-            "tool.kite.mindmap" => Self::OpenMindmap,
-            "tool.kite.mindmap-import" => Self::ConvertDocumentToMindmap,
             "agent.ask" => Self::Agent(AgentMenuCommand::Ask),
             "agent.explain-file" => Self::Agent(AgentMenuCommand::ExplainFile),
             "agent.summarize-folder" => Self::Agent(AgentMenuCommand::SummarizeFolder),
