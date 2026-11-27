@@ -7,6 +7,7 @@ use atomicwrites::{AllowOverwrite, AtomicFile};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::SortSpec;
+use crate::tool_registry::ToolPolicy;
 
 const UI_PREFERENCES_SCHEMA_VERSION: u32 = 1;
 const MAX_UI_PREFERENCES_BYTES: u64 = 64 * 1024;
@@ -43,6 +44,7 @@ pub struct UiPreferences {
     pub column_rules: BTreeMap<String, ColumnViewRule>,
     pub git_branch_favorites: BTreeMap<String, BTreeSet<String>>,
     pub git_protected_patterns: BTreeMap<String, BTreeSet<String>>,
+    pub tool_policy: ToolPolicy,
 }
 
 impl Default for UiPreferences {
@@ -63,6 +65,7 @@ impl Default for UiPreferences {
             column_rules: BTreeMap::new(),
             git_branch_favorites: BTreeMap::new(),
             git_protected_patterns: BTreeMap::new(),
+            tool_policy: ToolPolicy::default(),
         }
     }
 }
@@ -133,6 +136,8 @@ struct UiPreferencesFile {
     git_branch_favorites: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     git_protected_patterns: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    tool_policy: ToolPolicy,
 }
 
 pub fn load_ui_preferences() -> UiPreferences {
@@ -144,6 +149,15 @@ pub fn load_ui_preferences() -> UiPreferences {
 pub fn save_ui_preferences(preferences: UiPreferences) -> Result<(), String> {
     let path = ui_preferences_path().ok_or_else(|| "无法确定界面配置目录".to_string())?;
     save_ui_preferences_at(&path, preferences)
+}
+
+pub fn record_tool_use(tool_id: &str) {
+    let Some(path) = ui_preferences_path() else {
+        return;
+    };
+    let mut preferences = load_ui_preferences_at(&path).unwrap_or_default();
+    preferences.tool_policy.record_recent(tool_id);
+    let _ = save_ui_preferences_at(&path, preferences);
 }
 
 pub fn save_column_view_rule(path: &Path, rule: ColumnViewRule) -> Result<(), String> {
@@ -305,6 +319,7 @@ fn load_ui_preferences_at(path: &Path) -> Option<UiPreferences> {
         column_rules,
         git_branch_favorites: file.git_branch_favorites,
         git_protected_patterns: file.git_protected_patterns,
+        tool_policy: file.tool_policy,
     })
 }
 
@@ -325,6 +340,7 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
         mut column_rules,
         git_branch_favorites,
         git_protected_patterns,
+        tool_policy,
     } = preferences;
     prune_column_rules(&mut column_rules);
     let file = UiPreferencesFile {
@@ -344,6 +360,7 @@ fn save_ui_preferences_at(path: &Path, preferences: UiPreferences) -> Result<(),
         column_rules,
         git_branch_favorites,
         git_protected_patterns,
+        tool_policy,
     };
     let bytes =
         serde_json::to_vec_pretty(&file).map_err(|error| format!("无法序列化界面配置：{error}"))?;
@@ -463,6 +480,29 @@ mod tests {
         assert!(!preferences.sidebar_visible);
         assert!(!preferences.preview_visible);
         assert!(preferences.column_details_visible);
+        fs::remove_file(path).expect("remove preferences");
+    }
+
+    #[test]
+    fn saves_and_loads_tool_policy_and_recent_tools() {
+        let path = test_path();
+        let mut policy = ToolPolicy::default();
+        policy.set_pinned("editor.vscode", true);
+        policy.set_hidden("diff.meld", true);
+        policy.user_order = vec!["editor.vscode".to_string(), "diff.kdiff3".to_string()];
+        policy.record_recent("editor.vscode");
+        save_ui_preferences_at(
+            &path,
+            UiPreferences {
+                tool_policy: policy.clone(),
+                ..UiPreferences::default()
+            },
+        )
+        .expect("save preferences");
+
+        let loaded = load_ui_preferences_at(&path).expect("load preferences");
+        assert_eq!(loaded.tool_policy, policy);
+        assert_eq!(loaded.tool_policy.recent_tool_ids, vec!["editor.vscode"]);
         fs::remove_file(path).expect("remove preferences");
     }
 

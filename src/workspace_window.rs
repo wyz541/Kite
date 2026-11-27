@@ -29,12 +29,22 @@ pub(crate) struct WorkspaceWindow {
 }
 
 impl WorkspaceWindow {
+    #[allow(dead_code)] // Some feature combinations open directly with a selection.
     pub(crate) fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_selection(root, None, window, cx)
+    }
+
+    pub(crate) fn new_with_selection(
+        root: PathBuf,
+        selected: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             root: root.clone(),
             rows: Vec::new(),
             collapsed: HashSet::new(),
-            selected: None,
+            selected,
             preview: None,
             loading: true,
             message: None,
@@ -47,17 +57,24 @@ impl WorkspaceWindow {
     fn load_tree(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.loading = true;
         let title = format!("Kite 工作区 — {}", root.display());
-        let weak = cx.weak_entity();
-        self._load_task = cx.spawn(async move |_, cx| {
+        self._load_task = cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_spawn(async move { build_tree(&root) }).await;
-            let _ = weak.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 match result {
                     Ok(rows) => {
                         this.rows = rows;
                         this.message = None;
-                        if this.preview.is_none() {
-                            this.selected = None;
+                        if let Some(path) = this.selected.clone() {
+                            if let Some(row) = this.rows.iter().find(|row| row.entry.path == path) {
+                                if row.entry.kind != EntryKind::Directory {
+                                    this.preview = Some(cx.new(|cx| {
+                                        PreviewWindow::new(row.entry.clone(), window, cx)
+                                    }));
+                                }
+                            } else {
+                                this.selected = None;
+                            }
                         }
                     }
                     Err(error) => this.message = Some(error.into()),

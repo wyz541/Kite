@@ -1114,6 +1114,7 @@ private extension KiteGitLogWindowView {
                                 viewModel.detailTab = .files
                             }
                         }
+                        // Auxiliary Surface: Git commit semantics, not file-system targets.
                         .contextMenu {
                             Button("复制完整哈希") {
                                 NSPasteboard.general.clearContents()

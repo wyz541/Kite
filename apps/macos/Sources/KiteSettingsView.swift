@@ -122,6 +122,7 @@ enum KiteSettingsWindowController {
 
 struct KiteSettingsView: View {
     @ObservedObject var model: KiteModel
+    @ObservedObject private var toolPolicy = KiteToolPolicyStore.shared
     @State private var selection: KiteSettingsPane = .general
 
     var body: some View {
@@ -409,6 +410,77 @@ struct KiteSettingsView: View {
                 }
             } footer: {
                 Text("更改后，Finder 和 Kite 会继续处理各自负责的系统请求。")
+            }
+
+            settingsSection("工具") {
+                SettingsCard {
+                    ForEach(Array(KiteToolRegistry.shared.definitions.enumerated()), id: \.element.id) { index, tool in
+                        if index > 0 {
+                            SettingsDivider()
+                        }
+                        SettingsRow(
+                            title: tool.displayName,
+                            detail: "在工具中打开 · \(tool.category)"
+                        ) {
+                            HStack(spacing: 10) {
+                                Toggle(
+                                    "固定",
+                                    isOn: Binding(
+                                        get: { toolPolicy.policy.isPinned(tool.toolID) },
+                                        set: { toolPolicy.setPinned(tool.toolID, pinned: $0) }
+                                    )
+                                )
+                                .toggleStyle(.switch)
+                                .controlSize(.mini)
+                                Toggle(
+                                    "隐藏",
+                                    isOn: Binding(
+                                        get: { toolPolicy.policy.isHidden(tool.toolID) },
+                                        set: { toolPolicy.setHidden(tool.toolID, hidden: $0) }
+                                    )
+                                )
+                                .toggleStyle(.switch)
+                                .controlSize(.mini)
+                                Button {
+                                    toolPolicy.move(
+                                        tool.toolID,
+                                        delta: -1,
+                                        considering: KiteToolRegistry.shared.definitions.map(\.toolID)
+                                    )
+                                } label: {
+                                    Image(systemName: "arrow.up")
+                                }
+                                .buttonStyle(.borderless)
+                                .controlSize(.mini)
+                                Button {
+                                    toolPolicy.move(
+                                        tool.toolID,
+                                        delta: 1,
+                                        considering: KiteToolRegistry.shared.definitions.map(\.toolID)
+                                    )
+                                } label: {
+                                    Image(systemName: "arrow.down")
+                                }
+                                .buttonStyle(.borderless)
+                                .controlSize(.mini)
+                            }
+                        }
+                    }
+                }
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("固定工具优先显示；最近使用只影响工具子菜单，不改变一级菜单顺序。")
+                    HStack(spacing: 8) {
+                        Button("清空最近使用") {
+                            toolPolicy.clearRecent()
+                        }
+                        .controlSize(.mini)
+                        Button("重新发现工具") {
+                            KiteToolCatalogCache.shared.refresh()
+                        }
+                        .controlSize(.mini)
+                    }
+                }
             }
         }
     }

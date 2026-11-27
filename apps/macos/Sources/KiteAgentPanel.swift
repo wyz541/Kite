@@ -176,6 +176,14 @@ final class KiteAgentPanelModel: ObservableObject {
         profile != nil && profileSupportsSession
     }
 
+    var transcriptMessages: [AgentMessage] {
+        restoredMessages
+    }
+
+    var lastSubmittedPrompt: String {
+        sentPrompt
+    }
+
     var statusLabel: String {
         guard let runtimeState else { return phase.label }
         switch runtimeState {
@@ -772,11 +780,7 @@ struct KiteAgentPane: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.06))
                 .frame(height: 0.5)
-            ScrollView {
-                KiteAgentPanelContent(model: model)
-                .padding(12)
-            }
-            .scrollIndicators(.hidden)
+            KiteAgentPanelContent(model: model)
         }
         .frame(width: KiteTheme.agentWidth)
         .frame(maxHeight: .infinity)
@@ -793,6 +797,16 @@ struct KiteAgentPane: View {
                 onAgent: {}
             )
             Spacer(minLength: 4)
+            KiteToolbarIconButton(systemName: "paperclip", title: "添加上下文") {
+                let paths = KitePlatform.chooseContextPaths(prompt: "添加到 Agent 上下文")
+                agent.addPaths(paths)
+            }
+            KiteToolbarIconButton(systemName: "doc.badge.gearshape", title: "审阅结果") {
+                model.presentAgentReviewFile()
+            }
+            KiteToolbarIconButton(systemName: "gearshape", title: "Agent 设置") {
+                KiteSettingsWindowController.open(pane: .agent)
+            }
             KiteToolbarIconButton(
                 systemName: "macwindow.on.rectangle",
                 title: "在独立窗口中打开 Agent"
@@ -927,114 +941,106 @@ private struct KiteAgentPanelContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if agent.hasContext {
-                statusCard
-                contextCard
-                if agent.phase == .unconfigured {
-                    unconfiguredCard
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if agent.hasContext {
+                            outputCard
+                            if !agent.permissionRequests.isEmpty {
+                                permissionCards
+                            }
+                            if agent.phase == .unconfigured {
+                                unconfiguredCard
+                            }
+                            if let error = agent.errorMessage {
+                                errorBanner(error)
+                            }
+                        } else if agent.phase == .error {
+                            errorState
+                        } else {
+                            emptyState
+                        }
+                    }
+                    .padding(16)
                 }
-                if let error = agent.errorMessage {
-                    errorBanner(error)
+                .scrollIndicators(.hidden)
+                .onAppear {
+                    if agent.autoFollow {
+                        proxy.scrollTo("agent-output-bottom", anchor: .bottom)
+                    }
                 }
-                if !agent.output.isEmpty {
-                    outputCard
+                .onChange(of: agent.output) { _ in
+                    guard agent.autoFollow else { return }
+                    withAnimation(.snappy(duration: 0.18)) {
+                        proxy.scrollTo("agent-output-bottom", anchor: .bottom)
+                    }
                 }
-                if !agent.permissionRequests.isEmpty {
-                    permissionCards
-                }
-                promptCard
-            } else if agent.phase == .error {
-                errorState
-            } else {
-                emptyState
+                .background(KiteAgentScrollWheelMonitor {
+                    agent.pauseAutoFollow()
+                })
             }
+            .frame(maxHeight: .infinity)
+            composer
+        }
+    }
+
+    private var composer: some View {
+        VStack(spacing: 10) {
+            contextCard
+            promptCard
+            statusCard
+        }
+        .padding(12)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.06))
+                .frame(height: 0.5)
         }
     }
 
     private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 9) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 30, height: 30)
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(agent.profileName)
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Text("\(agent.modelLabel) · \(agent.permissionLabel)")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 4)
-
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(color(for: agent.phase))
-                        .frame(width: 7, height: 7)
-                    Text(agent.statusLabel)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(color(for: agent.phase))
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("工作目录")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
-                Text(agent.workingDirectoryDisplay)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(agent.workingDirectoryStatus == .invalid ? .red : .secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                if let message = agent.workingDirectoryMessage {
-                    Text(message)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if agent.workingDirectoryStatus == .needsSelection {
-                    Button("选择目录") {
-                        agent.chooseWorkingDirectory()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-
-            if let notice = agent.notice {
-                Text(notice)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-            }
+        HStack(spacing: 7) {
+            Circle()
+                .fill(color(for: agent.phase))
+                .frame(width: 6, height: 6)
+            Text(agent.profileName)
+                .font(.system(size: 9.5, weight: .medium))
+            Text("· \(agent.modelLabel) · \(agent.permissionLabel)")
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 6)
+            Text(agent.workingDirectoryDisplay)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(agent.statusLabel)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(color(for: agent.phase))
         }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.32), in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
-        }
+        .padding(.horizontal, 4)
     }
 
     private var contextCard: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text("上下文")
-                    .font(.system(size: 10, weight: .semibold))
-                Text("\(agent.contextPaths.count) 个")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
-                Spacer()
+        VStack(alignment: .leading, spacing: 7) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    ForEach(Array(agent.contextPaths.enumerated()), id: \.element.id) { index, item in
+                        contextChip(item, index: index + 1)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+
+            HStack(spacing: 10) {
                 Button {
                     let paths = KitePlatform.chooseContextPaths(prompt: "添加到 Agent 上下文")
                     agent.addPaths(paths)
                 } label: {
-                    Label("添加", systemImage: "plus")
-                        .font(.system(size: 10, weight: .medium))
+                    Label("添加上下文", systemImage: "plus")
+                        .font(.system(size: 9.5, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
@@ -1042,53 +1048,47 @@ private struct KiteAgentPanelContent: View {
                 .focused($focusedTarget, equals: .addContext)
                 .accessibilityLabel("添加上下文路径")
                 .accessibilityIdentifier("agent-context-add")
-            }
 
-            ScrollView(.horizontal) {
-                HStack(spacing: 5) {
-                    ForEach(agent.contextPaths) { item in
-                        contextChip(item)
-                    }
-                }
-            }
-            .scrollIndicators(.hidden)
-
-            Toggle(
-                isOn: Binding(
-                    get: { agent.contextMode == .followSelection },
-                    set: { follows in
-                        agent.setFollowSelection(
-                            follows,
-                            entries: model.selectedColumnEntries
-                        )
-                    }
-                )
-            ) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(agent.contextMode.title)
-                        .font(.system(size: 10.5, weight: .medium))
-                    Text(
-                        agent.contextMode == .followSelection
-                            ? "切换目录或选择时先更新上下文；发送前仍需确认。"
-                            : "这份快照不会因切换目录而改变。"
+                Toggle(
+                    isOn: Binding(
+                        get: { agent.contextMode == .followSelection },
+                        set: { follows in
+                            agent.setFollowSelection(
+                                follows,
+                                entries: model.selectedColumnEntries
+                            )
+                        }
                     )
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
+                ) {
+                    Text(agent.contextMode.title)
+                        .font(.system(size: 9.5, weight: .medium))
                 }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .focusable()
+                .focused($focusedTarget, equals: .followSelection)
+                .accessibilityIdentifier("agent-follow-selection")
+
+                Spacer()
+                Text("\(agent.contextPaths.count) 个上下文")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
             }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .focusable()
-            .focused($focusedTarget, equals: .followSelection)
-            .accessibilityIdentifier("agent-follow-selection")
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.24), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func contextChip(_ item: KiteAgentContextPath) -> some View {
+    private func contextChip(_ item: KiteAgentContextPath, index: Int) -> some View {
         let isPrimary = item.path == agent.primaryPath
-        return HStack(spacing: 4) {
+        return HStack(spacing: 5) {
+            Text("\(index)")
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: 18, height: 18)
+                .background(
+                    isPrimary ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06),
+                    in: RoundedRectangle(cornerRadius: 5)
+                )
             Image(systemName: item.isDirectory ? "folder.fill" : "doc.text.fill")
                 .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(.secondary)
@@ -1120,7 +1120,7 @@ private struct KiteAgentPanelContent: View {
             .accessibilityLabel("从上下文移除 \(item.path)")
             .accessibilityIdentifier("agent-context-remove-\(item.path)")
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 7)
         .frame(height: 27)
         .background(
             isPrimary ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.045),
@@ -1133,7 +1133,7 @@ private struct KiteAgentPanelContent: View {
                     lineWidth: 0.6
                 )
         }
-        .frame(maxWidth: 230)
+        .frame(maxWidth: 240)
     }
 
     private var unconfiguredCard: some View {
@@ -1155,12 +1155,10 @@ private struct KiteAgentPanelContent: View {
     }
 
     private var promptCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("发送准备")
-                .font(.system(size: 10, weight: .semibold))
+        VStack(spacing: 8) {
             ZStack(alignment: .topLeading) {
                 if agent.prompt.isEmpty {
-                    Text("添加问题或指令。Enter 发送，Shift+Enter 换行。")
+                    Text("让 Agent 修改代码，使用 @ 引用文件，或输入 / 命令")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .padding(8)
@@ -1205,29 +1203,36 @@ private struct KiteAgentPanelContent: View {
                 }
             )
             .accessibilityLabel("Agent 问题或指令")
-            HStack {
+
+            HStack(spacing: 8) {
                 Button {
                     model.presentAgentReviewFile()
                 } label: {
-                    Label("审阅结果", systemImage: "doc.badge.gearshape")
+                    Image(systemName: "doc.badge.gearshape")
+                        .font(.system(size: 11, weight: .medium))
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.plain)
                 .help("审阅结构化 Agent 结果并确认写入")
                 .focusable()
                 .focused($focusedTarget, equals: .reviewResult)
+                .accessibilityLabel("审阅结果")
                 .accessibilityIdentifier("agent-review-result")
+
                 Button {
                     KiteSettingsWindowController.open(pane: .agent)
                 } label: {
-                    Label("Agent 设置", systemImage: "gearshape")
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 11, weight: .medium))
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.plain)
+                .help("Agent 设置")
                 .focusable()
                 .focused($focusedTarget, equals: .settings)
+                .accessibilityLabel("Agent 设置")
                 .accessibilityIdentifier("agent-settings")
+
                 Spacer()
+
                 if agent.phase == .loading || agent.phase == .running {
                     Button("停止") {
                         agent.cancelTask()
@@ -1248,22 +1253,24 @@ private struct KiteAgentPanelContent: View {
                     .focused($focusedTarget, equals: .retry)
                     .accessibilityIdentifier("agent-retry")
                 }
-                Button("发送") {
+
+                Button {
                     agent.sendPrompt()
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 11, weight: .bold))
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(!agent.canSend)
                 .focusable()
                 .focused($focusedTarget, equals: .send)
+                .accessibilityLabel("发送")
                 .accessibilityIdentifier("agent-send")
             }
-            Text("发送前请确认 Agent、模型、工作目录和权限。Kite 不会自动执行命令或应用修改。")
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.24), in: RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder
@@ -1285,7 +1292,7 @@ private struct KiteAgentPanelContent: View {
                 }
         } else {
             TextField(
-                "添加问题或指令。内容会先停留在 Kite 中。",
+                "让 Agent 修改代码，使用 @ 引用文件，或输入 / 命令",
                 text: $agent.prompt,
                 axis: .vertical
             )
@@ -1300,85 +1307,103 @@ private struct KiteAgentPanelContent: View {
         }
     }
 
+    private var showSubmittedPrompt: Bool {
+        let prompt = agent.lastSubmittedPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return false }
+        return agent.transcriptMessages
+            .last(where: { $0.role == .user })?
+            .content
+            .trimmingCharacters(in: .whitespacesAndNewlines) != prompt
+    }
+
+    private var showCurrentOutput: Bool {
+        let output = agent.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { return false }
+        return agent.transcriptMessages
+            .last(where: { $0.role == .assistant })?
+            .content
+            .trimmingCharacters(in: .whitespacesAndNewlines) != output
+    }
+
     private var outputCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("回答")
-                    .font(.system(size: 10, weight: .semibold))
-                Spacer()
-                Button {
-                    agent.copyOutput()
-                } label: {
-                    Label("复制", systemImage: "doc.on.doc")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-                .focusable()
-                .focused($focusedTarget, equals: .copyOutput)
-                .accessibilityIdentifier("agent-copy-output")
+        VStack(alignment: .leading, spacing: 14) {
+            if showSubmittedPrompt {
+                userBubble(agent.lastSubmittedPrompt)
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Group {
-                        if let rendered = try? AttributedString(
-                            markdown: agent.output,
-                            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-                        ) {
-                            Text(rendered)
-                        } else {
-                            Text(agent.output)
-                        }
-                    }
-                    .font(.system(size: 11))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .id("agent-output-bottom")
-                }
-                .onAppear {
-                    if agent.autoFollow {
-                        proxy.scrollTo("agent-output-bottom", anchor: .bottom)
-                    }
-                }
-                .onChange(of: agent.output) { _ in
-                    guard agent.autoFollow else { return }
-                    withAnimation(.snappy(duration: 0.18)) {
-                        proxy.scrollTo("agent-output-bottom", anchor: .bottom)
-                    }
-                }
-                .background(KiteAgentScrollWheelMonitor {
-                    agent.pauseAutoFollow()
-                })
-                .overlay(alignment: .bottom) {
-                    if !agent.autoFollow {
-                        Button {
-                            agent.resumeAutoFollow()
-                            withAnimation(.snappy(duration: 0.18)) {
-                                proxy.scrollTo("agent-output-bottom", anchor: .bottom)
-                            }
-                        } label: {
-                            Label("回到最新", systemImage: "arrow.down")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .focusable()
-                        .focused($focusedTarget, equals: .resumeFollow)
-                        .accessibilityIdentifier("agent-resume-follow")
-                        .padding(.bottom, 8)
-                    }
-                }
+            ForEach(agent.transcriptMessages, id: \.id) { message in
+                messageBubble(message)
             }
-            .frame(minHeight: 80, maxHeight: 280)
-            .padding(8)
-            .background(
-                Color(nsColor: .controlBackgroundColor).opacity(0.30),
-                in: RoundedRectangle(cornerRadius: 9)
-            )
+            if showCurrentOutput {
+                assistantBubble(agent.output)
+            }
+            if !showSubmittedPrompt && !showCurrentOutput && agent.transcriptMessages.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Text("开始一段新的 Agent 对话")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("输入任务，或使用 @ 引用文件和 / 命令。")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 48)
+            }
         }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .id("agent-output-bottom")
+    }
+
+    @ViewBuilder
+    private func messageBubble(_ message: AgentMessage) -> some View {
+        switch message.role {
+        case .user:
+            userBubble(message.content)
+        case .assistant:
+            assistantBubble(message.content)
+        case .system:
+            Text(message.content)
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private func userBubble(_ content: String) -> some View {
+        HStack {
+            Spacer(minLength: 40)
+            Text(content)
+                .font(.system(size: 11))
+                .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private func assistantBubble(_ content: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 25, height: 25)
+                .background(Color.accentColor.opacity(0.12), in: Circle())
+            Group {
+                if let rendered = try? AttributedString(
+                    markdown: content,
+                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                ) {
+                    Text(rendered)
+                } else {
+                    Text(content)
+                }
+            }
+            .font(.system(size: 11))
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var permissionCards: some View {
@@ -1555,12 +1580,7 @@ struct KiteAgentWindowView: View {
                 .kiteGlass(.panel, cornerRadius: KiteTheme.controlRadius)
                 .padding(12)
 
-                ScrollView {
-                    KiteAgentPanelContent(model: model)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 12)
-                }
-                .scrollIndicators(.hidden)
+                KiteAgentPanelContent(model: model)
             }
         }
         .frame(minWidth: 440, minHeight: 560)

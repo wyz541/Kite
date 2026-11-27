@@ -832,6 +832,7 @@ extension KiteGitBranchesView {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(selected ? Color.accentColor.opacity(0.35) : Color.primary.opacity(0.05), lineWidth: 0.6)
         }
+        // Auxiliary Surface: Git reference semantics, not file-system targets.
         .contextMenu {
             if reference.kind != .worktree {
                 Button("检出") { checkout(reference) }

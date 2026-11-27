@@ -100,8 +100,14 @@ impl FileTableDelegate {
             self.git_available,
             self.svn_available,
         );
+        let surface = if self.active_query.is_some() {
+            kite_core::context_menu_model::ContextSurface::SearchResults
+        } else {
+            kite_core::context_menu_model::ContextSurface::Background
+        };
         ContextMenuTarget::directory(self.working_directory.clone(), title, capabilities)
             .with_agent_available(self.agent_available)
+            .with_surface(surface)
     }
 
     pub fn clear_entries(&mut self) {
@@ -222,7 +228,12 @@ impl TableDelegate for FileTableDelegate {
             self.working_directory.clone(),
             capabilities,
         )
-        .with_agent_available(self.agent_available);
+        .with_agent_available(self.agent_available)
+        .with_surface(if self.active_query.is_some() {
+            kite_core::context_menu_model::ContextSurface::SearchResults
+        } else {
+            kite_core::context_menu_model::ContextSurface::BrowserList
+        });
         let action_context = cx.entity().read(cx).focus_handle(cx);
         render_context_menu(menu, &target, action_context, window, cx)
     }
@@ -611,5 +622,7 @@ mod tests {
         assert!(target.supports_rename);
         assert!(target.supports_delete);
         assert!(target.supports_favorite);
+        assert!(target.paths.is_empty());
+        assert!(target.container_is_primary_target);
     }
 }

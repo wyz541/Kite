@@ -13,7 +13,8 @@ use windows::Win32::System::Com::{
     CoUninitialize, IBindCtx,
 };
 use windows::Win32::System::SystemServices::{
-    SFGAO_CANDELETE, SFGAO_CANMOVE, SFGAO_CANRENAME, SFGAO_FOLDER,
+    SFGAO_CANCOPY, SFGAO_CANDELETE, SFGAO_CANMOVE, SFGAO_CANRENAME, SFGAO_FOLDER,
+    SFGAO_HASPROPSHEET, SFGAO_STREAM,
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FILEOPERATION_FLAGS, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI,
@@ -27,8 +28,25 @@ use windows::core::{PCWSTR, PWSTR};
 
 type ItemCapabilities = (bool, bool, bool);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ShellCapabilitySnapshot {
+    pub exists: bool,
+    pub readable: bool,
+    pub is_container: bool,
+    pub can_copy: bool,
+    pub can_copy_path: bool,
+    pub can_paste: bool,
+    pub can_create: bool,
+    pub can_move: bool,
+    pub can_rename: bool,
+    pub can_delete: bool,
+    pub can_properties: bool,
+}
+
 static DISPLAY_NAME_CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
 static ITEM_CAPABILITY_CACHE: OnceLock<Mutex<HashMap<PathBuf, ItemCapabilities>>> = OnceLock::new();
+static SHELL_CAPABILITY_CACHE: OnceLock<Mutex<HashMap<PathBuf, ShellCapabilitySnapshot>>> =
+    OnceLock::new();
 
 fn display_name_cache() -> &'static Mutex<HashMap<PathBuf, String>> {
     DISPLAY_NAME_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -38,12 +56,20 @@ fn item_capability_cache() -> &'static Mutex<HashMap<PathBuf, ItemCapabilities>>
     ITEM_CAPABILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn shell_capability_cache() -> &'static Mutex<HashMap<PathBuf, ShellCapabilitySnapshot>> {
+    SHELL_CAPABILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub(crate) fn clear_shell_caches() {
     display_name_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
     item_capability_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    shell_capability_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
@@ -96,6 +122,44 @@ fn item_capabilities_for(item: &IShellItem) -> Option<ItemCapabilities> {
     ))
 }
 
+fn capability_snapshot_for(
+    item: &IShellItem,
+    locator_is_namespace: bool,
+) -> Option<ShellCapabilitySnapshot> {
+    let attributes = unsafe {
+        item.GetAttributes(
+            SFGAO_CANCOPY
+                | SFGAO_CANMOVE
+                | SFGAO_CANRENAME
+                | SFGAO_CANDELETE
+                | SFGAO_FOLDER
+                | SFGAO_STREAM
+                | SFGAO_HASPROPSHEET,
+        )
+    }
+    .ok()?;
+    let has =
+        |flag: windows::Win32::System::SystemServices::SFGAO_FLAGS| attributes.0 & flag.0 != 0;
+    let is_container = has(SFGAO_FOLDER);
+    let can_copy = has(SFGAO_CANCOPY);
+    let can_move = has(SFGAO_CANMOVE);
+    let can_rename = has(SFGAO_CANRENAME);
+    let can_delete = has(SFGAO_CANDELETE);
+    Some(ShellCapabilitySnapshot {
+        exists: true,
+        readable: can_copy || has(SFGAO_STREAM),
+        is_container,
+        can_copy,
+        can_copy_path: locator_is_namespace,
+        can_paste: is_container && (can_copy || can_move),
+        can_create: is_container && (can_copy || can_move),
+        can_move,
+        can_rename,
+        can_delete,
+        can_properties: has(SFGAO_HASPROPSHEET),
+    })
+}
+
 fn prime_shell_metadata(path: &Path, item: &IShellItem) {
     if let Some(name) =
         display_name_for_item(item, SIGDN_NORMALDISPLAY).filter(|value| !value.is_empty())
@@ -121,6 +185,44 @@ pub(crate) fn item_capabilities(path: &Path) -> ItemCapabilities {
         let item = resolve_item(path).ok()?;
         item_capabilities_for(&item)
     })
+}
+
+pub(crate) fn capability_snapshot(path: &Path) -> ShellCapabilitySnapshot {
+    if let Some(snapshot) = shell_capability_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .copied()
+    {
+        return snapshot;
+    }
+    let snapshot = (|| {
+        let _com = ComGuard::new().ok()?;
+        let item = resolve_item(path).ok()?;
+        capability_snapshot_for(&item, is_shell_namespace_path(path))
+    })()
+    .unwrap_or_default();
+    shell_capability_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_path_buf(), snapshot);
+    snapshot
+}
+
+pub(crate) fn exists(path: &Path) -> bool {
+    if is_shell_namespace_path(path) {
+        capability_snapshot(path).exists
+    } else {
+        path.exists()
+    }
+}
+
+pub(crate) fn is_readable(path: &Path) -> bool {
+    if is_shell_namespace_path(path) {
+        capability_snapshot(path).readable
+    } else {
+        path.is_dir() || std::fs::File::open(path).is_ok()
+    }
 }
 
 pub(crate) fn can_rename_item(path: &Path) -> bool {

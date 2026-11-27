@@ -84,15 +84,15 @@ struct KiteSidebar: View {
                 }
                 .contextMenu {
                     if let path = location.path {
-                        Button("打开") {
-                            model.loadRoot(path)
-                        }
-                        Button("在 Finder 中显示") {
-                            KitePlatform.revealInFinder(path)
-                        }
-                        Button("显示简介") {
-                            KitePlatform.showInfo(path)
-                        }
+                        KiteContextMenuView(
+                            model: model,
+                            target: .sidebar(
+                                path: path,
+                                name: location.title,
+                                isDirectory: true,
+                                surface: .sidebarLocations
+                            )
+                        )
                     }
                 }
             }
@@ -129,22 +129,15 @@ struct KiteSidebar: View {
                         model.openFavorite(favorite)
                     }
                     .contextMenu {
-                        Button("打开") {
-                            model.openFavorite(favorite)
-                        }
-                        Button("在 Finder 中显示") {
-                            KitePlatform.revealInFinder(favorite.path)
-                        }
-                        Button("显示简介") {
-                            KitePlatform.showInfo(favorite.path)
-                        }
-                        Button("拷贝路径") {
-                            KitePlatform.copyPath(favorite.path)
-                        }
-                        Divider()
-                        Button("从收藏移除") {
-                            model.removeFavorite(favorite)
-                        }
+                        KiteContextMenuView(
+                            model: model,
+                            target: .sidebar(
+                                path: favorite.path,
+                                name: favorite.name,
+                                isDirectory: favorite.isDirectory,
+                                surface: .sidebarFavorites
+                            )
+                        )
                     }
                 }
             }
@@ -217,7 +210,7 @@ struct KiteSidebar: View {
                     .padding(.vertical, 6)
             } else {
                 ForEach(visibleVolumes, id: \.path) { volume in
-                    KiteVolumeRow(volume: volume, isSelected: isCurrent(volume.path)) {
+                    KiteVolumeRow(model: model, volume: volume, isSelected: isCurrent(volume.path)) {
                         model.loadRoot(volume.path)
                     }
                 }
@@ -317,6 +310,7 @@ private struct KiteSidebarRow: View {
 }
 
 private struct KiteVolumeRow: View {
+    @ObservedObject var model: KiteModel
     let volume: VolumeDto
     let isSelected: Bool
     let action: () -> Void
@@ -377,9 +371,15 @@ private struct KiteVolumeRow: View {
         .help(volume.path)
         .accessibilityLabel(title)
         .contextMenu {
-            Button("打开") { action() }
-            Button("在 Finder 中显示") { KitePlatform.revealInFinder(volume.path) }
-            Button("显示简介") { KitePlatform.showInfo(volume.path) }
+            KiteContextMenuView(
+                model: model,
+                target: .sidebar(
+                    path: volume.path,
+                    name: title,
+                    isDirectory: true,
+                    surface: .sidebarVolumes
+                )
+            )
         }
     }
 

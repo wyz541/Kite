@@ -8,12 +8,13 @@ use futures_channel::oneshot;
 use gpui_kit::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::System::Com::IBindCtx;
+use windows::Win32::System::Com::{CoTaskMemFree, IBindCtx};
 use windows::Win32::UI::Shell::{
     BHID_SFUIObject, CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
     CMINVOKECOMMANDINFOEX, DefSubclassProc, IContextMenu, IContextMenu2, IContextMenu3, IShellItem,
-    IShellItemArray, RemoveWindowSubclass, SHCreateItemFromParsingName,
-    SHCreateShellItemArrayFromShellItem, SHOP_FILEPATH, SHObjectProperties, SetWindowSubclass,
+    IShellItemArray, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OPENASINFO, RemoveWindowSubclass,
+    SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject,
+    SHOP_FILEPATH, SHObjectProperties, SHOpenWithDialog, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HMENU, PostMessageW,
@@ -27,15 +28,26 @@ const ID_FIRST: u32 = 1;
 const ID_LAST: u32 = 0x7FFF;
 const MENU_SUBCLASS_ID: usize = 0x4B49_5445;
 const DEFERRED_MENU_SUBCLASS_ID: usize = 0x4B49_5446;
+const DEFERRED_OPEN_WITH_SUBCLASS_ID: usize = 0x4B49_5447;
 const WM_KITE_SYSTEM_MENU: u32 = WM_APP + 0x4B;
+const WM_KITE_OPEN_WITH_DIALOG: u32 = WM_APP + 0x4C;
+const HRESULT_CANCELLED: i32 = 0x8007_04C7u32 as i32;
 
 struct PendingSystemMenu {
+    hwnd: isize,
+    paths: Vec<PathBuf>,
+    sender: oneshot::Sender<Result<bool, String>>,
+}
+
+static PENDING_SYSTEM_MENU: Mutex<Option<PendingSystemMenu>> = Mutex::new(None);
+
+struct PendingOpenWithDialog {
     hwnd: isize,
     path: PathBuf,
     sender: oneshot::Sender<Result<bool, String>>,
 }
 
-static PENDING_SYSTEM_MENU: Mutex<Option<PendingSystemMenu>> = Mutex::new(None);
+static PENDING_OPEN_WITH_DIALOG: Mutex<Option<PendingOpenWithDialog>> = Mutex::new(None);
 
 struct ShellMenuHook {
     menu2: Option<IContextMenu2>,
@@ -68,8 +80,11 @@ impl Drop for MenuGuard {
 
 pub(crate) fn request_system_menu(
     window: &Window,
-    path: &Path,
+    paths: &[PathBuf],
 ) -> Result<oneshot::Receiver<Result<bool, String>>, String> {
+    if paths.is_empty() {
+        return Err("没有可交给 Windows 原生菜单的目标".to_string());
+    }
     let hwnd = window_hwnd(window)?;
     let (sender, receiver) = oneshot::channel();
     {
@@ -81,7 +96,7 @@ pub(crate) fn request_system_menu(
         }
         *pending = Some(PendingSystemMenu {
             hwnd: hwnd.0 as isize,
-            path: path.to_path_buf(),
+            paths: paths.to_vec(),
             sender,
         });
     }
@@ -117,6 +132,57 @@ pub(crate) fn request_system_menu(
     Ok(receiver)
 }
 
+pub(crate) fn request_open_with_dialog(
+    window: &Window,
+    path: &Path,
+) -> Result<oneshot::Receiver<Result<bool, String>>, String> {
+    let hwnd = window_hwnd(window)?;
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut pending = PENDING_OPEN_WITH_DIALOG
+            .lock()
+            .map_err(|_| "无法锁定 Windows 打开方式状态".to_string())?;
+        if pending.is_some() {
+            return Err("Windows 打开方式对话框正在显示".to_string());
+        }
+        *pending = Some(PendingOpenWithDialog {
+            hwnd: hwnd.0 as isize,
+            path: path.to_path_buf(),
+            sender,
+        });
+    }
+
+    if !unsafe {
+        SetWindowSubclass(
+            hwnd,
+            Some(deferred_menu_subclass_proc),
+            DEFERRED_OPEN_WITH_SUBCLASS_ID,
+            0,
+        )
+    }
+    .as_bool()
+    {
+        clear_pending_open_with_dialog(hwnd);
+        return Err("无法安装 Windows 打开方式调度钩子".to_string());
+    }
+
+    if let Err(error) =
+        unsafe { PostMessageW(Some(hwnd), WM_KITE_OPEN_WITH_DIALOG, WPARAM(0), LPARAM(0)) }
+    {
+        unsafe {
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(deferred_menu_subclass_proc),
+                DEFERRED_OPEN_WITH_SUBCLASS_ID,
+            );
+        }
+        clear_pending_open_with_dialog(hwnd);
+        return Err(format!("无法调度 Windows 打开方式对话框：{error}"));
+    }
+
+    Ok(receiver)
+}
+
 pub(crate) fn show_properties(window: &Window, path: &Path) -> Result<(), String> {
     let hwnd = window_hwnd(window)?;
     let file = path
@@ -142,6 +208,34 @@ pub(crate) fn show_properties(window: &Window, path: &Path) -> Result<(), String
     }
 }
 
+fn clear_pending_open_with_dialog(hwnd: HWND) {
+    if let Ok(mut pending) = PENDING_OPEN_WITH_DIALOG.lock()
+        && pending
+            .as_ref()
+            .is_some_and(|request| request.hwnd == hwnd.0 as isize)
+    {
+        pending.take();
+    }
+}
+
+fn show_open_with_dialog_for_hwnd(hwnd: HWND, path: &Path) -> Result<bool, String> {
+    let file = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let info = OPENASINFO {
+        pcszFile: PCWSTR(file.as_ptr()),
+        pcszClass: PCWSTR::null(),
+        oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
+    };
+    match unsafe { SHOpenWithDialog(Some(hwnd), &info) } {
+        Ok(()) => Ok(true),
+        Err(error) if error.code().0 == HRESULT_CANCELLED => Ok(false),
+        Err(error) => Err(format!("无法显示 Windows“打开方式”对话框：{error}")),
+    }
+}
+
 fn clear_pending_system_menu(hwnd: HWND) {
     if let Ok(mut pending) = PENDING_SYSTEM_MENU.lock()
         && pending
@@ -152,19 +246,35 @@ fn clear_pending_system_menu(hwnd: HWND) {
     }
 }
 
-fn show_native_context_menu_for_hwnd(hwnd: HWND, path: &Path) -> Result<bool, String> {
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-
+fn show_native_context_menu_for_hwnd(hwnd: HWND, paths: &[PathBuf]) -> Result<bool, String> {
+    if paths.is_empty() {
+        return Err("没有可交给 Windows 原生菜单的目标".to_string());
+    }
     unsafe {
-        let item: IShellItem =
-            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>)
-                .map_err(|error| format!("无法读取 Windows Shell 项目：{error}"))?;
-        let items: IShellItemArray = SHCreateShellItemArrayFromShellItem(&item)
-            .map_err(|error| format!("无法创建 Windows Shell 项目数组：{error}"))?;
+        let mut pidls = Vec::with_capacity(paths.len());
+        for path in paths {
+            let wide = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let item: IShellItem =
+                SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>)
+                    .map_err(|error| format!("无法读取 Windows Shell 项目：{error}"))?;
+            let pidl = SHGetIDListFromObject(&item)
+                .map_err(|error| format!("无法读取 Windows Shell 项目 ID：{error}"))?;
+            pidls.push(pidl);
+        }
+        let pidl_refs = pidls
+            .iter()
+            .map(|pidl| *pidl as *const _)
+            .collect::<Vec<_>>();
+        let items_result = SHCreateShellItemArrayFromIDLists(&pidl_refs);
+        for pidl in pidls {
+            CoTaskMemFree(Some(pidl as *const c_void));
+        }
+        let items: IShellItemArray =
+            items_result.map_err(|error| format!("无法创建 Windows Shell 项目数组：{error}"))?;
         let menu: IContextMenu = items
             .BindToHandler(None::<&IBindCtx>, &BHID_SFUIObject)
             .map_err(|error| format!("无法读取 Windows 右键菜单：{error}"))?;
@@ -270,7 +380,28 @@ unsafe extern "system" fn deferred_menu_subclass_proc(
         if let Some(pending) = pending
             && pending.hwnd == hwnd.0 as isize
         {
-            let result = show_native_context_menu_for_hwnd(hwnd, &pending.path);
+            let result = show_native_context_menu_for_hwnd(hwnd, &pending.paths);
+            let _ = pending.sender.send(result);
+        }
+        return LRESULT(0);
+    }
+
+    if message == WM_KITE_OPEN_WITH_DIALOG {
+        let pending = PENDING_OPEN_WITH_DIALOG
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take());
+        unsafe {
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(deferred_menu_subclass_proc),
+                DEFERRED_OPEN_WITH_SUBCLASS_ID,
+            );
+        }
+        if let Some(pending) = pending
+            && pending.hwnd == hwnd.0 as isize
+        {
+            let result = show_open_with_dialog_for_hwnd(hwnd, &pending.path);
             let _ = pending.sender.send(result);
         }
         return LRESULT(0);
@@ -278,6 +409,7 @@ unsafe extern "system" fn deferred_menu_subclass_proc(
 
     if message == WM_NCDESTROY {
         clear_pending_system_menu(hwnd);
+        clear_pending_open_with_dialog(hwnd);
         unsafe {
             let _ = RemoveWindowSubclass(
                 hwnd,
@@ -371,8 +503,10 @@ mod tests {
             let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
             let _ = SetWindowSubclass(hwnd, Some(dismiss_menu_proc), TEST_SUBCLASS_ID, 0);
             let _ = SetTimer(Some(hwnd), TEST_TIMER_ID, 500, None);
-            let result =
-                show_native_context_menu_for_hwnd(hwnd, Path::new(env!("CARGO_MANIFEST_DIR")));
+            let result = show_native_context_menu_for_hwnd(
+                hwnd,
+                &[PathBuf::from(env!("CARGO_MANIFEST_DIR"))],
+            );
             let _ = RemoveWindowSubclass(hwnd, Some(dismiss_menu_proc), TEST_SUBCLASS_ID);
             let _ = DestroyWindow(hwnd);
             assert!(result.is_ok(), "{result:?}");

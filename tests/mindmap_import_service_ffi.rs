@@ -49,19 +49,30 @@ fn format_catalog_and_detection_match_supported_adapters() {
     assert!(ids.contains(&"html"));
     assert!(ids.contains(&"opml"));
 
-    let markdown = detect_mindmap_import_source("/tmp/a.MD".to_string()).expect("markdown");
+    let markdown_path = std::env::temp_dir().join("a.MD");
+    let markdown = detect_mindmap_import_source(markdown_path.to_string_lossy().into_owned())
+        .expect("markdown");
     assert_eq!(markdown.format.id, "markdown");
     assert!(markdown.format.supported);
-    assert_eq!(markdown.default_output_path, "/tmp/a.xmind");
+    assert_eq!(
+        Path::new(&markdown.default_output_path),
+        markdown_path.with_extension("xmind")
+    );
 
-    let text = detect_mindmap_import_source("/tmp/notes.txt".to_string()).expect("text");
+    let text_path = std::env::temp_dir().join("notes.txt");
+    let text =
+        detect_mindmap_import_source(text_path.to_string_lossy().into_owned()).expect("text");
     assert_eq!(text.format.id, "text");
     assert!(text.format.supported);
 
-    let pdf = detect_mindmap_import_source("/tmp/report.pdf".to_string()).expect("pdf known");
+    let pdf_path = std::env::temp_dir().join("report.pdf");
+    let pdf =
+        detect_mindmap_import_source(pdf_path.to_string_lossy().into_owned()).expect("pdf known");
     assert!(!pdf.format.supported);
-    assert!(detect_mindmap_import_source("/tmp/map.xmind".to_string()).is_none());
-    assert!(detect_mindmap_import_source("/tmp/unknown.bin".to_string()).is_none());
+    for unsupported in ["map.xmind", "unknown.bin"] {
+        let path = std::env::temp_dir().join(unsupported);
+        assert!(detect_mindmap_import_source(path.to_string_lossy().into_owned()).is_none());
+    }
 }
 
 #[test]
