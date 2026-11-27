@@ -258,6 +258,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
         .frame(height: KiteTheme.toolbarControlHeight)
         .kiteGlass(.panel, cornerRadius: KiteTheme.controlRadius)
+        // Auxiliary Surface: path-bar editing and location actions are not file targets.
         .contextMenu {
             Button("编辑路径") { beginAddressEditing() }
             Button("拷贝当前路径") { KitePlatform.copyPath(model.currentPath) }
@@ -670,6 +671,7 @@ private struct KiteTabItem: View {
         }
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .onHover { isHovering = $0 }
+        // Auxiliary Surface: tab controls remain separate from the file context Composer.
         .contextMenu {
             Button("关闭页签") { model.closeTab(id: tab.id) }
                 .disabled(!model.canCloseTab)

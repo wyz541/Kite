@@ -32,6 +32,8 @@ struct KitePreviewPane: View {
 
     private var header: some View {
         KitePreviewHeader(
+            model: model,
+            entry: entry,
             onCopy: {
                 KitePlatform.copyText(previewInfoText)
             },
@@ -231,6 +233,8 @@ struct KitePreviewEmptyPane: View {
 }
 
 private struct KitePreviewHeader: View {
+    var model: KiteModel? = nil
+    var entry: BrowserEntry? = nil
     var onCopy: (() -> Void)?
     let onShowAgent: () -> Void
     let onClose: () -> Void
@@ -255,6 +259,21 @@ private struct KitePreviewHeader: View {
                     title: "复制预览信息",
                     action: onCopy
                 )
+            }
+
+            if let model, let entry {
+                Menu {
+                    KiteContextMenuView(model: model, target: .preview(entry))
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("更多预览选项")
+                .accessibilityLabel("更多预览选项")
             }
 
             KiteToolbarIconButton(

@@ -11,12 +11,6 @@ enum KitePlatform {
     static let fileDragContentType = KiteFileDragProvider.contentType
 
     static func open(_ path: String) {
-        if isMindmapFile(path) {
-            Task { @MainActor in
-                KiteMindmapWindowController.open(path: path)
-            }
-            return
-        }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
@@ -78,7 +72,14 @@ enum KitePlatform {
     }
 
     static func revealInFinder(_ path: String) {
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        revealInFinder([path])
+    }
+
+    static func revealInFinder(_ paths: [String]) {
+        guard !paths.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(
+            paths.map { URL(fileURLWithPath: $0) }
+        )
     }
 
     @MainActor

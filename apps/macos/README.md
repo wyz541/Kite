@@ -57,8 +57,8 @@ The build script creates `apps/macos/build/Kite.app`.
 - macOS 13 through 15 material fallback.
 - Native settings window with General, Appearance, Layout, File Handling, Updates, and About panes.
 - AppKit workspace actions.
-- File-row and column-directory context menus.
-- Refresh-first file and directory context menus.
+- One canonical Rust-composed plan for file, directory, and search-result context menus.
+- Context-menu providers declare actions only; grouping, ordering, visibility, risk, and native fallback are centralized.
 - ZIP and TAR.GZ compression and extraction.
 - LaunchServices folder-opener selection.
 - Folder open requests from Finder or other apps.

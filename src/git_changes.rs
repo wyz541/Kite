@@ -15,7 +15,7 @@ use std::process::{Command, Output, Stdio};
 use std::os::windows::process::CommandExt;
 
 use crate::fs::VcsStatus;
-use crate::git::GitOperationState;
+use crate::git::{GitHead, GitOperationState, GitRepository};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -68,6 +68,9 @@ pub struct GitRepositoryChanges {
     pub repository_root: PathBuf,
     pub branch: Option<String>,
     pub head_short_hash: Option<String>,
+    /// Structured HEAD state from the same status snapshot. Detached and unborn
+    /// HEAD must stay distinct from an ordinary branch with an empty name.
+    pub head: Option<GitHead>,
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
@@ -180,7 +183,33 @@ pub fn repository_changes(
     include_ignored: bool,
 ) -> Result<GitRepositoryChanges, String> {
     let repository = resolve_repository(path)?;
-    let mut command = git_command(&repository.root);
+    repository_changes_inner(&repository.root, &repository.git_dir, include_ignored, true)
+        .map(|(changes, _raw_status)| changes)
+}
+
+/// Loads menu state for a repository that has already been discovered. This
+/// intentionally skips auxiliary config/diff/log probes: opening a menu should
+/// cost one `git status --porcelain=v2` process and retain its raw bytes for
+/// stale-write revalidation.
+pub(crate) fn repository_changes_for_menu(
+    repository: &GitRepository,
+    include_ignored: bool,
+) -> Result<(GitRepositoryChanges, Vec<u8>), String> {
+    repository_changes_inner(
+        &repository.work_tree,
+        &repository.git_dir,
+        include_ignored,
+        false,
+    )
+}
+
+fn repository_changes_inner(
+    repository_root: &Path,
+    git_dir: &Path,
+    include_ignored: bool,
+    include_warnings: bool,
+) -> Result<(GitRepositoryChanges, Vec<u8>), String> {
+    let mut command = git_command(repository_root);
     command.args([
         "status",
         "--porcelain=v2",
@@ -197,7 +226,8 @@ pub fn repository_changes(
         return Err(output_error(&output));
     }
 
-    let (branch, mut files) = parse_status_v2(&output.stdout, include_ignored);
+    let (mut branch, mut files) = parse_status_v2(&output.stdout, include_ignored);
+    branch.finish_head();
     files.sort_by(|left, right| {
         left.group
             .order()
@@ -205,19 +235,24 @@ pub fn repository_changes(
             .then_with(|| left.path.cmp(&right.path))
     });
 
-    let crlf_warning = core_autocrlf_warning(&repository.root);
-    Ok(GitRepositoryChanges {
-        repository_root: repository.root,
+    let crlf_warning = include_warnings
+        .then(|| core_autocrlf_warning(repository_root))
+        .flatten();
+    let raw_status = output.stdout;
+    let changes = GitRepositoryChanges {
+        repository_root: repository_root.to_path_buf(),
+        head: branch.head.clone(),
         branch: branch.branch,
         head_short_hash: branch.head_short_hash,
         upstream: branch.upstream,
         ahead: branch.ahead,
         behind: branch.behind,
-        operation: operation_state(&repository.git_dir),
+        operation: operation_state(git_dir),
         files,
         crlf_warning,
         includes_ignored: include_ignored,
-    })
+    };
+    Ok((changes, raw_status))
 }
 
 /// Loads a structured diff for one path. Untracked paths receive a synthetic
@@ -624,9 +659,12 @@ struct StatusEntry {
 struct StatusBranch {
     branch: Option<String>,
     head_short_hash: Option<String>,
+    head_oid: Option<String>,
+    detached: bool,
     upstream: Option<String>,
     ahead: u32,
     behind: u32,
+    head: Option<GitHead>,
 }
 
 impl StatusEntry {
@@ -773,10 +811,13 @@ fn apply_branch_header(header: &str, branch: &mut StatusBranch) {
     if let Some(oid) = header.strip_prefix("branch.oid ") {
         if oid != "(initial)" {
             branch.head_short_hash = Some(oid.chars().take(7).collect());
+            branch.head_oid = Some(oid.to_string());
         }
     } else if let Some(head) = header.strip_prefix("branch.head ") {
         if head != "(detached)" {
             branch.branch = Some(head.to_string());
+        } else {
+            branch.detached = true;
         }
     } else if let Some(value) = header.strip_prefix("branch.upstream ") {
         branch.upstream = Some(value.to_string());
@@ -788,6 +829,25 @@ fn apply_branch_header(header: &str, branch: &mut StatusBranch) {
                 branch.behind = value.parse().unwrap_or(0);
             }
         }
+    }
+}
+
+impl StatusBranch {
+    fn finish_head(&mut self) {
+        self.head = if self.detached {
+            self.head_oid.clone().map(|oid| GitHead::Detached { oid })
+        } else if let Some(name) = self.branch.clone() {
+            if let Some(oid) = self.head_oid.clone() {
+                Some(GitHead::Branch {
+                    name,
+                    oid: Some(oid),
+                })
+            } else {
+                Some(GitHead::Unborn { name })
+            }
+        } else {
+            None
+        };
     }
 }
 
