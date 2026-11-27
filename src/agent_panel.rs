@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::actions::{AgentPromptFocusNext, AgentPromptFocusPrev};
 use crate::app::KiteApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -1541,11 +1542,23 @@ impl AgentPanel {
             .gap_2()
             .child(div().text_xs().font_semibold().child("发送准备"))
             .child(
-                Textarea::new(&self.prompt_input)
-                    .h(px(92.))
-                    .w_full()
-                    .appearance(true)
-                    .bordered(true),
+                div()
+                    .key_context("AgentPrompt")
+                    .on_action(cx.listener(|_, _: &AgentPromptFocusNext, window, cx| {
+                        window.focus_next(cx);
+                    }))
+                    .on_action(cx.listener(|_, _: &AgentPromptFocusPrev, window, cx| {
+                        window.focus_prev(cx);
+                    }))
+                    .child(
+                        Textarea::new(&self.prompt_input)
+                            .h(px(92.))
+                            .w_full()
+                            .appearance(true)
+                            .bordered(true)
+                            .accessibility_id("agent-prompt-input")
+                            .aria_label("Agent 问题或指令"),
+                    ),
             )
             .child(
                 h_flex()

@@ -807,9 +807,124 @@ struct KiteAgentPane: View {
     }
 }
 
+private struct KiteAgentKeyboardMonitor: NSViewRepresentable {
+    let onKey: (UInt16, NSEvent.ModifierFlags) -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onKey: onKey)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onKey = onKey
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    final class Coordinator {
+        var onKey: (UInt16, NSEvent.ModifierFlags) -> Bool
+        private var monitor: Any?
+
+        init(onKey: @escaping (UInt16, NSEvent.ModifierFlags) -> Bool) {
+            self.onKey = onKey
+        }
+
+        func install() {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, [36, 48, 49].contains(event.keyCode) else {
+                    return event
+                }
+                return self.onKey(event.keyCode, event.modifierFlags) ? nil : event
+            }
+        }
+
+        func remove() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+    }
+}
+
+@MainActor
+private final class KiteAgentKeyboardFocus: ObservableObject {
+    @Published var target: KiteAgentFocusTarget?
+}
+
+private enum KiteAgentFocusTarget: Hashable {
+    case prompt
+    case contextReveal(String)
+    case contextRemove(String)
+    case addContext
+    case followSelection
+    case copyOutput
+    case resumeFollow
+    case permission(String, String)
+    case reviewResult
+    case settings
+    case stop
+    case retry
+    case send
+}
+
 private struct KiteAgentPanelContent: View {
     @ObservedObject var model: KiteModel
     @EnvironmentObject private var agent: KiteAgentPanelModel
+    @FocusState private var focusedTarget: KiteAgentFocusTarget?
+    @StateObject private var keyboardFocus = KiteAgentKeyboardFocus()
+
+    private var focusTargets: [KiteAgentFocusTarget] {
+        var targets: [KiteAgentFocusTarget] = []
+        for item in agent.contextPaths {
+            targets.append(.contextReveal(item.path))
+            targets.append(.contextRemove(item.path))
+        }
+        targets.append(.addContext)
+        targets.append(.followSelection)
+        if !agent.output.isEmpty {
+            targets.append(.copyOutput)
+            if !agent.autoFollow {
+                targets.append(.resumeFollow)
+            }
+        }
+        for request in agent.permissionRequests {
+            for action in KiteAgentPermissionPresentation.actions(for: request) where action.enabled {
+                targets.append(.permission(request.requestId, action.id))
+            }
+        }
+        targets.append(.prompt)
+        targets.append(.reviewResult)
+        targets.append(.settings)
+        if agent.phase == .loading || agent.phase == .running {
+            targets.append(.stop)
+        } else if agent.canRetry {
+            targets.append(.retry)
+        }
+        if agent.canSend {
+            targets.append(.send)
+        }
+        return targets
+    }
+
+    private func moveFocus(from target: KiteAgentFocusTarget, forward: Bool) {
+        let targets = focusTargets
+        guard !targets.isEmpty else { return }
+        let current = targets.firstIndex(of: target) ?? (forward ? -1 : 0)
+        let next = forward
+            ? (current + 1 + targets.count) % targets.count
+            : (current - 1 + targets.count) % targets.count
+        let target = targets[next]
+        DispatchQueue.main.async {
+            focusedTarget = target
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -923,7 +1038,10 @@ private struct KiteAgentPanelContent: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
+                .focusable()
+                .focused($focusedTarget, equals: .addContext)
                 .accessibilityLabel("添加上下文路径")
+                .accessibilityIdentifier("agent-context-add")
             }
 
             ScrollView(.horizontal) {
@@ -960,6 +1078,9 @@ private struct KiteAgentPanelContent: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
+            .focusable()
+            .focused($focusedTarget, equals: .followSelection)
+            .accessibilityIdentifier("agent-follow-selection")
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
@@ -981,7 +1102,10 @@ private struct KiteAgentPanelContent: View {
             }
             .buttonStyle(.plain)
             .help(item.path)
+            .focusable()
+            .focused($focusedTarget, equals: .contextReveal(item.path))
             .accessibilityLabel("定位 \(item.path)")
+            .accessibilityIdentifier("agent-context-reveal-\(item.path)")
             Button {
                 agent.removePath(item.path)
             } label: {
@@ -991,7 +1115,10 @@ private struct KiteAgentPanelContent: View {
             .buttonStyle(.plain)
             .foregroundStyle(.tertiary)
             .help("从上下文移除")
+            .focusable()
+            .focused($focusedTarget, equals: .contextRemove(item.path))
             .accessibilityLabel("从上下文移除 \(item.path)")
+            .accessibilityIdentifier("agent-context-remove-\(item.path)")
         }
         .padding(.horizontal, 8)
         .frame(height: 27)
@@ -1043,6 +1170,40 @@ private struct KiteAgentPanelContent: View {
             }
             .padding(2)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+            .onChange(of: focusedTarget) { keyboardFocus.target = $0 }
+            .background(
+                KiteAgentKeyboardMonitor { keyCode, modifiers in
+                    switch keyCode {
+                    case 48:
+                        guard let target = keyboardFocus.target else { return false }
+                        moveFocus(from: target, forward: !modifiers.contains(.shift))
+                        return true
+                    case 36, 49:
+                        guard let target = keyboardFocus.target else { return false }
+                        switch target {
+                        case let .contextReveal(path):
+                            model.revealInBrowser(path: path)
+                            return true
+                        case let .contextRemove(path):
+                            agent.removePath(path)
+                            return true
+                        case let .permission(requestId, actionId):
+                            guard let request = agent.permissionRequests.first(where: { $0.requestId == requestId }),
+                                  let action = KiteAgentPermissionPresentation.actions(for: request)
+                                      .first(where: { $0.id == actionId })
+                            else {
+                                return false
+                            }
+                            agent.respondPermission(request, decision: action.decision)
+                            return true
+                        default:
+                            return false
+                        }
+                    default:
+                        return false
+                    }
+                }
+            )
             .accessibilityLabel("Agent 问题或指令")
             HStack {
                 Button {
@@ -1053,6 +1214,9 @@ private struct KiteAgentPanelContent: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("审阅结构化 Agent 结果并确认写入")
+                .focusable()
+                .focused($focusedTarget, equals: .reviewResult)
+                .accessibilityIdentifier("agent-review-result")
                 Button {
                     KiteSettingsWindowController.open(pane: .agent)
                 } label: {
@@ -1060,6 +1224,9 @@ private struct KiteAgentPanelContent: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .focusable()
+                .focused($focusedTarget, equals: .settings)
+                .accessibilityIdentifier("agent-settings")
                 Spacer()
                 if agent.phase == .loading || agent.phase == .running {
                     Button("停止") {
@@ -1068,12 +1235,18 @@ private struct KiteAgentPanelContent: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .keyboardShortcut(".", modifiers: .command)
+                    .focusable()
+                    .focused($focusedTarget, equals: .stop)
+                    .accessibilityIdentifier("agent-stop")
                 } else if agent.canRetry {
                     Button("重试") {
                         agent.retryPrompt()
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .focusable()
+                    .focused($focusedTarget, equals: .retry)
+                    .accessibilityIdentifier("agent-retry")
                 }
                 Button("发送") {
                     agent.sendPrompt()
@@ -1081,6 +1254,9 @@ private struct KiteAgentPanelContent: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(!agent.canSend)
+                .focusable()
+                .focused($focusedTarget, equals: .send)
+                .accessibilityIdentifier("agent-send")
             }
             Text("发送前请确认 Agent、模型、工作目录和权限。Kite 不会自动执行命令或应用修改。")
                 .font(.system(size: 9.5))
@@ -1097,6 +1273,8 @@ private struct KiteAgentPanelContent: View {
                 .font(.system(size: 11))
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 72, maxHeight: 132)
+                .focused($focusedTarget, equals: .prompt)
+                .accessibilityIdentifier("agent-prompt-input")
                 .onKeyPress(phases: .down) { keyPress in
                     guard keyPress.key == .return else { return .ignored }
                     if keyPress.modifiers.contains(.shift) {
@@ -1114,6 +1292,8 @@ private struct KiteAgentPanelContent: View {
             .textFieldStyle(.plain)
             .font(.system(size: 11))
             .lineLimit(3...6)
+            .focused($focusedTarget, equals: .prompt)
+            .accessibilityIdentifier("agent-prompt-input")
             .onSubmit {
                 agent.sendPrompt()
             }
@@ -1134,6 +1314,9 @@ private struct KiteAgentPanelContent: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
+                .focusable()
+                .focused($focusedTarget, equals: .copyOutput)
+                .accessibilityIdentifier("agent-copy-output")
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -1180,6 +1363,9 @@ private struct KiteAgentPanelContent: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .focusable()
+                        .focused($focusedTarget, equals: .resumeFollow)
+                        .accessibilityIdentifier("agent-resume-follow")
                         .padding(.bottom, 8)
                     }
                 }
@@ -1224,6 +1410,8 @@ private struct KiteAgentPanelContent: View {
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
                                 .disabled(!action.enabled)
+                                .focusable()
+                                .focused($focusedTarget, equals: .permission(request.requestId, action.id))
                                 .accessibilityIdentifier("agent-permission-\(action.id)")
                             } else {
                                 Button(action.title) {
@@ -1232,6 +1420,8 @@ private struct KiteAgentPanelContent: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                                 .disabled(!action.enabled)
+                                .focusable()
+                                .focused($focusedTarget, equals: .permission(request.requestId, action.id))
                                 .accessibilityIdentifier("agent-permission-\(action.id)")
                             }
                         }
