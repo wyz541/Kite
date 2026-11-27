@@ -1,5 +1,6 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
@@ -19,6 +20,66 @@ use kite_core::preview::PreviewImageData;
 const DIFF_WINDOW_WIDTH: f32 = 1080.0;
 const DIFF_WINDOW_HEIGHT: f32 = 720.0;
 
+static OPEN_DIFF_WINDOWS: OnceLock<Mutex<HashMap<String, AnyWindowHandle>>> = OnceLock::new();
+
+fn open_diff_windows() -> &'static Mutex<HashMap<String, AnyWindowHandle>> {
+    OPEN_DIFF_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn endpoint_key(endpoint: &DiffEndpoint) -> String {
+    match endpoint {
+        DiffEndpoint::Revision(revision) => format!("revision:{revision}"),
+        DiffEndpoint::Index => "index".to_string(),
+        DiffEndpoint::WorkingTree => "working-tree".to_string(),
+    }
+}
+
+fn diff_window_key(path: &Path, old: &DiffEndpoint, new: &DiffEndpoint) -> String {
+    let path = path.to_string_lossy();
+    let path = if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path.into_owned()
+    };
+    format!("{path}\0{}\0{}", endpoint_key(old), endpoint_key(new))
+}
+
+fn forget_diff_window(key: &str) {
+    if let Ok(mut windows) = open_diff_windows().lock() {
+        windows.remove(key);
+    }
+}
+
+/// The Git Log scope requested from a diff viewer.
+///
+/// This intentionally stays independent from the Git Log window so the same
+/// diff component can be embedded in a future Git Workspace without creating a
+/// second navigation model. The host decides how to open the requested scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DiffLogScope {
+    File(PathBuf),
+    Directory(PathBuf),
+}
+
+impl DiffLogScope {
+    pub(crate) fn from_path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        if path.is_dir() {
+            Self::Directory(path)
+        } else {
+            Self::File(path)
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::File(path) | Self::Directory(path) => path,
+        }
+    }
+}
+
+pub(crate) type DiffLogNavigation = Box<dyn FnMut(DiffLogScope, &mut Window, &mut App)>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiffViewMode {
     Unified,
@@ -31,6 +92,25 @@ pub(crate) fn open_diff_viewer_window(
     new: DiffEndpoint,
     cx: &mut App,
 ) -> Result<(), String> {
+    let key = diff_window_key(&path, &old, &new);
+    let existing = {
+        let windows = open_diff_windows()
+            .lock()
+            .map_err(|_| "无法读取 Diff 窗口状态".to_string())?;
+        windows.get(&key).copied()
+    };
+    if let Some(handle) = existing {
+        if handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if let Ok(mut windows) = open_diff_windows().lock() {
+            windows.remove(&key);
+        }
+    }
+
     let title = format!(
         "Diff 查看器 — {}",
         path.file_name()
@@ -49,17 +129,29 @@ pub(crate) fn open_diff_viewer_window(
         window_min_size: Some(size(px(820.), px(540.))),
         ..Default::default()
     };
-    gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| DiffViewerWindow::new(path, old, new, window, cx))
+    let key_for_window = key.clone();
+    let (handle, _) = gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| DiffViewerWindow::new(path, old, new, key_for_window, window, cx))
     })
-    .map(|_| ())
-    .map_err(|error| format!("无法打开 Diff 查看器：{error}"))
+    .map_err(|error| format!("无法打开 Diff 查看器：{error}"))?;
+    open_diff_windows()
+        .lock()
+        .map_err(|_| "无法保存 Diff 窗口状态".to_string())?
+        .insert(key, handle);
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    Ok(())
 }
 
-struct DiffViewerWindow {
+/// Reusable Git diff component.
+///
+/// The standalone window and an embedded Git Workspace both render this same
+/// component. Navigation is injected so the component does not own workspace
+/// state or create additional windows.
+pub(crate) struct DiffViewer {
     path: PathBuf,
     old: DiffEndpoint,
     new: DiffEndpoint,
+    log_scope: DiffLogScope,
     old_input: Entity<InputState>,
     new_input: Entity<InputState>,
     ignore_whitespace: bool,
@@ -72,13 +164,16 @@ struct DiffViewerWindow {
     generation: u64,
     scroll: ScrollHandle,
     _load_task: Task<()>,
+    on_open_git_log: Option<DiffLogNavigation>,
 }
 
-impl DiffViewerWindow {
-    fn new(
+impl DiffViewer {
+    pub(crate) fn new(
         path: PathBuf,
         old: DiffEndpoint,
         new: DiffEndpoint,
+        log_scope: Option<DiffLogScope>,
+        on_open_git_log: Option<DiffLogNavigation>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -100,6 +195,7 @@ impl DiffViewerWindow {
         });
 
         let mut this = Self {
+            log_scope: log_scope.unwrap_or_else(|| DiffLogScope::from_path(&path)),
             path,
             old,
             new,
@@ -115,9 +211,42 @@ impl DiffViewerWindow {
             generation: 0,
             scroll: ScrollHandle::new(),
             _load_task: Task::ready(()),
+            on_open_git_log,
         };
         this.reload(cx);
         this
+    }
+
+    /// Updates the diff request while preserving the component instance.
+    ///
+    /// Embedded hosts can call this when the selected file or commit changes.
+    #[allow(dead_code)]
+    pub(crate) fn show(
+        &mut self,
+        path: PathBuf,
+        old: DiffEndpoint,
+        new: DiffEndpoint,
+        log_scope: Option<DiffLogScope>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.path = path;
+        self.old = old;
+        self.new = new;
+        self.log_scope = log_scope.unwrap_or_else(|| DiffLogScope::from_path(&self.path));
+        self.old_input.update(cx, |input, cx| {
+            input.set_value(endpoint_input_value(&self.old), window, cx);
+        });
+        self.new_input.update(cx, |input, cx| {
+            input.set_value(endpoint_input_value(&self.new), window, cx);
+        });
+        self.reload(cx);
+    }
+
+    fn open_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(callback) = self.on_open_git_log.as_mut() {
+            callback(self.log_scope.clone(), window, cx);
+        }
     }
 
     fn set_preset(&mut self, old: &str, new: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -220,7 +349,7 @@ impl DiffViewerWindow {
             )
         }
     }
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
             .w_full()
@@ -289,6 +418,15 @@ impl DiffViewerWindow {
                             .label("暂存区 ↔ 工作区")
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.set_preset("暂存区", "工作区", window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-open-git-log")
+                            .ghost()
+                            .compact()
+                            .label("打开 Git Log")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_git_log(window, cx);
                             })),
                     )
                     .child(div().flex_1())
@@ -813,7 +951,7 @@ impl DiffViewerWindow {
     }
 }
 
-impl Render for DiffViewerWindow {
+impl Render for DiffViewer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = if self.loading {
             centered_message("正在计算差异…", cx)
@@ -838,6 +976,47 @@ impl Render for DiffViewerWindow {
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))
             .child(body)
+    }
+}
+
+struct DiffViewerWindow {
+    viewer: Entity<DiffViewer>,
+}
+
+impl DiffViewerWindow {
+    fn new(
+        path: PathBuf,
+        old: DiffEndpoint,
+        new: DiffEndpoint,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let viewer = cx.new(|cx| {
+            DiffViewer::new(
+                path,
+                old,
+                new,
+                None,
+                Some(Box::new(|scope, _window, cx| {
+                    let _ =
+                        crate::git_log_window::open_git_log_window(scope.path().to_path_buf(), cx);
+                })),
+                window,
+                cx,
+            )
+        });
+        window.on_window_should_close(cx, move |_window, _app| {
+            forget_diff_window(&key);
+            true
+        });
+        Self { viewer }
+    }
+}
+
+impl Render for DiffViewerWindow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewer.clone()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1012,8 +1191,36 @@ fn centered_message(message: &str, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{highlighted_segments, utf16_offset_to_byte};
+    use super::{DiffLogScope, highlighted_segments, utf16_offset_to_byte};
     use kite_core::diff::{DiffSyntaxKind, DiffSyntaxSpan, DiffWordRange};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn infers_file_and_directory_log_scopes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kite-diff-log-scope-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create temp directory");
+        let file = root.join("file.txt");
+        fs::write(&file, "content").expect("write temp file");
+
+        assert_eq!(
+            DiffLogScope::from_path(&root),
+            DiffLogScope::Directory(root.clone())
+        );
+        assert_eq!(
+            DiffLogScope::from_path(&file),
+            DiffLogScope::File(file.clone())
+        );
+
+        fs::remove_dir_all(root).expect("remove temp directory");
+    }
 
     #[test]
     fn converts_utf16_ranges_to_utf8_segments() {

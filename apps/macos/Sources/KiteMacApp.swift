@@ -234,6 +234,11 @@ struct KiteMacApp: App {
 
                 Divider()
 
+                Button("打开 Git Graph…") {
+                    model.openGitLog(path: model.currentPath, scope: .repository)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .option])
+
                 Button("打开 Git 客户端…") {
                     KiteGitClientWindowController.show(model: model, repositoryPath: model.currentPath)
                 }
@@ -321,13 +326,14 @@ struct KiteMacApp: App {
                 }
                 .keyboardShortcut(.tab, modifiers: [.control, .shift])
             }
-            CommandMenu("选择") {
+            CommandMenu("文件夹") {
                 Button("全选") {
                     model.selectAll()
                 }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
-            }
-            CommandMenu("文件夹") {
+
+                Divider()
+
                 Button("新建文件夹…") {
                     model.createFolder(in: model.currentPath)
                 }

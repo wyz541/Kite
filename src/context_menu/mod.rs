@@ -525,7 +525,7 @@ impl ContextMenuProvider for VcsMenuProvider {
             "Git",
             IconName::GitBranch,
             !target.loading && target.git_available,
-            git_menu_entries(!target.loading && target.git_available),
+            git_menu_entries(!target.loading && target.git_available, target.is_dir),
         );
         model.submenu(
             "SVN",
@@ -572,7 +572,7 @@ impl ContextMenuProvider for RefreshMenuProvider {
     }
 }
 
-fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
+fn git_menu_entries(enabled: bool, is_dir: bool) -> Vec<ContextMenuNode> {
     vec![
         menu_item(
             "打开 Git 客户端",
@@ -645,7 +645,11 @@ fn git_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
             enabled,
         ),
         menu_item(
-            "显示日志",
+            if is_dir {
+                "查看目录历史"
+            } else {
+                "查看文件历史"
+            },
             IconName::GitBranch,
             VcsMenuCommand::GitLog,
             enabled,
@@ -871,6 +875,27 @@ mod tests {
             },
         )
         .with_agent_available(true)
+    }
+
+    fn file_target() -> ContextMenuTarget {
+        ContextMenuTarget::entry(
+            PathBuf::from(r"C:\repo\src\main.rs"),
+            "main.rs".to_string(),
+            false,
+            PathBuf::from(r"C:\repo\src"),
+            ContextMenuCapabilities {
+                loading: false,
+                can_paste: true,
+                git_available: true,
+                svn_available: false,
+                supports_transfer_ops: true,
+                supports_cut: true,
+                supports_rename: true,
+                supports_delete: true,
+                supports_favorite: true,
+                is_shell_namespace: false,
+            },
+        )
     }
 
     fn archive_target() -> ContextMenuTarget {
@@ -1165,6 +1190,27 @@ mod tests {
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRebase)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRevert)));
         assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClean)));
+    }
+
+    #[test]
+    fn git_log_label_tracks_directory_and_file_scope() {
+        let directory_labels = submenu_entries(&build_model(&target(), windows_policy()), "Git")
+            .into_iter()
+            .filter_map(|entry| match entry {
+                ContextMenuNode::Item { label, .. } => Some(label),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(directory_labels.contains(&"查看目录历史"));
+
+        let file_labels = submenu_entries(&build_model(&file_target(), windows_policy()), "Git")
+            .into_iter()
+            .filter_map(|entry| match entry {
+                ContextMenuNode::Item { label, .. } => Some(label),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(file_labels.contains(&"查看文件历史"));
     }
 
     #[test]

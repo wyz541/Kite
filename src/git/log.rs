@@ -5,11 +5,12 @@
 //! exactly the same graph without re-reading the history from the beginning.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::git::{GitCommandResult, GitService};
+use crate::git::{GitCommandResult, GitError, GitErrorKind, GitService};
 
 const MAX_LOG_PAGE_SIZE: u32 = 1_000;
 const GRAPH_COLOR_COUNT: u32 = 10;
@@ -39,6 +40,62 @@ pub struct GitLogContext {
     pub head_hash: Option<String>,
     pub head_short_hash: Option<String>,
     pub refs: Vec<GitRef>,
+}
+
+/// The path scope used by the Git Graph/Log workspace.
+///
+/// `Repository` is the complete history of the repository. `Directory` and
+/// `File` are pathspec-scoped views. A directory scope includes every
+/// descendant path, matching `git log -- <directory>`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GitGraphScope {
+    #[default]
+    Repository,
+    Directory(PathBuf),
+    File(PathBuf),
+}
+
+impl GitGraphScope {
+    pub fn repository() -> Self {
+        Self::Repository
+    }
+
+    pub fn directory(path: impl Into<PathBuf>) -> Self {
+        Self::Directory(path.into())
+    }
+
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self::File(path.into())
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Repository => None,
+            Self::Directory(path) | Self::File(path) => Some(path),
+        }
+    }
+
+    pub fn is_repository(&self) -> bool {
+        matches!(self, Self::Repository)
+    }
+}
+
+/// A validated scope with its repository-relative pathspec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedGitGraphScope {
+    pub repository_root: PathBuf,
+    /// Scope normalized to a repository-relative path.
+    pub scope: GitGraphScope,
+    /// `None` for `Repository`; otherwise the pathspec passed after `--`.
+    pub pathspec: Option<String>,
+}
+
+/// Repository context plus the validated Graph/Log scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitGraphContext {
+    pub log: GitLogContext,
+    pub scope: GitGraphScope,
+    pub pathspec: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +227,8 @@ struct GraphLane {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct GraphCursor {
     repository_root: String,
+    #[serde(default)]
+    scope: GitGraphScope,
     filter: GitLogFilter,
     offset: u64,
     next_color: u32,
@@ -193,16 +252,63 @@ struct RawLogCommit {
 
 pub fn git_log_context(path: &Path) -> Result<GitLogContext, String> {
     let root = resolve_repository(path)?;
-    let current_branch = git_text_optional(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    let head_hash = git_text_optional(&root, &["rev-parse", "--verify", "HEAD"]);
-    let head_short_hash = git_text_optional(&root, &["rev-parse", "--short=7", "HEAD"]);
-    let refs = load_refs(&root, current_branch.as_deref())?;
+    git_log_context_for_root(&root).map_err(|error| error.message)
+}
+
+fn git_log_context_for_root(root: &Path) -> Result<GitLogContext, GitError> {
+    let current_branch = git_text_optional(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    let head_hash = git_text_optional(root, &["rev-parse", "--verify", "HEAD"]);
+    let head_short_hash = git_text_optional(root, &["rev-parse", "--short=7", "HEAD"]);
+    let refs = load_refs(root, current_branch.as_deref())
+        .map_err(|message| GitError::new(GitErrorKind::Other, message).with_repository(root))?;
     Ok(GitLogContext {
-        repository_root: root,
+        repository_root: root.to_path_buf(),
         current_branch,
         head_hash,
         head_short_hash,
         refs,
+    })
+}
+
+/// Resolves a Graph/Log scope against the repository that contains it.
+///
+/// Absolute scope paths are accepted when they resolve inside the repository.
+/// Relative scope paths are resolved from the repository root. The returned
+/// scope is repository-relative and is the value embedded in pagination
+/// cursors.
+pub fn resolve_git_graph_scope(
+    repository_path: &Path,
+    scope: &GitGraphScope,
+) -> Result<ResolvedGitGraphScope, GitError> {
+    if repository_path.as_os_str().is_empty() || !repository_path.exists() {
+        return Err(
+            GitError::new(GitErrorKind::PathNotFound, "所选仓库路径不存在。")
+                .with_repository(repository_path),
+        );
+    }
+    let repository = GitService::shared().discover_repository(repository_path)?;
+    let root = repository.work_tree;
+    match scope {
+        GitGraphScope::Repository => Ok(ResolvedGitGraphScope {
+            repository_root: root,
+            scope: GitGraphScope::Repository,
+            pathspec: None,
+        }),
+        GitGraphScope::Directory(path) => resolve_scope_path(&root, path, true),
+        GitGraphScope::File(path) => resolve_scope_path(&root, path, false),
+    }
+}
+
+pub fn git_graph_context(
+    repository_path: &Path,
+    scope: &GitGraphScope,
+) -> Result<GitGraphContext, GitError> {
+    let resolved = resolve_git_graph_scope(repository_path, scope)?;
+    let log = git_log_context_for_root(&resolved.repository_root)?;
+    Ok(GitGraphContext {
+        log,
+        scope: resolved.scope,
+        pathspec: resolved.pathspec,
     })
 }
 
@@ -222,28 +328,293 @@ pub fn git_log_page_with_metrics(
     page_size: u32,
 ) -> Result<GitLogPageWithMetrics, String> {
     let root = resolve_repository(path)?;
+    let pathspec = normalized(&filter.path).map(ToOwned::to_owned);
+    git_log_page_for_scope(
+        &root,
+        GitGraphScope::Repository,
+        pathspec,
+        filter,
+        cursor,
+        page_size,
+        false,
+    )
+    .map_err(|error| error.message)
+}
+
+pub fn git_graph_page(
+    repository_path: &Path,
+    scope: &GitGraphScope,
+    filter: GitLogFilter,
+    cursor: Option<&str>,
+    page_size: u32,
+) -> Result<GitLogPage, GitError> {
+    git_graph_page_with_metrics(repository_path, scope, filter, cursor, page_size)
+        .map(|result| result.page)
+}
+
+pub fn git_graph_page_with_metrics(
+    repository_path: &Path,
+    scope: &GitGraphScope,
+    filter: GitLogFilter,
+    cursor: Option<&str>,
+    page_size: u32,
+) -> Result<GitLogPageWithMetrics, GitError> {
+    let resolved = resolve_git_graph_scope(repository_path, scope)?;
+    git_log_page_for_scope(
+        &resolved.repository_root,
+        resolved.scope,
+        resolved.pathspec,
+        filter,
+        cursor,
+        page_size,
+        true,
+    )
+}
+
+pub fn git_graph_file_history(
+    repository_path: &Path,
+    relative_path: &str,
+    cursor: Option<&str>,
+    page_size: u32,
+) -> Result<GitLogPage, GitError> {
+    git_graph_page(
+        repository_path,
+        &GitGraphScope::file(PathBuf::from(relative_path)),
+        GitLogFilter::default(),
+        cursor,
+        page_size,
+    )
+}
+
+pub fn git_graph_commit_details(
+    repository_path: &Path,
+    scope: &GitGraphScope,
+    hash: &str,
+) -> Result<GitCommitDetails, GitError> {
+    let resolved = resolve_git_graph_scope(repository_path, scope)?;
+    git_commit_details(&resolved.repository_root, hash).map_err(|message| {
+        GitError::new(GitErrorKind::Other, message).with_repository(&resolved.repository_root)
+    })
+}
+
+pub fn git_graph_commit_tree(
+    repository_path: &Path,
+    scope: &GitGraphScope,
+    hash: &str,
+) -> Result<Vec<GitTreeEntry>, GitError> {
+    let resolved = resolve_git_graph_scope(repository_path, scope)?;
+    git_commit_tree(&resolved.repository_root, hash).map_err(|message| {
+        GitError::new(GitErrorKind::Other, message).with_repository(&resolved.repository_root)
+    })
+}
+
+fn resolve_scope_path(
+    root: &Path,
+    raw: &Path,
+    directory: bool,
+) -> Result<ResolvedGitGraphScope, GitError> {
+    if raw.as_os_str().is_empty() {
+        return Err(invalid_scope_path("范围路径不能为空。").with_repository(root));
+    }
+    if raw.to_string_lossy().contains('\0') {
+        return Err(invalid_scope_path("范围路径包含非法字符。").with_repository(root));
+    }
+    if raw
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(outside_scope("范围路径不能包含 `..`。").with_repository(root));
+    }
+
+    let absolute = if raw.is_absolute() || raw.has_root() {
+        raw.to_path_buf()
+    } else {
+        root.join(raw)
+    };
+    let canonical = canonicalize_with_existing_ancestor(&absolute).map_err(|error| {
+        GitError::new(error.kind, error.message)
+            .with_detail(error.detail.unwrap_or_default())
+            .with_repository(root)
+    })?;
+    let relative = canonical
+        .strip_prefix(root)
+        .map_err(|_| outside_scope("范围路径不在 Git 仓库中。").with_repository(root))?
+        .to_path_buf();
+
+    if canonical.exists() {
+        let metadata = std::fs::metadata(&canonical).map_err(|error| {
+            GitError::new(GitErrorKind::Io, "无法读取范围路径。")
+                .with_detail(error.to_string())
+                .with_repository(root)
+        })?;
+        if directory && !metadata.is_dir() {
+            return Err(invalid_scope_path("目录范围必须指向目录。").with_repository(root));
+        }
+        if !directory && !metadata.is_file() {
+            return Err(invalid_scope_path("文件范围必须指向文件。").with_repository(root));
+        }
+    } else if !directory && relative.as_os_str().is_empty() {
+        return Err(invalid_scope_path("文件范围不能指向仓库根目录。").with_repository(root));
+    }
+
+    let pathspec = Some(pathspec_string(&relative));
+    let scope = if directory {
+        GitGraphScope::Directory(relative)
+    } else {
+        GitGraphScope::File(relative)
+    };
+    Ok(ResolvedGitGraphScope {
+        repository_root: root.to_path_buf(),
+        scope,
+        pathspec,
+    })
+}
+
+fn canonicalize_with_existing_ancestor(path: &Path) -> Result<PathBuf, GitError> {
+    if path.exists() {
+        return dunce::canonicalize(path).map_err(|error| {
+            GitError::new(GitErrorKind::Io, "无法解析范围路径。").with_detail(error.to_string())
+        });
+    }
+
+    let mut ancestor = path.to_path_buf();
+    let mut suffix = Vec::<OsString>::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            return Ok(path.to_path_buf());
+        };
+        suffix.push(name.to_os_string());
+        if !ancestor.pop() {
+            return Ok(path.to_path_buf());
+        }
+    }
+    let mut resolved = dunce::canonicalize(&ancestor).map_err(|error| {
+        GitError::new(GitErrorKind::Io, "无法解析范围路径。").with_detail(error.to_string())
+    })?;
+    if !resolved.is_dir() {
+        return Err(invalid_scope_path("范围路径的父级不是目录。"));
+    }
+    for part in suffix.iter().rev() {
+        resolved.push(part);
+    }
+    Ok(resolved)
+}
+
+fn pathspec_string(path: &Path) -> String {
+    if path.as_os_str().is_empty() {
+        return ".".to_string();
+    }
+    #[cfg(windows)]
+    {
+        path.to_string_lossy().replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
+
+fn effective_pathspec(
+    scope: &GitGraphScope,
+    scope_pathspec: Option<&str>,
+    filter_path: Option<&str>,
+) -> Result<Option<String>, GitError> {
+    let filter_path = filter_path.map(str::trim).filter(|value| !value.is_empty());
+    match (scope, scope_pathspec, filter_path) {
+        (GitGraphScope::Repository, _, path) => Ok(path.map(ToOwned::to_owned)),
+        (_, Some(scope_path), None) => Ok(Some(scope_path.to_string())),
+        (_, Some(scope_path), Some(filter_path)) => intersect_pathspec(scope_path, filter_path),
+        (_, None, _) => Ok(None),
+    }
+}
+
+fn intersect_pathspec(scope: &str, filter: &str) -> Result<Option<String>, GitError> {
+    let scope = normalize_filter_pathspec(scope)?;
+    let filter = normalize_filter_pathspec(filter)?;
+    if scope == "." {
+        return Ok(Some(filter));
+    }
+    if filter == "." || filter == scope || filter.starts_with(&format!("{scope}/")) {
+        return Ok(Some(filter));
+    }
+    if scope.starts_with(&format!("{filter}/")) {
+        return Ok(Some(scope));
+    }
+    Ok(Some(format!("{scope}/{filter}")))
+}
+
+fn normalize_filter_pathspec(value: &str) -> Result<String, GitError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(invalid_scope_path("路径筛选不能为空。"));
+    }
+    let path = Path::new(value);
+    if path.is_absolute() || path.has_root() {
+        return Err(invalid_scope_path("路径筛选必须是仓库相对路径。"));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(outside_scope("路径筛选不能包含 `..`。"));
+    }
+    let mut normalized = pathspec_string(path);
+    while normalized.starts_with("./") {
+        normalized.drain(..2);
+    }
+    Ok(normalized)
+}
+
+fn git_log_page_for_scope(
+    root: &Path,
+    scope: GitGraphScope,
+    scope_pathspec: Option<String>,
+    filter: GitLogFilter,
+    cursor: Option<&str>,
+    page_size: u32,
+    empty_is_error: bool,
+) -> Result<GitLogPageWithMetrics, GitError> {
     let page_size = page_size.clamp(1, MAX_LOG_PAGE_SIZE);
     let mut graph = match cursor {
         Some(cursor) if !cursor.trim().is_empty() => {
-            let parsed: GraphCursor = serde_json::from_str(cursor)
-                .map_err(|_| "提交历史游标无效，请重新加载".to_string())?;
+            let parsed: GraphCursor = serde_json::from_str(cursor).map_err(|_| {
+                invalid_cursor("提交历史游标无效，请重新加载").with_repository(root)
+            })?;
             if parsed.repository_root != root.to_string_lossy() {
-                return Err("提交历史游标属于另一个仓库".to_string());
+                return Err(invalid_cursor("提交历史游标属于另一个仓库").with_repository(root));
+            }
+            if parsed.scope != scope {
+                return Err(
+                    invalid_cursor("提交历史游标属于另一个范围，请重新加载").with_repository(root)
+                );
             }
             if parsed.filter != filter {
-                return Err("筛选条件已变化，请重新加载提交历史".to_string());
+                return Err(
+                    invalid_cursor("筛选条件已变化，请重新加载提交历史").with_repository(root)
+                );
             }
             parsed
         }
         _ => GraphCursor {
             repository_root: root.to_string_lossy().into_owned(),
+            scope: scope.clone(),
             filter: filter.clone(),
             ..GraphCursor::default()
         },
     };
 
+    let pathspec = effective_pathspec(&scope, scope_pathspec.as_deref(), filter.path.as_deref())?;
+    let full_history = matches!(scope, GitGraphScope::Directory(_));
     let command_started = std::time::Instant::now();
-    let output = run_log_command(&root, &filter, &graph, page_size)?;
+    let output = run_log_command(
+        root,
+        &filter,
+        pathspec.as_deref(),
+        &graph,
+        page_size,
+        full_history,
+    )
+    .map_err(|error| map_no_history(error, root))?;
     let command_millis = command_started.elapsed().as_millis() as u64;
 
     let parse_started = std::time::Instant::now();
@@ -253,6 +624,10 @@ pub fn git_log_page_with_metrics(
         commits.truncate(page_size as usize);
     }
     let parse_millis = parse_started.elapsed().as_millis() as u64;
+
+    if commits.is_empty() && empty_is_error && graph.offset == 0 {
+        return Err(no_history(root));
+    }
 
     let layout_started = std::time::Instant::now();
     let mut rows = Vec::with_capacity(commits.len());
@@ -286,7 +661,7 @@ pub fn git_log_page_with_metrics(
     let next_cursor = has_more.then(|| serde_json::to_string(&graph).unwrap_or_default());
     Ok(GitLogPageWithMetrics {
         page: GitLogPage {
-            repository_root: root,
+            repository_root: root.to_path_buf(),
             commits,
             has_more,
             next_cursor,
@@ -300,6 +675,36 @@ pub fn git_log_page_with_metrics(
             lane_count,
         },
     })
+}
+
+fn invalid_scope_path(message: impl Into<String>) -> GitError {
+    GitError::new(GitErrorKind::InvalidPath, message)
+}
+
+fn outside_scope(message: impl Into<String>) -> GitError {
+    GitError::new(GitErrorKind::OutsideRepository, message)
+}
+
+fn invalid_cursor(message: impl Into<String>) -> GitError {
+    GitError::new(GitErrorKind::InvalidCursor, message)
+}
+
+fn no_history(root: &Path) -> GitError {
+    GitError::new(GitErrorKind::NoHistory, "该范围没有可显示的提交历史。").with_repository(root)
+}
+
+fn map_no_history(error: GitError, root: &Path) -> GitError {
+    let detail = error
+        .detail
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if detail.contains("does not have any commits yet")
+        || (detail.contains("bad revision") && detail.contains("head"))
+    {
+        return no_history(root).with_detail(error.detail.unwrap_or_default());
+    }
+    error
 }
 
 pub fn git_commit_details(path: &Path, hash: &str) -> Result<GitCommitDetails, String> {
@@ -418,9 +823,11 @@ pub fn git_file_history(
 fn run_log_command(
     root: &Path,
     filter: &GitLogFilter,
+    pathspec: Option<&str>,
     graph: &GraphCursor,
     page_size: u32,
-) -> Result<GitCommandResult, String> {
+    full_history: bool,
+) -> Result<GitCommandResult, GitError> {
     let max_count = page_size.saturating_add(1).to_string();
     let skip = graph.offset.to_string();
     let mut args = vec![
@@ -433,9 +840,14 @@ fn run_log_command(
         format!("--skip={skip}"),
         format!("--format={LOG_FORMAT}"),
     ];
+    if full_history {
+        args.push("--full-history".to_string());
+    }
 
     if let Some(hash) = normalized(&filter.hash) {
-        args.push(validate_commit(root, hash)?);
+        args.push(validate_commit(root, hash).map_err(|message| {
+            GitError::new(GitErrorKind::Other, message).with_repository(root)
+        })?);
     } else if let Some(branch) = normalized(&filter.branch) {
         args.push(branch.to_string());
     } else {
@@ -461,15 +873,13 @@ fn run_log_command(
         args.push("--regexp-ignore-case".to_string());
         args.push(format!("--grep={text}"));
     }
-    if let Some(pathspec) = normalized(&filter.path) {
+    if let Some(pathspec) = pathspec.map(str::trim).filter(|value| !value.is_empty()) {
         args.push("--".to_string());
         args.push(pathspec.to_string());
     }
 
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    GitService::shared()
-        .run_log_command(root, &refs)
-        .map_err(|error| error.message)
+    GitService::shared().run_log_command(root, &refs)
 }
 
 fn layout_commit(graph: &mut GraphCursor, commit: &RawLogCommit) -> GitGraphRow {
@@ -943,6 +1353,19 @@ mod tests {
         root
     }
 
+    fn write_file(root: &Path, relative_path: &str, contents: &str) {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(path, contents).expect("write file");
+    }
+
+    fn commit_all(root: &Path, message: &str) {
+        git_ok(root, &["add", "."]);
+        git_ok(root, &["commit", "--quiet", "-m", message]);
+    }
+
     fn raw(hash: &str, parents: &[&str]) -> RawLogCommit {
         RawLogCommit {
             hash: hash.to_string(),
@@ -1204,6 +1627,434 @@ mod tests {
     }
 
     #[test]
+    fn graph_scope_resolves_repository_directory_and_file() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("graph-scope");
+        write_file(&root, "src/git/a.txt", "a\n");
+        write_file(&root, "src/git/nested/b.txt", "b\n");
+        write_file(&root, "src/other/c.txt", "c\n");
+        commit_all(&root, "initial");
+        write_file(&root, "src/git/nested/b.txt", "b2\n");
+        commit_all(&root, "nested");
+        write_file(&root, "src/other/c.txt", "c2\n");
+        commit_all(&root, "other");
+
+        let repository_page = git_graph_page(
+            &root,
+            &GitGraphScope::Repository,
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect("repository page");
+        assert_eq!(repository_page.commits.len(), 3);
+
+        let relative_scope = resolve_git_graph_scope(&root, &GitGraphScope::directory("src/git"))
+            .expect("relative scope");
+        assert_eq!(
+            relative_scope.scope,
+            GitGraphScope::Directory(PathBuf::from("src/git"))
+        );
+        let directory_scope = GitGraphScope::directory(root.join("src/git"));
+        let context = git_graph_context(&root, &directory_scope).expect("directory context");
+        assert_eq!(
+            context.scope,
+            GitGraphScope::Directory(PathBuf::from("src/git"))
+        );
+        assert_eq!(context.pathspec.as_deref(), Some("src/git"));
+        let directory_page =
+            git_graph_page(&root, &directory_scope, GitLogFilter::default(), None, 10)
+                .expect("directory page");
+        assert_eq!(directory_page.commits.len(), 2);
+        assert!(
+            directory_page
+                .commits
+                .iter()
+                .any(|commit| commit.subject == "nested")
+        );
+
+        let file_scope = GitGraphScope::file(root.join("src/git/nested/b.txt"));
+        let file_page = git_graph_page(&root, &file_scope, GitLogFilter::default(), None, 10)
+            .expect("file page");
+        assert_eq!(file_page.commits.len(), 2);
+        let file_history =
+            git_graph_file_history(&root, "src/git/nested/b.txt", None, 10).expect("file history");
+        assert_eq!(file_history.commits.len(), 2);
+        let details =
+            git_graph_commit_details(&root, &directory_scope, &directory_page.commits[0].hash)
+                .expect("scoped details");
+        assert!(!details.changed_files.is_empty());
+        let tree = git_graph_commit_tree(&root, &directory_scope, &directory_page.commits[0].hash)
+            .expect("scoped tree");
+        assert!(!tree.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_scope_combines_with_filters() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("graph-filters");
+        write_file(&root, "src/git/a.txt", "one\n");
+        commit_all(&root, "alpha");
+        write_file(&root, "src/git/nested/b.txt", "two\n");
+        commit_all(&root, "beta");
+        write_file(&root, "src/other/c.txt", "three\n");
+        commit_all(&root, "gamma");
+        let scope = GitGraphScope::directory(root.join("src/git"));
+
+        let text_page = git_graph_page(
+            &root,
+            &scope,
+            GitLogFilter {
+                text: Some("beta".to_string()),
+                ..GitLogFilter::default()
+            },
+            None,
+            10,
+        )
+        .expect("text filter");
+        assert_eq!(text_page.commits.len(), 1);
+        assert_eq!(text_page.commits[0].subject, "beta");
+
+        let author_page = git_graph_page(
+            &root,
+            &scope,
+            GitLogFilter {
+                author: Some("Kite Test".to_string()),
+                ..GitLogFilter::default()
+            },
+            None,
+            10,
+        )
+        .expect("author filter");
+        assert_eq!(author_page.commits.len(), 2);
+
+        let date_page = git_graph_page(
+            &root,
+            &scope,
+            GitLogFilter {
+                since: Some("2000-01-01".to_string()),
+                until: Some("2099-12-31".to_string()),
+                ..GitLogFilter::default()
+            },
+            None,
+            10,
+        )
+        .expect("date filter");
+        assert_eq!(date_page.commits.len(), 2);
+
+        let branch_page = git_graph_page(
+            &root,
+            &scope,
+            GitLogFilter {
+                branch: Some("main".to_string()),
+                ..GitLogFilter::default()
+            },
+            None,
+            10,
+        )
+        .expect("branch filter");
+        assert_eq!(branch_page.commits.len(), 2);
+
+        let path_page = git_graph_page(
+            &root,
+            &scope,
+            GitLogFilter {
+                path: Some("nested".to_string()),
+                ..GitLogFilter::default()
+            },
+            None,
+            10,
+        )
+        .expect("path filter");
+        assert_eq!(path_page.commits.len(), 1);
+        assert_eq!(path_page.commits[0].subject, "beta");
+
+        let head = git_ok(&root, &["rev-parse", "HEAD"]);
+        let hash_page = git_graph_page(
+            &root,
+            &scope,
+            GitLogFilter {
+                hash: Some(head),
+                ..GitLogFilter::default()
+            },
+            None,
+            10,
+        )
+        .expect("hash filter");
+        assert_eq!(hash_page.commits.len(), 2);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_scope_rejects_unsafe_or_missing_paths() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("graph-invalid");
+        write_file(&root, "src/git/a.txt", "one\n");
+        commit_all(&root, "initial");
+
+        let outside = std::env::temp_dir().join(format!(
+            "kite-git-log-outside-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        let error = git_graph_page(
+            &root,
+            &GitGraphScope::directory(&outside),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect_err("outside scope");
+        assert_eq!(error.kind, GitErrorKind::OutsideRepository);
+
+        let error = git_graph_page(
+            &root,
+            &GitGraphScope::directory(PathBuf::new()),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect_err("empty scope");
+        assert_eq!(error.kind, GitErrorKind::InvalidPath);
+
+        let error = git_graph_page(
+            &root,
+            &GitGraphScope::directory(PathBuf::from("../outside")),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect_err("parent traversal");
+        assert_eq!(error.kind, GitErrorKind::OutsideRepository);
+
+        let error = git_graph_page(
+            &root,
+            &GitGraphScope::file(root.join("src")),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect_err("directory as file");
+        assert_eq!(error.kind, GitErrorKind::InvalidPath);
+
+        let missing_repository = root.join("missing-repository");
+        let error = git_graph_context(&missing_repository, &GitGraphScope::Repository)
+            .expect_err("missing repository");
+        assert_eq!(error.kind, GitErrorKind::PathNotFound);
+
+        let non_repository = std::env::temp_dir().join(format!(
+            "kite-git-log-non-repository-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&non_repository).expect("non-repository directory");
+        let error = git_graph_context(&non_repository, &GitGraphScope::Repository)
+            .expect_err("non repository");
+        assert_eq!(error.kind, GitErrorKind::NotRepository);
+
+        let empty = temp_repo("graph-empty");
+        let error = git_graph_page(
+            &empty,
+            &GitGraphScope::Repository,
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect_err("empty history");
+        assert_eq!(error.kind, GitErrorKind::NoHistory);
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+        let _ = std::fs::remove_dir_all(non_repository);
+        let _ = std::fs::remove_dir_all(empty);
+    }
+
+    #[test]
+    fn graph_scope_cursor_is_bound_to_scope_and_filter() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("graph-cursor");
+        write_file(&root, "src/git/a.txt", "one\n");
+        commit_all(&root, "one");
+        write_file(&root, "src/git/a.txt", "two\n");
+        commit_all(&root, "two");
+        let scope = GitGraphScope::directory(root.join("src/git"));
+        let first =
+            git_graph_page(&root, &scope, GitLogFilter::default(), None, 1).expect("first page");
+        let cursor = first.next_cursor.expect("cursor");
+
+        let error = git_graph_page(
+            &root,
+            &GitGraphScope::file(root.join("src/git/a.txt")),
+            GitLogFilter::default(),
+            Some(&cursor),
+            1,
+        )
+        .expect_err("scope mismatch");
+        assert_eq!(error.kind, GitErrorKind::InvalidCursor);
+
+        let error = git_graph_page(
+            &root,
+            &scope,
+            GitLogFilter {
+                text: Some("one".to_string()),
+                ..GitLogFilter::default()
+            },
+            Some(&cursor),
+            1,
+        )
+        .expect_err("filter mismatch");
+        assert_eq!(error.kind, GitErrorKind::InvalidCursor);
+
+        let error = git_graph_page(&root, &scope, GitLogFilter::default(), Some("not-json"), 1)
+            .expect_err("invalid cursor");
+        assert_eq!(error.kind, GitErrorKind::InvalidCursor);
+
+        let second = git_graph_page(&root, &scope, GitLogFilter::default(), Some(&cursor), 1)
+            .expect("second page");
+        assert_eq!(second.commits.len(), 1);
+        assert_eq!(second.commits[0].subject, "one");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_directory_scope_preserves_merge_topology_with_full_history() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("graph-merge");
+        write_file(&root, "src/file.txt", "base\n");
+        commit_all(&root, "base");
+        git_ok(&root, &["checkout", "-q", "-b", "feature"]);
+        write_file(&root, "other.txt", "feature\n");
+        commit_all(&root, "feature");
+        git_ok(&root, &["checkout", "-q", "main"]);
+        write_file(&root, "src/file.txt", "main\n");
+        commit_all(&root, "main");
+        git_ok(&root, &["merge", "--no-ff", "feature", "-m", "merge", "-q"]);
+        let merge = git_ok(&root, &["rev-parse", "HEAD"]);
+
+        let simplified = git_log_page(
+            &root,
+            GitLogFilter {
+                path: Some("src".to_string()),
+                ..GitLogFilter::default()
+            },
+            None,
+            10,
+        )
+        .expect("simplified path log");
+        assert!(!simplified.commits.iter().any(|commit| commit.hash == merge));
+
+        let scoped = git_graph_page(
+            &root,
+            &GitGraphScope::directory(root.join("src")),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect("full-history scope");
+        assert!(scoped.commits.iter().any(|commit| commit.hash == merge));
+        assert!(scoped.commits.iter().any(|commit| commit.subject == "main"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_directory_scope_uses_current_path_after_rename_and_delete() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("graph-rename");
+        write_file(&root, "old/file.txt", "old\n");
+        commit_all(&root, "old");
+        git_ok(&root, &["mv", "old", "new"]);
+        commit_all(&root, "rename");
+        git_ok(&root, &["rm", "-r", "new"]);
+        commit_all(&root, "delete");
+
+        let old_page = git_graph_page(
+            &root,
+            &GitGraphScope::directory(root.join("old")),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect("old path");
+        assert_eq!(old_page.commits.len(), 2);
+        assert!(
+            old_page
+                .commits
+                .iter()
+                .any(|commit| commit.subject == "old")
+        );
+        assert!(
+            old_page
+                .commits
+                .iter()
+                .any(|commit| commit.subject == "rename")
+        );
+        assert!(
+            !old_page
+                .commits
+                .iter()
+                .any(|commit| commit.subject == "delete")
+        );
+
+        let new_page = git_graph_page(
+            &root,
+            &GitGraphScope::directory(root.join("new")),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect("new path");
+        assert_eq!(new_page.commits.len(), 2);
+        assert!(
+            new_page
+                .commits
+                .iter()
+                .any(|commit| commit.subject == "rename")
+        );
+        assert!(
+            new_page
+                .commits
+                .iter()
+                .any(|commit| commit.subject == "delete")
+        );
+
+        let file_page = git_graph_page(
+            &root,
+            &GitGraphScope::file(root.join("new/file.txt")),
+            GitLogFilter::default(),
+            None,
+            10,
+        )
+        .expect("deleted file path");
+        assert_eq!(file_page.commits.len(), 2);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn rejects_cursor_for_another_filter() {
         if !git_available() {
             return;
@@ -1224,6 +2075,60 @@ mod tests {
         assert!(error.contains("筛选条件"));
         let _ = std::fs::remove_dir_all(root);
     }
+    #[test]
+    #[ignore = "manual 100k-commit / 10k-file graph scope benchmark"]
+    fn benchmark_graph_scope_history() {
+        if !git_available() {
+            return;
+        }
+        let root = temp_repo("graph-benchmark-100k");
+        create_linear_history_fast(&root, 100_000);
+        for (label, scope) in [
+            ("repository", GitGraphScope::Repository),
+            (
+                "directory-full-history",
+                GitGraphScope::directory(root.clone()),
+            ),
+        ] {
+            let started = std::time::Instant::now();
+            let result =
+                git_graph_page_with_metrics(&root, &scope, GitLogFilter::default(), None, 200)
+                    .expect("graph scope first page");
+            println!(
+                "100k graph-scope {label}: total={}ms git={}ms parse={}ms layout={}ms rows={} lanes={}",
+                started.elapsed().as_millis(),
+                result.metrics.command_millis,
+                result.metrics.parse_millis,
+                result.metrics.layout_millis,
+                result.page.commits.len(),
+                result.metrics.lane_count
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+
+        let wide = temp_repo("graph-benchmark-wide");
+        create_wide_tree_fast(&wide, 10_000);
+        let started = std::time::Instant::now();
+        let result = git_graph_page_with_metrics(
+            &wide,
+            &GitGraphScope::directory(wide.join("src/git")),
+            GitLogFilter::default(),
+            None,
+            200,
+        )
+        .expect("wide graph scope first page");
+        println!(
+            "10k-file graph-scope directory: total={}ms git={}ms parse={}ms layout={}ms rows={} lanes={}",
+            started.elapsed().as_millis(),
+            result.metrics.command_millis,
+            result.metrics.parse_millis,
+            result.metrics.layout_millis,
+            result.page.commits.len(),
+            result.metrics.lane_count
+        );
+        let _ = std::fs::remove_dir_all(wide);
+    }
+
     #[test]
     #[ignore = "manual 100k-commit performance benchmark"]
     fn benchmark_large_history() {
@@ -1303,6 +2208,59 @@ mod tests {
             first_layout
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn create_wide_tree_fast(root: &Path, files: usize) {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let mut child = Command::new("git")
+            .current_dir(root)
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start git fast-import");
+        let mut stdin = child.stdin.take().expect("fast-import stdin");
+        let mut buffer = String::with_capacity(files * 90);
+        let message = "wide tree";
+        buffer.push_str(&format!(
+            "commit refs/heads/main
+mark :1
+committer Kite Bench <bench@example.test> 1700000000 +0000
+data {}
+{}
+",
+            message.len(),
+            message
+        ));
+        for index in 0..files {
+            let path = format!("src/git/file-{index:05}.txt");
+            let content = format!(
+                "{index}
+"
+            );
+            buffer.push_str(&format!(
+                "M 100644 inline {path}
+data {}
+{}
+",
+                content.len(),
+                content
+            ));
+        }
+        stdin
+            .write_all(buffer.as_bytes())
+            .expect("write fast-import");
+        drop(stdin);
+        let output = child.wait_with_output().expect("finish fast-import");
+        assert!(
+            output.status.success(),
+            "fast-import failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        git_ok(root, &["reset", "--hard", "main"]);
     }
 
     fn create_linear_history_fast(root: &Path, commits: usize) {

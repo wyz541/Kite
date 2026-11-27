@@ -66,9 +66,11 @@ enum KiteGitLogDetailTab: String, CaseIterable, Identifiable {
 @MainActor
 final class KiteGitLogViewModel: ObservableObject {
     let model: KiteModel
-    let path: String
+    let repositoryPath: String
+    let embeddedDiffModel = KiteDiffViewerModel()
 
-    @Published var context: GitLogContextDto?
+    @Published var scope: GitGraphScopeDto
+    @Published var context: GitGraphContextDto?
     @Published var commits: [GitLogCommitDto] = []
     @Published var selectedHash: String?
     @Published var details: GitCommitDetailsDto?
@@ -79,19 +81,73 @@ final class KiteGitLogViewModel: ObservableObject {
     @Published var searchRegex = false
     @Published var branch: String?
     @Published var dateRange: KiteGitLogDateRange = .any
-    @Published var historyPath: String?
+    @Published var selectedChangedFile: String?
     @Published var loading = true
     @Published var loadingMore = false
     @Published var detailsLoading = false
     @Published var treeLoading = false
     @Published var errorMessage: String?
 
+    var onContextUpdated: ((GitGraphContextDto) -> Void)?
+
     private var cursor: String?
     private var hasMore = false
+    private var loadGeneration = 0
 
-    init(model: KiteModel, path: String) {
+    init(model: KiteModel, repositoryPath: String, scope: GitGraphScopeDto) {
         self.model = model
-        self.path = path
+        self.repositoryPath = repositoryPath
+        self.scope = scope
+        embeddedDiffModel.host = self
+    }
+
+    var logContext: GitLogContextDto? {
+        context?.log
+    }
+
+    var repositoryRoot: String {
+        context?.log.repositoryRoot ?? repositoryPath
+    }
+
+    var scopePath: String? {
+        context?.pathspec
+    }
+
+    var isScoped: Bool {
+        scopePath != nil
+    }
+
+    var workspaceTitle: String {
+        isScoped ? "Git Log" : "Git Graph"
+    }
+
+    var scopeChipTitle: String {
+        guard let path = scopePath, !path.isEmpty else {
+            return "Repository"
+        }
+        switch scope {
+        case .directory(_):
+            return "Directory: \(path)"
+        case .file(_):
+            return "File: \(path)"
+        case .repository:
+            return "Repository"
+        }
+    }
+
+    var scopeChipIcon: String {
+        switch scope {
+        case .directory(_):
+            return "folder"
+        case .file(_):
+            return "doc.text"
+        case .repository:
+            return "arrow.triangle.branch"
+        }
+    }
+
+    var emptyHistoryMessage: String {
+        isScoped ? "该目录没有可显示的提交历史" : "没有匹配的提交"
     }
 
     var selectedCommit: GitLogCommitDto? {
@@ -100,7 +156,7 @@ final class KiteGitLogViewModel: ObservableObject {
     }
 
     var branchOptions: [GitRefDto] {
-        context?.refs.filter {
+        logContext?.refs.filter {
             $0.kind == .localBranch || $0.kind == .remoteBranch
         } ?? []
     }
@@ -115,7 +171,7 @@ final class KiteGitLogViewModel: ObservableObject {
             author: nil,
             since: dateRange.since,
             until: nil,
-            path: historyPath,
+            path: nil,
             text: nil,
             regex: searchRegex,
             hash: nil
@@ -133,32 +189,48 @@ final class KiteGitLogViewModel: ObservableObject {
                 filter.hash = query
             }
         }
-        if let historyPath, !historyPath.isEmpty {
-            filter.path = historyPath
-        }
         return filter
     }
 
+    func setScope(_ newScope: GitGraphScopeDto) {
+        scope = newScope
+    }
+
     func reload() async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
         loading = true
         loadingMore = false
         detailsLoading = false
         treeLoading = false
         errorMessage = nil
+        context = nil
         commits = []
         selectedHash = nil
         details = nil
         treeEntries = []
+        selectedChangedFile = nil
+        detailTab = .commit
         cursor = nil
         hasMore = false
+
         do {
-            context = try await model.gitLogContext(path: path)
-            let page = try await model.gitLogPage(
-                path: path,
+            let context = try await model.gitGraphContext(
+                repositoryPath: repositoryPath,
+                scope: scope
+            )
+            guard generation == loadGeneration else { return }
+            self.context = context
+            onContextUpdated?(context)
+
+            let page = try await model.gitGraphPage(
+                repositoryPath: repositoryPath,
+                scope: context.scope,
                 filter: currentFilter,
                 cursor: nil,
                 pageSize: 200
             )
+            guard generation == loadGeneration else { return }
             apply(page)
             loading = false
             if let first = commits.first {
@@ -168,6 +240,7 @@ final class KiteGitLogViewModel: ObservableObject {
                 await loadMore()
             }
         } catch {
+            guard generation == loadGeneration else { return }
             loading = false
             errorMessage = error.localizedDescription
         }
@@ -175,17 +248,25 @@ final class KiteGitLogViewModel: ObservableObject {
 
     func loadMore() async {
         guard let cursor, hasMore, !loadingMore, !loading else { return }
+        let generation = loadGeneration
         loadingMore = true
-        defer { loadingMore = false }
+        defer {
+            if generation == loadGeneration {
+                loadingMore = false
+            }
+        }
         do {
-            let page = try await model.gitLogPage(
-                path: path,
+            let page = try await model.gitGraphPage(
+                repositoryPath: repositoryPath,
+                scope: context?.scope ?? scope,
                 filter: currentFilter,
                 cursor: cursor,
                 pageSize: 200
             )
+            guard generation == loadGeneration else { return }
             apply(page)
         } catch {
+            guard generation == loadGeneration else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -195,14 +276,23 @@ final class KiteGitLogViewModel: ObservableObject {
             selectedHash = commit.hash
             details = nil
             treeEntries = []
+            selectedChangedFile = nil
             detailTab = .commit
         }
         detailsLoading = true
         let hash = commit.hash
         do {
-            let result = try await model.gitCommitDetails(path: path, hash: hash)
+            let result = try await model.gitGraphCommitDetails(
+                repositoryPath: repositoryPath,
+                scope: context?.scope ?? scope,
+                hash: hash
+            )
             guard selectedHash == hash else { return }
             details = result
+            if selectedChangedFile == nil {
+                selectedChangedFile = result.changedFiles.first?.path
+            }
+            showEmbeddedDiff()
         } catch {
             guard selectedHash == hash else { return }
             errorMessage = error.localizedDescription
@@ -219,11 +309,16 @@ final class KiteGitLogViewModel: ObservableObject {
             selectedHash = hash
             details = nil
             treeEntries = []
+            selectedChangedFile = nil
         }
         detailTab = .tree
         treeLoading = true
         do {
-            let entries = try await model.gitCommitTree(path: path, hash: hash)
+            let entries = try await model.gitGraphCommitTree(
+                repositoryPath: repositoryPath,
+                scope: context?.scope ?? scope,
+                hash: hash
+            )
             guard selectedHash == hash else { return }
             treeEntries = entries
         } catch {
@@ -235,15 +330,54 @@ final class KiteGitLogViewModel: ObservableObject {
         }
     }
 
+    func showEmbeddedDiff() {
+        guard let details, let filePath = selectedChangedFile else { return }
+        let absolutePath = URL(fileURLWithPath: repositoryRoot)
+            .appendingPathComponent(filePath)
+            .path
+        embeddedDiffModel.oldRevision = "\(details.commit.hash)^"
+        embeddedDiffModel.newRevision = details.commit.hash
+        embeddedDiffModel.show(
+            path: absolutePath,
+            appModel: model,
+            preset: .custom,
+            logScope: .file(filePath)
+        )
+    }
+
     func showFileHistory(_ filePath: String) async {
-        historyPath = filePath
-        searchMode = .path
+        scope = .file(path: filePath)
         await reload()
     }
 
-    func clearFileHistory() async {
-        historyPath = nil
+    func clearScope() async {
+        scope = .repository
         await reload()
+    }
+
+    func showAllCommits() async {
+        branch = nil
+        scope = .repository
+        await reload()
+    }
+
+    func isInScope(_ path: String) -> Bool {
+        guard let scopePath, !scopePath.isEmpty, scopePath != "." else {
+            return false
+        }
+        if path == scopePath {
+            return true
+        }
+        if case .directory(_) = scope {
+            return path.hasPrefix(scopePath + "/")
+        }
+        return false
+    }
+
+    func branchLabel(for fullName: String?) -> String {
+        guard let fullName else { return "分支 · 全部" }
+        let name = logContext?.refs.first { $0.fullName == fullName }?.name ?? fullName
+        return "分支 · \(name)"
     }
 
     private func apply(_ page: GitLogPageDto) {
@@ -256,49 +390,112 @@ final class KiteGitLogViewModel: ObservableObject {
     }
 }
 
+extension KiteGitLogViewModel: KiteDiffViewerHost {
+    func openGitLog(scope: KiteDiffLogScope) {
+        switch scope {
+        case .file(let path):
+            self.scope = .file(path: path)
+        case .directory(let path):
+            self.scope = .directory(path: path)
+        }
+        Task { await reload() }
+    }
+}
+
 @MainActor
 final class KiteGitLogWindowController: NSWindowController, NSWindowDelegate {
-    static let shared = KiteGitLogWindowController()
+    private static var controllers: [String: KiteGitLogWindowController] = [:]
 
-    func show(model: KiteModel, path: String) {
-        let viewModel = KiteGitLogViewModel(model: model, path: path)
-        let rootView = KiteGitLogWindowView(viewModel: viewModel)
-        let hostingController = NSHostingController(rootView: rootView)
+    private let repositoryRoot: String
+    private let viewModel: KiteGitLogViewModel
 
-        if window == nil {
-            let historyWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
+    private init(model: KiteModel, repositoryRoot: String, scope: GitGraphScopeDto) {
+        self.repositoryRoot = repositoryRoot
+        let viewModel = KiteGitLogViewModel(
+            model: model,
+            repositoryPath: repositoryRoot,
+            scope: scope
+        )
+        self.viewModel = viewModel
+        let hostingController = NSHostingController(
+            rootView: KiteGitLogWindowView(viewModel: viewModel)
+        )
+        let historyWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        historyWindow.titlebarAppearsTransparent = true
+        historyWindow.minSize = NSSize(width: 1040, height: 680)
+        historyWindow.isReleasedWhenClosed = false
+        historyWindow.contentViewController = hostingController
+        historyWindow.center()
+        historyWindow.setFrameAutosaveName("KiteGitWorkspaceWindow")
+        super.init(window: historyWindow)
+        historyWindow.delegate = self
+        viewModel.onContextUpdated = { [weak self] context in
+            self?.updateWindowTitle(context)
+        }
+        updateWindowTitle(nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    static func show(
+        model: KiteModel,
+        path: String,
+        scope: GitGraphScopeDto = .repository
+    ) {
+        Task { @MainActor in
+            let root = await model.gitRepositoryRoot(path: path) ?? path
+            let canonical = URL(fileURLWithPath: root)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+
+            if let existing = controllers[canonical] {
+                existing.viewModel.setScope(scope)
+                Task { await existing.viewModel.reload() }
+                existing.showWindow(nil)
+                existing.window?.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                return
+            }
+
+            let controller = KiteGitLogWindowController(
+                model: model,
+                repositoryRoot: canonical,
+                scope: scope
             )
-            historyWindow.titlebarAppearsTransparent = true
-            historyWindow.minSize = NSSize(width: 1240, height: 600)
-            historyWindow.isReleasedWhenClosed = false
-            historyWindow.delegate = self
-            historyWindow.center()
-            historyWindow.setFrameAutosaveName("KiteGitLogWindow")
-            window = historyWindow
+            controllers[canonical] = controller
+            controller.showWindow(nil)
+            controller.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
-
-        let repositoryName = URL(fileURLWithPath: path).lastPathComponent
-        window?.title = "Kite 提交历史 — \(repositoryName.isEmpty ? "Git" : repositoryName)"
-        window?.contentViewController = hostingController
-        if window?.isMiniaturized == true {
-            window?.deminiaturize(nil)
-        }
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     func windowWillClose(_ notification: Notification) {
-        window?.contentViewController = nil
+        Self.controllers.removeValue(forKey: repositoryRoot)
+    }
+
+    private func updateWindowTitle(_ context: GitGraphContextDto?) {
+        let root = context?.log.repositoryRoot ?? repositoryRoot
+        let repositoryName = URL(fileURLWithPath: root).lastPathComponent
+        let name = repositoryName.isEmpty ? "Git" : repositoryName
+        if let path = context?.pathspec, !path.isEmpty {
+            window?.title = "Git Log — \(path)"
+        } else {
+            window?.title = "Git Graph — \(name)"
+        }
     }
 }
 
 private struct KiteGitLogWindowView: View {
     @StateObject private var viewModel: KiteGitLogViewModel
+    @State private var sidebarCollapsed = false
     @FocusState private var searchFocused: Bool
 
     init(viewModel: KiteGitLogViewModel) {
@@ -314,26 +511,28 @@ private struct KiteGitLogWindowView: View {
                 Rectangle()
                     .fill(Color.primary.opacity(0.08))
                     .frame(height: 0.5)
-                HStack(spacing: 0) {
-                    branchSidebar
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: 0.5)
-                    commitList
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: 0.5)
-                    detailPane
-                        .frame(width: 390)
+                HSplitView {
+                    if !sidebarCollapsed {
+                        sidebar
+                            .frame(minWidth: 190, idealWidth: 224, maxWidth: 260)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
+                    VSplitView {
+                        graphPane
+                            .frame(minHeight: 240)
+                        detailPane
+                            .frame(minHeight: 230)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .animation(.easeInOut(duration: 0.16), value: sidebarCollapsed)
                 Rectangle()
                     .fill(Color.primary.opacity(0.08))
                     .frame(height: 0.5)
                 statusBar
             }
         }
-        .frame(minWidth: 1240, minHeight: 600)
+        .frame(minWidth: 900, minHeight: 640)
         .task {
             await viewModel.reload()
         }
@@ -345,19 +544,34 @@ private struct KiteGitLogWindowView: View {
     }
 
     private var toolbar: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 9) {
             HStack(spacing: 10) {
-                Image(systemName: "arrow.triangle.branch")
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        sidebarCollapsed.toggle()
+                    }
+                } label: {
+                    Image(systemName: sidebarCollapsed ? "sidebar.left" : "sidebar.leading")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.borderless)
+                .help(sidebarCollapsed ? "显示 Git 导航" : "折叠 Git 导航")
+
+                Image(systemName: "point.3.connected.trianglepath.dotted")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                     .frame(width: 30, height: 30)
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(
+                        Color.accentColor.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 8) {
-                        Text("提交历史")
+                        Text(viewModel.workspaceTitle)
                             .font(.system(size: 13, weight: .semibold))
-                        if let branch = viewModel.context?.currentBranch {
+                        if let branch = viewModel.logContext?.currentBranch {
                             Text(branch)
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
@@ -366,14 +580,42 @@ private struct KiteGitLogWindowView: View {
                                 .background(Color.accentColor.opacity(0.12), in: Capsule())
                         }
                     }
-                    Text(viewModel.context?.repositoryRoot ?? viewModel.path)
+                    Text(viewModel.repositoryRoot)
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
 
-                Spacer()
+                Spacer(minLength: 8)
+
+                HStack(spacing: 6) {
+                    Image(systemName: viewModel.scopeChipIcon)
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text(viewModel.scopeChipTitle)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if viewModel.isScoped {
+                        Button {
+                            Task { await viewModel.clearScope() }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 10))
+                        }
+                        .buttonStyle(.plain)
+                        .help("清除范围，回到 Repository Graph")
+                    }
+                }
+                .foregroundStyle(viewModel.isScoped ? Color.accentColor : Color.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    (viewModel.isScoped ? Color.accentColor : Color.secondary).opacity(0.12),
+                    in: Capsule()
+                )
+                .frame(maxWidth: 360)
+                .accessibilityLabel("当前 Git scope：\(viewModel.scopeChipTitle)")
 
                 Button {
                     Task { await viewModel.reload() }
@@ -399,8 +641,11 @@ private struct KiteGitLogWindowView: View {
                         }
                     }
                 } label: {
-                    Label("筛选 · \(viewModel.searchMode.title)", systemImage: "line.3.horizontal.decrease.circle")
-                        .font(.system(size: 11, weight: .medium))
+                    Label(
+                        "筛选 · \(viewModel.searchMode.title)",
+                        systemImage: "line.3.horizontal.decrease.circle"
+                    )
+                    .font(.system(size: 11, weight: .medium))
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -434,32 +679,14 @@ private struct KiteGitLogWindowView: View {
                 .foregroundStyle(viewModel.searchRegex ? Color.accentColor : Color.secondary)
 
                 branchMenu
-
                 dateMenu
             }
             .padding(.horizontal, 10)
             .frame(height: 34)
-            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-            if let historyPath = viewModel.historyPath {
-                HStack(spacing: 8) {
-                    Image(systemName: "doc.text")
-                        .foregroundStyle(.secondary)
-                    Text("文件历史 · \(historyPath)")
-                        .font(.system(size: 10.5))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Button("清除") {
-                        Task { await viewModel.clearFileHistory() }
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 10.5))
-                }
-                .padding(.horizontal, 10)
-                .frame(height: 28)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
+            .background(
+                Color.primary.opacity(0.045),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -494,19 +721,13 @@ private struct KiteGitLogWindowView: View {
                 }
             }
         } label: {
-            Label(branchLabel, systemImage: "arrow.triangle.branch")
+            Label(viewModel.branchLabel(for: viewModel.branch), systemImage: "arrow.triangle.branch")
                 .font(.system(size: 10.5, weight: .medium))
                 .lineLimit(1)
         }
         .menuStyle(.borderlessButton)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: 180)
-    }
-
-    private var branchLabel: String {
-        guard let branch = viewModel.branch else { return "分支 · 全部" }
-        let name = viewModel.context?.refs.first { $0.fullName == branch }?.name ?? branch
-        return "分支 · \(name)"
     }
 
     private var dateMenu: some View {
@@ -538,9 +759,10 @@ private struct KiteGitLogWindowView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
-            Text("\(viewModel.commits.count) 个提交 · Rust Core 提交图")
+            Text("\(viewModel.commits.count) 个提交 · \(viewModel.scopeChipTitle)")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
         .padding(.horizontal, 12)
         .frame(height: 28)
@@ -562,8 +784,8 @@ private struct KiteGitLogWindowView: View {
 }
 
 private extension KiteGitLogWindowView {
-    var branchSidebar: some View {
-        let references = viewModel.context?.refs ?? []
+    var sidebar: some View {
+        let references = viewModel.logContext?.refs ?? []
         let localBranches = references.filter { $0.kind == .localBranch }
         let remoteBranches = references.filter { $0.kind == .remoteBranch }
         let tags = references.filter { $0.kind == .tag }
@@ -573,7 +795,7 @@ private extension KiteGitLogWindowView {
                 Image(systemName: "arrow.triangle.branch")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                Text("分支树")
+                Text("Git Workspace")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
                 Text("\(references.count)")
@@ -587,12 +809,22 @@ private extension KiteGitLogWindowView {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    referenceRow(
-                        label: "全部分支",
-                        fullName: nil,
-                        icon: "square.stack.3d.up",
-                        isHead: false
-                    )
+                    navButton(
+                        "All Commits",
+                        icon: "point.3.connected.trianglepath.dotted",
+                        selected: viewModel.branch == nil && !viewModel.isScoped
+                    ) {
+                        Task { await viewModel.showAllCommits() }
+                    }
+
+                    navButton("Local Changes", icon: "square.and.pencil", selected: false) {
+                        KiteGitClientWindowController.show(
+                            model: viewModel.model,
+                            repositoryPath: viewModel.repositoryRoot
+                        )
+                    }
+
+                    sectionLabel("Branches", icon: "arrow.triangle.branch", count: localBranches.count + remoteBranches.count)
                     referenceGroup(
                         title: "本地分支",
                         references: localBranches,
@@ -603,17 +835,76 @@ private extension KiteGitLogWindowView {
                         references: remoteBranches,
                         icon: "cloud"
                     )
+
+                    sectionLabel("Tags", icon: "tag", count: tags.count)
                     referenceGroup(
                         title: "标签",
                         references: tags,
                         icon: "tag"
                     )
+
+                    sectionLabel("Worktrees", icon: "square.stack.3d.up", count: 1)
+                    worktreeRow
+
+                    navButton(
+                        "Filter",
+                        icon: "line.3.horizontal.decrease.circle",
+                        selected: searchFocused
+                    ) {
+                        searchFocused = true
+                    }
                 }
                 .padding(8)
             }
         }
-        .frame(width: 218)
+        .frame(width: 224)
         .background(Color.primary.opacity(0.025))
+    }
+
+    func navButton(
+        _ title: String,
+        icon: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .frame(width: 14)
+                Text(title)
+                    .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 27)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selected ? Color.accentColor.opacity(0.14) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(title)
+    }
+
+    func sectionLabel(_ title: String, icon: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 9.5, weight: .semibold))
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+            Spacer()
+            Text("\(count)")
+                .font(.system(size: 9.5, design: .rounded))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.top, 9)
+        .padding(.bottom, 2)
     }
 
     func referenceGroup(
@@ -622,17 +913,6 @@ private extension KiteGitLogWindowView {
         icon: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text("\(references.count)")
-            }
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.top, 8)
-            .padding(.bottom, 2)
-
             if references.isEmpty {
                 Text("无")
                     .font(.system(size: 10))
@@ -691,120 +971,202 @@ private extension KiteGitLogWindowView {
         .help(label)
     }
 
+    var worktreeRow: some View {
+        Button {
+            KiteGitClientWindowController.show(
+                model: viewModel.model,
+                repositoryPath: viewModel.repositoryRoot
+            )
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "folder")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(URL(fileURLWithPath: viewModel.repositoryRoot).lastPathComponent)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                    Text(viewModel.logContext?.currentBranch ?? "detached HEAD")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 34)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("打开 Git 客户端")
+    }
+
     func chooseBranch(_ fullName: String?) {
         guard viewModel.branch != fullName else { return }
         viewModel.branch = fullName
         Task { await viewModel.reload() }
     }
 
-    var commitList: some View {
+    var graphPane: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("提交图")
-                    .frame(width: 92, alignment: .leading)
-                Text("引用")
-                    .frame(width: 210, alignment: .leading)
-                Text("提交")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("作者")
-                    .frame(width: 120, alignment: .leading)
-                Text("日期")
-                    .frame(width: 125, alignment: .leading)
-                Text("哈希")
-                    .frame(width: 74, alignment: .leading)
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("\(viewModel.commits.count) 个提交")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(.secondary)
             }
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
-            .frame(height: 32)
-            .background(Color.primary.opacity(0.035))
+            .frame(height: 34)
+            .background(Color.primary.opacity(0.025))
 
+            graphHeader
             Divider()
+            graphContent
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
-            if viewModel.loading && viewModel.commits.isEmpty {
-                Spacer()
-                ProgressView("正在读取提交历史…")
-                    .controlSize(.small)
-                Spacer()
-            } else if let error = viewModel.errorMessage, viewModel.commits.isEmpty {
-                Spacer()
-                VStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(.orange)
-                    Text(error)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 520)
-                    Button("重试") {
-                        Task { await viewModel.reload() }
+    var graphHeader: some View {
+        HStack(spacing: 8) {
+            Text("Graph")
+                .frame(width: 92, alignment: .leading)
+            Text("Refs")
+                .frame(width: 210, alignment: .leading)
+            Text("Subject")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Author")
+                .frame(width: 120, alignment: .leading)
+            Text("Date")
+                .frame(width: 125, alignment: .leading)
+            Text("Hash")
+                .frame(width: 74, alignment: .leading)
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .background(Color.primary.opacity(0.035))
+    }
+
+    @ViewBuilder
+    var graphContent: some View {
+        if viewModel.loading && viewModel.commits.isEmpty {
+            Spacer()
+            ProgressView("正在读取提交历史…")
+                .controlSize(.small)
+            Spacer()
+        } else if let error = viewModel.errorMessage, viewModel.commits.isEmpty {
+            Spacer()
+            VStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(.orange)
+                Text(error)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+                Button("重试") {
+                    Task { await viewModel.reload() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(24)
+            Spacer()
+        } else if viewModel.commits.isEmpty {
+            Spacer()
+            VStack(spacing: 10) {
+                Image(systemName: viewModel.isScoped ? "folder.badge.questionmark" : "arrow.triangle.branch")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text(viewModel.emptyHistoryMessage)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if viewModel.isScoped {
+                    Button("清除范围") {
+                        Task { await viewModel.clearScope() }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
-                .padding(24)
-                Spacer()
-            } else if viewModel.commits.isEmpty {
-                Spacer()
-                VStack(spacing: 10) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 30, weight: .light))
-                        .foregroundStyle(.tertiary)
-                    Text("没有匹配的提交")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(viewModel.commits, id: \.hash) { commit in
-                            KiteGitCommitRow(
-                                commit: commit,
-                                isSelected: viewModel.selectedHash == commit.hash
-                            )
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                Task { await viewModel.select(commit) }
-                            }
-                            .contextMenu {
-                                Button("复制完整哈希") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(commit.hash, forType: .string)
-                                }
-                                Button("在提交时浏览文件") {
-                                    Task { await viewModel.loadTree(commit) }
-                                }
-                            }
-                            .onAppear {
-                                guard commit.hash == viewModel.commits.last?.hash else { return }
-                                Task { await viewModel.loadMore() }
+            }
+            Spacer()
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(viewModel.commits, id: \.hash) { commit in
+                        KiteGitCommitRow(
+                            commit: commit,
+                            isSelected: viewModel.selectedHash == commit.hash
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            Task { await viewModel.select(commit) }
+                        }
+                        .onTapGesture(count: 2) {
+                            Task {
+                                await viewModel.select(commit)
+                                viewModel.detailTab = .files
                             }
                         }
-
-                        if viewModel.loadingMore {
-                            ProgressView()
-                                .controlSize(.small)
-                                .padding(12)
-                        } else if viewModel.canLoadMore {
-                            Button("加载更多") {
-                                Task { await viewModel.loadMore() }
+                        .contextMenu {
+                            Button("复制完整哈希") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(commit.hash, forType: .string)
                             }
-                            .buttonStyle(.borderless)
+                            Button("在提交时浏览文件") {
+                                Task { await viewModel.loadTree(commit) }
+                            }
+                            if let details = viewModel.details,
+                               details.commit.hash == commit.hash,
+                               !details.changedFiles.isEmpty {
+                                Menu("查看文件历史") {
+                                    ForEach(details.changedFiles, id: \.path) { file in
+                                        Button(file.path) {
+                                            Task { await viewModel.showFileHistory(file.path) }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Button("加载变更文件…") {
+                                    Task {
+                                        await viewModel.select(commit)
+                                        viewModel.detailTab = .files
+                                    }
+                                }
+                            }
+                        }
+                        .onAppear {
+                            guard commit.hash == viewModel.commits.last?.hash else { return }
+                            Task { await viewModel.loadMore() }
+                        }
+                    }
+
+                    if viewModel.loadingMore {
+                        ProgressView()
                             .controlSize(.small)
                             .padding(12)
-                        } else {
-                            Text("已到达历史末尾")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                                .padding(12)
+                    } else if viewModel.canLoadMore {
+                        Button("加载更多") {
+                            Task { await viewModel.loadMore() }
                         }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .padding(12)
+                    } else {
+                        Text("已到达历史末尾")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .padding(12)
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -1020,7 +1382,7 @@ private extension KiteGitLogWindowView {
                 }
             }
             .padding(.horizontal, 10)
-            .frame(height: 42)
+            .frame(height: 38)
             .background(Color.primary.opacity(0.03))
 
             Picker("", selection: $viewModel.detailTab) {
@@ -1067,9 +1429,13 @@ private extension KiteGitLogWindowView {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                 Spacer()
+                Text(viewModel.scopeChipTitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
             .padding(.horizontal, 12)
-            .frame(height: 28)
+            .frame(height: 26)
         }
         .background(.ultraThinMaterial)
     }
@@ -1081,12 +1447,12 @@ private extension KiteGitLogWindowView {
         if viewModel.treeLoading {
             return "正在读取提交文件树…"
         }
-        return "选择左侧提交查看详情"
+        return "选择提交查看详情"
     }
 
     @ViewBuilder
     private var commitDetailContent: some View {
-        if let details {
+        if let details = viewModel.details {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1110,7 +1476,10 @@ private extension KiteGitLogWindowView {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
-                            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .background(
+                                Color.primary.opacity(0.045),
+                                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            )
                     }
 
                     VStack(spacing: 7) {
@@ -1213,116 +1582,116 @@ private extension KiteGitLogWindowView {
         }
     }
 
+    @ViewBuilder
     private var changedFilesContent: some View {
-        Group {
-            if let details, !details.changedFiles.isEmpty {
-                ScrollView {
-                    LazyVStack(spacing: 1) {
-                        ForEach(Array(details.changedFiles.enumerated()), id: \.offset) { _, file in
-                            Button {
-                                Task { await viewModel.showFileHistory(file.path) }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Text(String(file.status.prefix(1)))
-                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(statusColor(file.status))
-                                        .frame(width: 18, alignment: .leading)
-                                    Text(fileLabel(file))
-                                        .font(.system(size: 10.5, design: .monospaced))
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                    Spacer()
-                                    Image(systemName: "clock.arrow.circlepath")
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .padding(.horizontal, 10)
-                                .frame(height: 30)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .help("查看文件历史")
-                        }
-                    }
-                    .padding(.vertical, 6)
-                }
-            } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "doc.text")
-                        .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(.tertiary)
-                    Text("选择一个提交查看变更文件")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if let details = viewModel.details, !details.changedFiles.isEmpty {
+            HStack(spacing: 0) {
+                KiteChangedFileTree(viewModel: viewModel, files: details.changedFiles)
+                    .frame(minWidth: 240, idealWidth: 320, maxWidth: 440)
+                Divider()
+                changedFileDetail(details)
             }
+        } else {
+            VStack(spacing: 10) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text("选择一个提交查看变更文件")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private var treeContent: some View {
-        Group {
-            if viewModel.treeLoading {
-                ProgressView("正在读取提交文件树…")
+    @ViewBuilder
+    private func changedFileDetail(_ details: GitCommitDetailsDto) -> some View {
+        let file = details.changedFiles.first(where: { $0.path == viewModel.selectedChangedFile })
+            ?? details.changedFiles.first
+        if let file {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Text(String(file.status.prefix(1)))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(kiteGitStatusColor(file.status))
+                        .frame(width: 18, alignment: .leading)
+                    Text(file.path)
+                        .font(.system(size: 11, design: .monospaced))
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Spacer()
+                }
+
+                if let oldPath = file.oldPath {
+                    Text("重命名自 \(oldPath)")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                HStack(spacing: 8) {
+                    Button("在独立窗口打开") {
+                        openDiff(file, commit: details.commit)
+                    }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.treeEntries.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(.tertiary)
-                    Text("选择“文件树”加载此提交的内容")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 1) {
-                        ForEach(Array(viewModel.treeEntries.enumerated()), id: \.offset) { _, entry in
-                            HStack(spacing: 8) {
-                                Image(systemName: "doc.text")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 14)
-                                Text(entry.path)
-                                    .font(.system(size: 10.5, design: .monospaced))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .textSelection(.enabled)
-                                Spacer()
-                                Text(Self.fileSize(entry.size))
-                                    .font(.system(size: 9.5, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 10)
-                            .frame(height: 27)
-                        }
+
+                    Button("查看文件历史") {
+                        Task { await viewModel.showFileHistory(file.path) }
                     }
-                    .padding(.vertical, 6)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer()
                 }
+
+                Divider()
+
+                KiteDiffViewerView(model: viewModel.embeddedDiffModel, embedded: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            Text("选择一个变更文件")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private var details: GitCommitDetailsDto? {
-        viewModel.details
+    private func openDiff(_ file: GitLogChangedFileDto, commit: GitLogCommitDto) {
+        let absolutePath = URL(fileURLWithPath: viewModel.repositoryRoot)
+            .appendingPathComponent(file.path)
+            .path
+        KiteDiffViewerWindowController.shared.show(
+            path: absolutePath,
+            appModel: viewModel.model,
+            preset: .custom,
+            oldRevision: "\(commit.hash)^",
+            newRevision: commit.hash
+        )
     }
 
-    private func fileLabel(_ file: GitLogChangedFileDto) -> String {
-        if let oldPath = file.oldPath {
-            return "\(oldPath) → \(file.path)"
-        }
-        return file.path
-    }
-
-    private func statusColor(_ status: String) -> Color {
-        switch String(status.prefix(1)) {
-        case "A": return Color(hex: 0x55b978)
-        case "D": return Color(hex: 0xef6b73)
-        case "R", "C": return Color(hex: 0x5e9cff)
-        default: return Color(hex: 0xe5a84b)
+    @ViewBuilder
+    private var treeContent: some View {
+        if viewModel.treeLoading {
+            ProgressView("正在读取提交文件树…")
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if viewModel.treeEntries.isEmpty {
+            VStack(spacing: 10) {
+                Image(systemName: "folder")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text("选择“文件树”加载此提交的内容")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            KiteCommitFileTree(viewModel: viewModel, entries: viewModel.treeEntries)
         }
     }
 
@@ -1331,6 +1700,172 @@ private extension KiteGitLogWindowView {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
+    }
+}
+
+private struct KiteChangedFileTree: View {
+    @ObservedObject var viewModel: KiteGitLogViewModel
+    let files: [GitLogChangedFileDto]
+
+    var body: some View {
+        let nodes = KiteChangedFileNode.make(from: files)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 1) {
+                OutlineGroup(nodes, children: \.children) { node in
+                    if let file = node.file {
+                        Button {
+                            viewModel.selectedChangedFile = file.path
+                            viewModel.showEmbeddedDiff()
+                        } label: {
+                            HStack(spacing: 7) {
+                                Text(String(file.status.prefix(1)))
+                                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(kiteGitStatusColor(file.status))
+                                    .frame(width: 16, alignment: .leading)
+                                Image(systemName: "doc.text")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                                Text(node.name)
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer(minLength: 4)
+                            }
+                            .padding(.horizontal, 7)
+                            .frame(height: 26)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                viewModel.selectedChangedFile == file.path
+                                    ? Color.accentColor.opacity(0.14)
+                                    : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(file.path)
+                    } else {
+                        Label(node.name, systemImage: "folder")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 3)
+                    }
+                }
+            }
+            .padding(6)
+        }
+    }
+}
+
+private struct KiteChangedFileNode: Identifiable {
+    let id: String
+    let name: String
+    let path: String?
+    let file: GitLogChangedFileDto?
+    let children: [KiteChangedFileNode]?
+
+    static func make(from files: [GitLogChangedFileDto]) -> [KiteChangedFileNode] {
+        let root = MutableChangedFileNode(name: "", path: "")
+        for file in files {
+            let parts = file.path.split(separator: "/").map(String.init)
+            var current = root
+            var currentPath = ""
+            for (index, part) in parts.enumerated() {
+                currentPath = currentPath.isEmpty ? part : "\(currentPath)/\(part)"
+                let child = current.children[part] ?? MutableChangedFileNode(name: part, path: currentPath)
+                current.children[part] = child
+                if index == parts.count - 1 {
+                    child.file = file
+                }
+                current = child
+            }
+        }
+        return root.children.values
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .map { makeNode($0) }
+    }
+
+    private static func makeNode(_ node: MutableChangedFileNode) -> KiteChangedFileNode {
+        let children = node.children.values
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .map { makeNode($0) }
+        return KiteChangedFileNode(
+            id: node.file == nil ? "dir:\(node.path)" : "file:\(node.path)",
+            name: node.name,
+            path: node.file?.path,
+            file: node.file,
+            children: children.isEmpty ? nil : children
+        )
+    }
+}
+
+private final class MutableChangedFileNode {
+    let name: String
+    let path: String
+    var children: [String: MutableChangedFileNode] = [:]
+    var file: GitLogChangedFileDto?
+
+    init(name: String, path: String) {
+        self.name = name
+        self.path = path
+    }
+}
+
+private struct KiteCommitFileTree: View {
+    @ObservedObject var viewModel: KiteGitLogViewModel
+    let entries: [GitTreeEntryDto]
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(entries, id: \.path) { entry in
+                        let depth = max(0, entry.path.split(separator: "/").count - 1)
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.text")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 14)
+                            Text(String(repeating: "  ", count: depth) + entry.name)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                            Spacer()
+                            Text(Self.fileSize(entry.size))
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(height: 27)
+                        .background(
+                            viewModel.isInScope(entry.path)
+                                ? Color.accentColor.opacity(0.10)
+                                : Color.clear
+                        )
+                        .id(entry.path)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            .onAppear {
+                scrollToScope(proxy)
+            }
+            .onChange(of: entries.count) { _ in
+                scrollToScope(proxy)
+            }
+        }
+    }
+
+    private func scrollToScope(_ proxy: ScrollViewProxy) {
+        guard let scopePath = viewModel.scopePath, !scopePath.isEmpty else { return }
+        let match = entries.first {
+            $0.path == scopePath || $0.path.hasPrefix(scopePath + "/")
+        }
+        guard let match else { return }
+        DispatchQueue.main.async {
+            proxy.scrollTo(match.path, anchor: .center)
+        }
     }
 
     private static func fileSize(_ size: UInt64) -> String {
@@ -1354,5 +1889,14 @@ private struct KiteGitDetailRow: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private func kiteGitStatusColor(_ status: String) -> Color {
+    switch String(status.prefix(1)) {
+    case "A": return Color(hex: 0x55b978)
+    case "D": return Color(hex: 0xef6b73)
+    case "R", "C": return Color(hex: 0x5e9cff)
+    default: return Color(hex: 0xe5a84b)
     }
 }

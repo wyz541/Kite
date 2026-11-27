@@ -1936,9 +1936,17 @@ private struct KiteEntryMenu: View {
 
         if model.isGitAvailable(forEntryPath: entry.path) {
             Button {
-                model.openGitLog(path: entry.path)
+                model.openGitLog(
+                    path: entry.path,
+                    scope: entry.isDirectory
+                        ? .directory(path: entry.path)
+                        : .file(path: entry.path)
+                )
             } label: {
-                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+                Label(
+                    entry.isDirectory ? "查看目录 Git 历史" : "查看文件 Git 历史",
+                    systemImage: "clock.arrow.circlepath"
+                )
             }
         }
 
@@ -2249,9 +2257,9 @@ private struct KiteDirectoryMenu: View {
         if column.gitAvailable {
             Divider()
             Button {
-                model.openGitLog(path: column.path)
+                model.openGitLog(path: column.path, scope: .directory(path: column.path))
             } label: {
-                Label("查看 Git 历史", systemImage: "clock.arrow.circlepath")
+                Label("查看目录 Git 历史", systemImage: "clock.arrow.circlepath")
             }
         }
         Divider()

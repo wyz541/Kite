@@ -2340,6 +2340,82 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
+    func gitGraphContext(
+        repositoryPath: String,
+        scope: GitGraphScopeDto
+    ) async throws -> GitGraphContextDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitGraphContext(repositoryPath: repositoryPath, scope: scope)
+        }.value
+    }
+
+    func gitGraphPage(
+        repositoryPath: String,
+        scope: GitGraphScopeDto,
+        filter: GitLogFilterDto,
+        cursor: String?,
+        pageSize: UInt32
+    ) async throws -> GitLogPageDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitGraphPage(
+                repositoryPath: repositoryPath,
+                scope: scope,
+                filter: filter,
+                cursor: cursor,
+                pageSize: pageSize
+            )
+        }.value
+    }
+
+    func gitGraphCommitDetails(
+        repositoryPath: String,
+        scope: GitGraphScopeDto,
+        hash: String
+    ) async throws -> GitCommitDetailsDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitGraphCommitDetails(
+                repositoryPath: repositoryPath,
+                scope: scope,
+                hash: hash
+            )
+        }.value
+    }
+
+    func gitGraphCommitTree(
+        repositoryPath: String,
+        scope: GitGraphScopeDto,
+        hash: String
+    ) async throws -> [GitTreeEntryDto] {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitGraphCommitTree(
+                repositoryPath: repositoryPath,
+                scope: scope,
+                hash: hash
+            )
+        }.value
+    }
+
+    func gitGraphFileHistory(
+        repositoryPath: String,
+        relativePath: String,
+        cursor: String?,
+        pageSize: UInt32
+    ) async throws -> GitLogPageDto {
+        let core = self.core
+        return try await Task.detached(priority: .userInitiated) {
+            try core.gitGraphFileHistory(
+                repositoryPath: repositoryPath,
+                relativePath: relativePath,
+                cursor: cursor,
+                pageSize: pageSize
+            )
+        }.value
+    }
+
     func gitLogPage(
         path: String,
         filter: GitLogFilterDto,
@@ -2388,8 +2464,8 @@ final class KiteModel: ObservableObject {
         }.value
     }
 
-    func openGitLog(path: String) {
-        KiteGitLogWindowController.shared.show(model: self, path: path)
+    func openGitLog(path: String, scope: GitGraphScopeDto = .repository) {
+        KiteGitLogWindowController.show(model: self, path: path, scope: scope)
     }
 
     func gitHeadSummary(path: String) async -> GitHeadSummaryDto? {

@@ -155,6 +155,9 @@ macOS 可与 Finder 共享文件剪贴板。
 - 管理 Git 本地/远程分支、标签、上游、比较和 worktree。
 - 工作区有未提交更改时，Git 检出会要求取消或先 stash 再恢复。
 - 在应用内查看提交历史、提交图、引用、提交详情、变更文件和文件历史。
+- Git Graph / Git Log 支持仓库、目录和文件 scope；目录 scope 递归包含子目录，并保留 merge 拓扑。
+- Fork 式 Git Workspace 按仓库复用单一窗口，底部提供提交、变更和文件树三个详情 tab。
+- Git Workspace 与独立 Diff 窗口复用同一差异组件，支持统一/并排 Diff 与 scope 跳转。
 - 文件夹显示子项目中优先级最高的状态。
 - 右键菜单支持 Git 和 SVN 常用操作。
 - Git 提交流程支持 amend、Signed-off-by、GPG/SSH 签名、跳过 hooks、指定作者、提交模板和提交后推送。
@@ -221,6 +224,8 @@ macOS 可与 Finder 共享文件剪贴板。
 | Agent 栏/窗口上下文准备 | 已支持 | 已支持 |
 | Git 分支与标签 | 已支持 | 已支持 |
 | 提交历史与提交图 | 已支持 | 已支持 |
+| 目录/文件级 Git Graph / Log scope | 已支持 | 已支持 |
+| Git Workspace 三 tab 与内嵌 Diff | 已支持 | 已支持 |
 | Git 客户端 | 已支持 | 已支持 |
 | Git 提交 | 已支持 | 已支持 |
 | Git 客户端变更与行级暂存 | 已支持 | 已支持 |
