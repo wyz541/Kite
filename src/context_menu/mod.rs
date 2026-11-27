@@ -20,6 +20,8 @@ use crate::platform::HostPlatform;
 #[cfg(target_os = "windows")]
 mod open_with_windows;
 #[cfg(target_os = "windows")]
+mod tool_registry_windows;
+#[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(target_os = "windows")]
@@ -210,6 +212,9 @@ impl ContextMenuTarget {
             kite_core::context_menu_model::ActionPayload::Application { application_id } => {
                 ContextMenuActionPayload::Application(application_id.clone())
             }
+            kite_core::context_menu_model::ActionPayload::Tool { tool_id } => {
+                ContextMenuActionPayload::Tool(tool_id.clone())
+            }
             _ => ContextMenuActionPayload::None,
         };
         Some(ContextMenuAction {
@@ -258,6 +263,11 @@ impl ContextMenuTarget {
         } else {
             OpenWithCatalog::default()
         };
+        let tool_catalog = if self.is_shell_namespace {
+            kite_core::tool_registry::ToolCatalog::default()
+        } else {
+            tool_registry_windows::catalog(self)
+        };
         ContextSnapshot {
             schema_version: kite_core::context_menu_model::CONTEXT_MENU_SCHEMA_VERSION,
             snapshot_id: format!("windows-context-menu:{}", self.path.display()),
@@ -295,6 +305,8 @@ impl ContextMenuTarget {
                 native_plane_available: true,
             },
             open_with,
+            tool_catalog,
+            tool_policy: tool_registry_windows::policy(),
             policy: policy.core_policy(),
         }
     }
@@ -333,6 +345,8 @@ fn popup_icon(icon_key: &str) -> IconName {
         "refresh" => IconName::RotateCw,
         "open" => IconName::FolderOpen,
         "open-with" => IconName::AppWindow,
+        "open-in" => IconName::AppWindow,
+        "compare-with" => IconName::AppWindow,
         "quick-look" => IconName::Eye,
         "copy" => IconName::Copy,
         "cut" => IconName::Scissors,
@@ -595,7 +609,7 @@ mod tests {
     fn git_and_agent_are_declared_once_in_central_submenus() {
         let plan = build_plan(&target(false), windows_policy());
         let ids = plan.visible_action_ids();
-        assert_eq!(ids.iter().filter(|id| **id == "git.open-client").count(), 1);
+        assert_eq!(ids.iter().filter(|id| **id == "open.in").count(), 1);
         assert_eq!(ids.iter().filter(|id| **id == "agent.ask").count(), 1);
         assert!(plan.find_submenu("git").is_some());
         assert!(plan.find_submenu("agent").is_some());

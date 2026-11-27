@@ -8,6 +8,7 @@ use kite_core::agent::{
     AgentTransport, PermissionPolicy, WorkingDirectoryPolicy, agent_presets,
     clear_agent_diagnostics, diagnose_agents, preset_profile,
 };
+use kite_core::tool_registry::{ToolPlatform, ToolPolicy, builtin_tool_definitions};
 
 use crate::app::{KiteApp, SettingsUpdateState};
 use crate::ui_preferences::{self, AppearancePreference, UiPreferences};
@@ -65,7 +66,7 @@ impl SettingsPage {
             Self::General => "启动和窗口恢复",
             Self::Appearance => "主题和界面外观",
             Self::Layout => "侧边栏、预览和详细信息",
-            Self::FileHandling => "默认资源管理器",
+            Self::FileHandling => "默认资源管理器与工具",
             Self::Agent => "连接、权限与默认 Agent",
             Self::Updates => "版本、更新与诊断",
             Self::About => "Kite 版本信息",
@@ -2827,6 +2828,7 @@ impl SettingsWindow {
                 Some("Windows 桌面、任务栏和文件对话框仍由 Windows 管理。"),
                 cx,
             ))
+            .child(self.render_tool_settings(cx))
             .child(self.section(
                 "系统入口",
                 vec![self.row(
@@ -2848,6 +2850,134 @@ impl SettingsWindow {
             );
         }
         content.into_any_element()
+    }
+
+    fn render_tool_settings(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let definitions = builtin_tool_definitions(ToolPlatform::Windows)
+            .into_iter()
+            .filter(|tool| {
+                tool.platform == ToolPlatform::Any || tool.platform == ToolPlatform::Windows
+            })
+            .collect::<Vec<_>>();
+        let tool_ids = definitions
+            .iter()
+            .map(|tool| tool.tool_id.clone())
+            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        for (index, tool) in definitions.iter().enumerate() {
+            if index > 0 {
+                rows.push(self.separator(cx));
+            }
+            let tool_id = tool.tool_id.clone();
+            let pinned = self.preferences.tool_policy.is_pinned(&tool_id);
+            let hidden = self.preferences.tool_policy.is_hidden(&tool_id);
+            let display_name = tool.display_name.clone();
+            let description = tool.description.clone();
+            let pin_id = tool_id.clone();
+            let hide_id = tool_id.clone();
+            let up_id = tool_id.clone();
+            let down_id = tool_id.clone();
+            let up_ids = tool_ids.clone();
+            let down_ids = tool_ids.clone();
+            let controls = h_flex()
+                .gap_2()
+                .child(
+                    Switch::new(SharedString::from(format!("tool-pin-{tool_id}")))
+                        .checked(pinned)
+                        .small()
+                        .accessibility_label(format!("固定 {display_name}"))
+                        .on_click(cx.listener(move |this, checked, window, cx| {
+                            this.preferences.tool_policy.set_pinned(&pin_id, *checked);
+                            this.save_preferences(window, cx);
+                        })),
+                )
+                .child(
+                    Switch::new(SharedString::from(format!("tool-hide-{tool_id}")))
+                        .checked(hidden)
+                        .small()
+                        .accessibility_label(format!("隐藏 {display_name}"))
+                        .on_click(cx.listener(move |this, checked, window, cx| {
+                            this.preferences.tool_policy.set_hidden(&hide_id, *checked);
+                            this.save_preferences(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("tool-up-{tool_id}")))
+                        .ghost()
+                        .compact()
+                        .label("↑")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            move_tool_in_policy(
+                                &mut this.preferences.tool_policy,
+                                &up_id,
+                                -1,
+                                &up_ids,
+                            );
+                            this.save_preferences(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("tool-down-{tool_id}")))
+                        .ghost()
+                        .compact()
+                        .label("↓")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            move_tool_in_policy(
+                                &mut this.preferences.tool_policy,
+                                &down_id,
+                                1,
+                                &down_ids,
+                            );
+                            this.save_preferences(window, cx);
+                        })),
+                )
+                .into_any_element();
+            rows.push(self.dynamic_row(
+                format!("tool-policy-{tool_id}"),
+                display_name,
+                Some(description),
+                controls,
+                cx,
+            ));
+        }
+        let tool_controls = h_flex()
+            .gap_2()
+            .child(
+                Button::new("tool-refresh-discovery")
+                    .small()
+                    .outline()
+                    .label("重新发现")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        crate::context_menu::tool_registry_windows::refresh();
+                        this.status = Some("工具发现缓存已清除".into());
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("tool-clear-recent")
+                    .small()
+                    .outline()
+                    .label("清空最近使用")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.preferences.tool_policy.recent_tool_ids.clear();
+                        this.save_preferences(window, cx);
+                    })),
+            )
+            .into_any_element();
+        rows.push(self.separator(cx));
+        rows.push(self.row(
+            "tool-recent-policy",
+            "最近使用",
+            Some("只影响工具子菜单内部顺序，不改变一级菜单顺序。"),
+            tool_controls,
+            cx,
+        ));
+        self.section(
+            "工具",
+            rows,
+            Some("固定工具优先；隐藏工具不出现在“在工具中打开”和“比较…”中。启动工具时使用精确参数数组，不经过 Shell。"),
+            cx,
+        )
     }
 
     fn render_updates(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -3274,6 +3404,41 @@ impl SettingsWindow {
             .into_any_element()
     }
 
+    fn dynamic_row(
+        &self,
+        id: String,
+        title: String,
+        detail: Option<String>,
+        control: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        h_flex()
+            .id(SharedString::from(id))
+            .w_full()
+            .min_h(px(58.))
+            .gap_6()
+            .items_center()
+            .px_4()
+            .py_3()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(div().text_sm().font_medium().child(title))
+                    .when_some(detail, |this, detail| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(detail),
+                        )
+                    }),
+            )
+            .child(div().flex_shrink_0().child(control))
+            .into_any_element()
+    }
+
     fn separator(&self, cx: &App) -> AnyElement {
         div()
             .ml(px(16.))
@@ -3329,6 +3494,32 @@ impl Render for SettingsWindow {
             );
         div().relative().size_full().child(content).children(editor)
     }
+}
+
+fn move_tool_in_policy(policy: &mut ToolPolicy, tool_id: &str, delta: isize, tool_ids: &[String]) {
+    let mut order = policy.user_order.clone();
+    for id in tool_ids {
+        if !order
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(id))
+        {
+            order.push(id.clone());
+        }
+    }
+    let Some(index) = order
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(tool_id))
+    else {
+        return;
+    };
+    let Some(destination) = index.checked_add_signed(delta) else {
+        return;
+    };
+    if destination >= order.len() {
+        return;
+    }
+    order.swap(index, destination);
+    policy.user_order = order;
 }
 
 pub(crate) fn open_settings_window(

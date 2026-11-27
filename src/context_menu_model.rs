@@ -10,6 +10,10 @@ use std::path::Path;
 
 use crate::agent::is_text_like_path;
 use crate::archive;
+use crate::tool_registry::{
+    ToolCatalog, ToolCatalogStatus, ToolPlatform, ToolPolicy, ToolRole, available_tools,
+    builtin_tool_definitions,
+};
 
 pub const CONTEXT_MENU_SCHEMA_VERSION: u32 = 1;
 pub const FILE_ACTIONS_SUBMENU: &str = "file-actions";
@@ -19,6 +23,8 @@ pub const GIT_SUBMENU: &str = "git";
 pub const SVN_SUBMENU: &str = "svn";
 pub const SYSTEM_SUBMENU: &str = "system";
 pub const OPEN_WITH_SUBMENU: &str = "open-with";
+pub const OPEN_IN_SUBMENU: &str = "open-in";
+pub const COMPARE_WITH_SUBMENU: &str = "compare-with";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextPlatform {
@@ -314,6 +320,8 @@ pub struct ContextSnapshot {
     pub container: ContainerSnapshot,
     pub capabilities: ContextCapabilities,
     pub open_with: OpenWithCatalog,
+    pub tool_catalog: ToolCatalog,
+    pub tool_policy: ToolPolicy,
     pub policy: ContextPolicy,
 }
 
@@ -455,6 +463,7 @@ pub enum TargetCardinality {
     None,
     One,
     OneOrMore,
+    ExactlyTwo,
     Any,
 }
 
@@ -514,6 +523,7 @@ impl TargetRule {
             TargetCardinality::None => context.target_set.targets.is_empty(),
             TargetCardinality::One => context.target_set.targets.len() == 1,
             TargetCardinality::OneOrMore => !context.target_set.targets.is_empty(),
+            TargetCardinality::ExactlyTwo => context.target_set.targets.len() == 2,
             TargetCardinality::Any => true,
         }
     }
@@ -596,6 +606,8 @@ pub enum SubmenuId {
     Git,
     Svn,
     OpenWith,
+    OpenIn,
+    CompareWith,
     System,
 }
 
@@ -608,6 +620,8 @@ impl SubmenuId {
             Self::Git => GIT_SUBMENU,
             Self::Svn => SVN_SUBMENU,
             Self::OpenWith => OPEN_WITH_SUBMENU,
+            Self::OpenIn => OPEN_IN_SUBMENU,
+            Self::CompareWith => COMPARE_WITH_SUBMENU,
             Self::System => SYSTEM_SUBMENU,
         }
     }
@@ -620,6 +634,8 @@ impl SubmenuId {
             GIT_SUBMENU => Some(Self::Git),
             SVN_SUBMENU => Some(Self::Svn),
             OPEN_WITH_SUBMENU => Some(Self::OpenWith),
+            OPEN_IN_SUBMENU => Some(Self::OpenIn),
+            COMPARE_WITH_SUBMENU => Some(Self::CompareWith),
             SYSTEM_SUBMENU => Some(Self::System),
             _ => None,
         }
@@ -633,6 +649,8 @@ impl SubmenuId {
             Self::Git => "Git",
             Self::Svn => "SVN",
             Self::OpenWith => "打开方式",
+            Self::OpenIn => "在工具中打开",
+            Self::CompareWith => "比较…",
             Self::System if platform.is_macos() => "系统",
             Self::System if platform.is_windows() => "更多系统操作",
             Self::System => "系统",
@@ -646,6 +664,8 @@ impl SubmenuId {
             Self::Agent => "agent",
             Self::Git | Self::Svn => "vcs",
             Self::OpenWith => "open-with",
+            Self::OpenIn => "open-in",
+            Self::CompareWith => "compare-with",
             Self::System => "system",
         }
     }
@@ -657,6 +677,8 @@ impl SubmenuId {
             Self::Agent => RootGroup::AgentAndTools,
             Self::Git | Self::Svn => RootGroup::Vcs,
             Self::OpenWith => RootGroup::OpenAndLaunch,
+            Self::OpenIn => RootGroup::OpenAndLaunch,
+            Self::CompareWith => RootGroup::OpenAndLaunch,
             Self::System => RootGroup::System,
         }
     }
@@ -1163,6 +1185,12 @@ fn submenu_for_action(action_id: &str) -> Option<SubmenuId> {
     if action_id == "open.with" || action_id == "open.with.choose-other" {
         return Some(SubmenuId::OpenWith);
     }
+    if action_id == "open.in" {
+        return Some(SubmenuId::OpenIn);
+    }
+    if action_id == "compare.with" {
+        return Some(SubmenuId::CompareWith);
+    }
     if action_id.starts_with("git.") {
         return Some(SubmenuId::Git);
     }
@@ -1473,6 +1501,7 @@ fn default_providers() -> Vec<Box<dyn ActionProvider>> {
         Box::new(RefreshActionProvider),
         Box::new(CoreActionProvider),
         Box::new(OpenWithActionProvider),
+        Box::new(ToolActionProvider),
         Box::new(ArchiveActionProvider),
         Box::new(AgentActionProvider),
         Box::new(VcsActionProvider),
@@ -1483,6 +1512,7 @@ fn default_providers() -> Vec<Box<dyn ActionProvider>> {
 struct RefreshActionProvider;
 struct CoreActionProvider;
 struct OpenWithActionProvider;
+struct ToolActionProvider;
 struct ArchiveActionProvider;
 struct AgentActionProvider;
 struct VcsActionProvider;
@@ -1782,6 +1812,106 @@ fn normalized_open_with_applications(
     ordered
 }
 
+impl ActionProvider for ToolActionProvider {
+    fn candidates(&self, context: &ContextSnapshot) -> Vec<ActionCandidate> {
+        if context.capabilities.is_shell_namespace || context.target_set.targets.is_empty() {
+            return Vec::new();
+        }
+
+        let definitions = builtin_tool_definitions(ToolPlatform::from_context(context.platform));
+        let mut candidates = Vec::new();
+        if context.tool_catalog.status == ToolCatalogStatus::Loading {
+            candidates.push(
+                ActionCandidate::with_availability(
+                    "open.in",
+                    CandidateAvailability::disabled(
+                        "TOOL_DISCOVERY_LOADING",
+                        "正在查找已安装的工具",
+                    ),
+                )
+                .variant("status:loading")
+                .label("正在查找已安装的工具…")
+                .icon_key("open-in")
+                .order(15),
+            );
+        } else {
+            let tools = available_tools(
+                context.platform,
+                &definitions,
+                &context.tool_catalog,
+                &context.tool_policy,
+                &context.target_set,
+                ToolRole::Open,
+            );
+            for (index, tool) in tools.into_iter().enumerate() {
+                candidates.push(
+                    ActionCandidate::available("open.in")
+                        .variant(format!("tool:{}:open", tool.tool_id))
+                        .label(format!("在 {} 中打开", tool.display_name))
+                        .icon_key("open-in")
+                        .order(100u16.saturating_add(
+                            u16::try_from(index).unwrap_or(u16::MAX).saturating_mul(10),
+                        ))
+                        .payload(ActionPayload::Tool {
+                            tool_id: tool.tool_id,
+                        }),
+                );
+            }
+        }
+
+        if compare_targets_eligible(context) {
+            if context.tool_catalog.status == ToolCatalogStatus::Loading {
+                candidates.push(
+                    ActionCandidate::with_availability(
+                        "compare.with",
+                        CandidateAvailability::disabled(
+                            "TOOL_DISCOVERY_LOADING",
+                            "正在查找已安装的比较工具",
+                        ),
+                    )
+                    .variant("status:loading")
+                    .label("正在查找比较工具…")
+                    .icon_key("compare-with")
+                    .order(25),
+                );
+            } else {
+                let tools = available_tools(
+                    context.platform,
+                    &definitions,
+                    &context.tool_catalog,
+                    &context.tool_policy,
+                    &context.target_set,
+                    ToolRole::Compare,
+                );
+                for (index, tool) in tools.into_iter().enumerate() {
+                    candidates.push(
+                        ActionCandidate::available("compare.with")
+                            .variant(format!("tool:{}:compare", tool.tool_id))
+                            .label(format!("使用 {} 比较", tool.display_name))
+                            .icon_key("compare-with")
+                            .order(100u16.saturating_add(
+                                u16::try_from(index).unwrap_or(u16::MAX).saturating_mul(10),
+                            ))
+                            .payload(ActionPayload::Tool {
+                                tool_id: tool.tool_id,
+                            }),
+                    );
+                }
+            }
+        }
+        candidates
+    }
+}
+
+fn compare_targets_eligible(context: &ContextSnapshot) -> bool {
+    context.target_set.targets.len() == 2
+        && context
+            .target_set
+            .targets
+            .iter()
+            .all(|target| target.kind.is_file_like() && target.exists && target.readable)
+}
+
 impl ActionProvider for ArchiveActionProvider {
     fn candidates(&self, context: &ContextSnapshot) -> Vec<ActionCandidate> {
         let mut candidates = Vec::new();
@@ -1872,7 +2002,6 @@ impl ActionProvider for VcsActionProvider {
         };
         if context.capabilities.git_available {
             for action_id in [
-                "git.open-client",
                 "git.add",
                 "git.unstage",
                 "git.commit",
@@ -1949,15 +2078,6 @@ impl ActionProvider for SystemActionProvider {
         }
         if context.capabilities.properties_available && context.target_set.targets.len() == 1 {
             candidates.push(ActionCandidate::available("system.properties"));
-        }
-        if context.capabilities.text_editor_available
-            && context.target_set.targets.len() == 1
-            && context.all_files_text_like()
-        {
-            candidates.push(ActionCandidate::available("tool.kite.text-editor"));
-        }
-        if context.capabilities.mindmap_available && context.target_set.targets.len() == 1 {
-            candidates.push(ActionCandidate::available("tool.kite.mindmap"));
         }
         if context.capabilities.mindmap_import_available && context.target_set.targets.len() == 1 {
             candidates.push(ActionCandidate::available("tool.kite.mindmap-import"));
@@ -2056,6 +2176,44 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             Some(SubmenuId::OpenWith),
             10_000,
             "open-with",
+        ),
+        "open.in" => d(
+            action_id,
+            "在工具中打开",
+            ActionScope::Workspace,
+            ActionEffect::ProcessLaunch,
+            ActionRisk::Low,
+            TargetRule::new(
+                &[
+                    TargetKind::File,
+                    TargetKind::Directory,
+                    TargetKind::Archive,
+                    TargetKind::RepositoryRoot,
+                    TargetKind::WorkspaceRoot,
+                ],
+                TargetCardinality::OneOrMore,
+            ),
+            RootGroup::OpenAndLaunch,
+            MenuSection::Primary,
+            Some(SubmenuId::OpenIn),
+            15,
+            "open-in",
+        ),
+        "compare.with" => d(
+            action_id,
+            "比较…",
+            ActionScope::Collection,
+            ActionEffect::ProcessLaunch,
+            ActionRisk::Low,
+            TargetRule::new(
+                &[TargetKind::File, TargetKind::Archive],
+                TargetCardinality::ExactlyTwo,
+            ),
+            RootGroup::OpenAndLaunch,
+            MenuSection::Primary,
+            Some(SubmenuId::CompareWith),
+            25,
+            "compare-with",
         ),
         "open.quick-look" => d(
             action_id,
@@ -2887,6 +3045,8 @@ mod tests {
                 ..ContextCapabilities::default()
             },
             open_with: OpenWithCatalog::default(),
+            tool_catalog: ToolCatalog::default(),
+            tool_policy: ToolPolicy::default(),
             policy: ContextPolicy {
                 hide_unavailable: true,
                 ..ContextPolicy::default()
@@ -3138,6 +3298,12 @@ mod tests {
         let mut context = context;
         context.capabilities.git_available = true;
         context.capabilities.svn_available = true;
+        context.tool_catalog = crate::tool_registry::ToolCatalog::ready(vec![
+            crate::tool_registry::DiscoveredTool::available(
+                "kite.git-client",
+                "kite-internal:git-client",
+            ),
+        ]);
         let plan = compose_default_menu(&context).expect("rich plan");
         let ids = plan.visible_action_ids();
         for id in [
@@ -3149,7 +3315,7 @@ mod tests {
             "archive.compress.zip",
             "agent.ask",
             "agent.summarize-folder",
-            "git.open-client",
+            "open.in",
             "git.commit",
             "svn.update",
             "svn.commit",
@@ -3157,6 +3323,144 @@ mod tests {
         ] {
             assert!(ids.contains(&id), "missing stable action id {id}: {ids:?}");
         }
+    }
+
+    fn tool_catalog(ids: &[&str]) -> crate::tool_registry::ToolCatalog {
+        crate::tool_registry::ToolCatalog::ready(
+            ids.iter()
+                .map(|id| {
+                    crate::tool_registry::DiscoveredTool::available(*id, format!("/tmp/{id}"))
+                })
+                .collect(),
+        )
+    }
+
+    fn tool_action<'a>(plan: &'a MenuPlan, action_id: &str) -> Vec<&'a ResolvedAction> {
+        let mut actions = Vec::new();
+        for group in &plan.groups {
+            for entry in &group.entries {
+                match entry {
+                    MenuEntryPlan::Action(action) if action.action_id == action_id => {
+                        actions.push(action)
+                    }
+                    MenuEntryPlan::Submenu(submenu) => {
+                        for section in &submenu.sections {
+                            actions.extend(
+                                section
+                                    .entries
+                                    .iter()
+                                    .filter(|action| action.action_id == action_id),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        actions
+    }
+
+    #[test]
+    fn tools_use_policy_order_only_inside_submenus() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.tool_catalog =
+            tool_catalog(&["kite.text-editor", "editor.vscode", "editor.cursor"]);
+        let mut first_policy = crate::tool_registry::ToolPolicy {
+            pinned_tool_ids: vec!["editor.cursor".to_string()],
+            user_order: vec!["editor.vscode".to_string(), "editor.cursor".to_string()],
+            recent_tool_ids: vec!["editor.vscode".to_string()],
+            ..Default::default()
+        };
+        context.tool_policy = first_policy.clone();
+        let first = compose_default_menu(&context).expect("ordered tools");
+        let submenu = first
+            .find_submenu(OPEN_IN_SUBMENU)
+            .expect("open-in submenu");
+        let first_ids = submenu
+            .sections
+            .iter()
+            .flat_map(|section| &section.entries)
+            .map(|action| action.payload.value().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_ids,
+            vec!["editor.cursor", "editor.vscode", "kite.text-editor"]
+        );
+        let root_position = first
+            .groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .position(|entry| matches!(entry, MenuEntryPlan::Submenu(submenu) if submenu.id == OPEN_IN_SUBMENU))
+            .expect("open-in root position");
+
+        first_policy.recent_tool_ids = vec!["kite.text-editor".to_string()];
+        context.tool_policy = first_policy;
+        let second = compose_default_menu(&context).expect("reordered tools");
+        let second_submenu = second
+            .find_submenu(OPEN_IN_SUBMENU)
+            .expect("open-in submenu after MRU change");
+        let second_ids = second_submenu
+            .sections
+            .iter()
+            .flat_map(|section| &section.entries)
+            .map(|action| action.payload.value().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second_ids,
+            vec!["editor.cursor", "kite.text-editor", "editor.vscode"]
+        );
+        let second_position = second
+            .groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .position(|entry| matches!(entry, MenuEntryPlan::Submenu(submenu) if submenu.id == OPEN_IN_SUBMENU))
+            .expect("open-in root position");
+        assert_eq!(root_position, second_position);
+    }
+
+    #[test]
+    fn single_tool_is_promoted_without_duplicate_submenu() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.tool_catalog = tool_catalog(&["editor.vscode"]);
+        let plan = compose_default_menu(&context).expect("single tool");
+        assert!(plan.find_submenu(OPEN_IN_SUBMENU).is_none());
+        let actions = tool_action(&plan, "open.in");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].payload,
+            ActionPayload::Tool {
+                tool_id: "editor.vscode".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn compare_with_requires_exactly_two_files_and_preserves_target_order() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 2);
+        context.tool_catalog = tool_catalog(&["editor.vscode"]);
+        let plan = compose_default_menu(&context).expect("compare plan");
+        let actions = tool_action(&plan, "compare.with");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].targets, context.target_set.ordered_paths);
+        assert_eq!(
+            actions[0].payload,
+            ActionPayload::Tool {
+                tool_id: "editor.vscode".to_string()
+            }
+        );
+
+        context.tool_catalog = tool_catalog(&["editor.vscode"]);
+        context.target_set = TargetSet::new(
+            Some("/tmp/a.txt".to_string()),
+            vec![
+                ContextTarget::new("/tmp/a.txt", "a.txt", TargetKind::File),
+                ContextTarget::new("/tmp/b.txt", "b.txt", TargetKind::File),
+                ContextTarget::new("/tmp/c.txt", "c.txt", TargetKind::File),
+            ],
+            "/tmp",
+        );
+        let plan = compose_default_menu(&context).expect("three-file plan");
+        assert!(tool_action(&plan, "compare.with").is_empty());
     }
 
     fn open_with_actions(plan: &MenuPlan) -> Vec<&ResolvedAction> {

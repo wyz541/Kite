@@ -28,6 +28,9 @@ bash apps/macos/Tests/run-context-menu-plan-smoke.sh
 echo "Testing Open With catalog..."
 bash apps/macos/Tests/run-open-with-smoke.sh
 
+echo "Testing tool registry..."
+bash apps/macos/Tests/run-tool-registry-smoke.sh
+
 echo "Building release app..."
 bash apps/macos/build.sh
 

@@ -10,11 +10,14 @@ enum KiteContextMenuTarget {
 struct KiteContextMenuView: View {
     @ObservedObject var model: KiteModel
     @ObservedObject private var openWithCatalog = KiteOpenWithCatalogCache.shared
+    @ObservedObject private var toolCatalog = KiteToolCatalogCache.shared
+    @ObservedObject private var toolPolicy = KiteToolPolicyStore.shared
     @EnvironmentObject private var agent: KiteAgentPanelModel
     let target: KiteContextMenuTarget
 
     var body: some View {
         let _ = openWithCatalog.revision
+        let _ = toolCatalog.revision
         let plan = makePlan()
         KiteContextMenuPlanView(groups: plan.groups, submenus: plan.submenus) { action in
             KiteContextMenuRunner(model: model, agent: agent, target: target)
@@ -59,6 +62,13 @@ struct KiteContextMenuView: View {
             isShellNamespace: false,
             nativePlaneAvailable: false,
             openWith: openWithCatalog.catalog(for: openWithPath).dto,
+            tools: toolCatalog.catalog(
+                paths: menuPaths,
+                textEditorEligible: textEditorAvailable,
+                mindmapEligible: mindmapAvailable,
+                gitAvailable: gitAvailable
+            ).dto,
+            toolPolicy: toolPolicy.policy.dto,
             compact: true,
             hideUnavailable: true,
             confirmHighRisk: true
@@ -188,6 +198,18 @@ struct KiteContextMenuView: View {
         return menuPaths[0]
     }
 
+    private var textEditorAvailable: Bool {
+        menuPaths.count == 1
+            && !isDirectoryContext
+            && KitePlatform.isEditableTextFile(primaryPath)
+    }
+
+    private var mindmapAvailable: Bool {
+        menuPaths.count == 1
+            && !isDirectoryContext
+            && KitePlatform.isMindmapFile(primaryPath)
+    }
+
     private func targetKind(for entry: BrowserEntry) -> String {
         if KitePlatform.archiveFormat(entry.path) != nil {
             return "archive"
@@ -260,6 +282,8 @@ private struct KiteContextMenuEntryView: View {
         case "refresh": return "arrow.clockwise"
         case "open": return "arrow.up.forward.app"
         case "open-with": return "square.grid.2x2"
+        case "open-in": return "arrow.up.forward.app"
+        case "compare-with": return "rectangle.split.2x1"
         case "quick-look": return "eye"
         case "copy": return "doc.on.doc"
         case "cut": return "scissors"
@@ -316,6 +340,20 @@ private struct KiteContextMenuRunner {
                     model.errorMessage = error.localizedDescription
                 }
             }
+        case "open.in":
+            guard action.payloadKind == "tool",
+                  let toolID = action.payloadValue else {
+                model.errorMessage = "在工具中打开缺少工具标识。"
+                return
+            }
+            openTool(toolID: toolID, role: "open", paths: paths)
+        case "compare.with":
+            guard action.payloadKind == "tool",
+                  let toolID = action.payloadValue else {
+                model.errorMessage = "比较动作缺少工具标识。"
+                return
+            }
+            openTool(toolID: toolID, role: "compare", paths: paths)
         case "open.quick-look":
             KitePlatform.quickLook(primaryPath)
         case "clipboard.copy":
@@ -461,6 +499,38 @@ private struct KiteContextMenuRunner {
         }
     }
 
+    private func openTool(toolID: String, role: String, paths: [String]) {
+        switch toolID {
+        case "kite.text-editor":
+            if let first = paths.first {
+                KitePlatform.openTextEditor(first)
+            }
+        case "kite.mindmap":
+            if let first = paths.first {
+                KiteMindmapWindowController.open(path: first)
+            }
+        case "kite.git-client":
+            if let first = paths.first {
+                KiteGitClientWindowController.show(
+                    model: model,
+                    repositoryPath: repositoryPath(for: first)
+                )
+            }
+        default:
+            KiteToolLauncher.launch(
+                toolID: toolID,
+                role: role,
+                paths: paths,
+                workingDirectory: target.workingDirectory,
+                repositoryRoot: paths.first.map(repositoryPath(for:))
+            ) { error in
+                if let error {
+                    model.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
     private func openDefault(_ path: String) {
         if target.isDirectory(path: path) {
             model.loadRoot(path)
@@ -544,6 +614,15 @@ private extension KiteContextMenuTarget {
     }
 
     var containerPath: String {
+        switch self {
+        case .entry(let entry), .searchEntry(let entry):
+            return entry.isDirectory ? entry.path : (entry.path as NSString).deletingLastPathComponent
+        case .directory(let column):
+            return column.path
+        }
+    }
+
+    var workingDirectory: String {
         switch self {
         case .entry(let entry), .searchEntry(let entry):
             return entry.isDirectory ? entry.path : (entry.path as NSString).deletingLastPathComponent

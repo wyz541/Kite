@@ -37,6 +37,7 @@ pub mod recycle_bin;
 pub mod search_filters;
 pub mod session;
 pub mod text_editor;
+pub mod tool_registry;
 pub mod ui_preferences;
 pub mod update_notes;
 pub mod updater;

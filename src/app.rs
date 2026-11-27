@@ -3384,7 +3384,23 @@ impl KiteApp {
     }
 
     fn open_workspace_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.current_dir.clone();
+        self.open_workspace_editor_at_path(self.current_dir.clone(), _window, cx);
+    }
+
+    fn open_workspace_editor_at_path(
+        &mut self,
+        path: PathBuf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = (!path.is_dir()).then_some(path.clone());
+        let root = if path.is_dir() {
+            path
+        } else {
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.current_dir.clone())
+        };
         let title = format!("Kite 工作区 — {}", root.display());
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
@@ -3396,7 +3412,7 @@ impl KiteApp {
             ..Default::default()
         };
         if let Err(error) = gpui_kit::open_window(options, cx, move |window, cx| {
-            cx.new(|cx| WorkspaceWindow::new(root, window, cx))
+            cx.new(|cx| WorkspaceWindow::new_with_selection(root, selected, window, cx))
         }) {
             self.error = Some(format!("无法打开工作区编辑器：{error}").into());
         }
@@ -3546,6 +3562,18 @@ impl KiteApp {
             ContextMenuCommand::OpenWithChooseOther => {
                 self.open_with_dialog(action.target.clone(), window, cx)
             }
+            ContextMenuCommand::OpenIn => self.dispatch_tool_action(
+                action,
+                kite_core::tool_registry::ToolRole::Open,
+                window,
+                cx,
+            ),
+            ContextMenuCommand::CompareWith => self.dispatch_tool_action(
+                action,
+                kite_core::tool_registry::ToolRole::Compare,
+                window,
+                cx,
+            ),
             ContextMenuCommand::Agent(command) => {
                 self.open_agent_context(command, action, window, cx)
             }
@@ -3620,6 +3648,43 @@ impl KiteApp {
                 self.open_system_menu(action.paths.clone(), window, cx)
             }
             ContextMenuCommand::Refresh => self.refresh(window, cx),
+        }
+    }
+
+    fn dispatch_tool_action(
+        &mut self,
+        action: &ContextMenuAction,
+        role: kite_core::tool_registry::ToolRole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ContextMenuActionPayload::Tool(tool_id) = &action.payload else {
+            self.error = Some("工具动作缺少工具标识".into());
+            cx.notify();
+            return;
+        };
+        let primary = action
+            .paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| action.target.clone());
+        if tool_id == "kite.git-client" {
+            self.open_git_client_at_path(primary, window, cx);
+            return;
+        }
+        if tool_id == "kite.text-editor" {
+            self.open_workspace_editor_at_path(primary, window, cx);
+            return;
+        }
+        if let Err(error) = crate::context_menu::tool_registry_windows::launch(
+            tool_id,
+            role,
+            &action.paths,
+            &action.working_directory,
+        ) {
+            self.notice = None;
+            self.error = Some(error.into());
+            cx.notify();
         }
     }
 

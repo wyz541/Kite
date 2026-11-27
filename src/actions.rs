@@ -76,6 +76,8 @@ pub enum ContextMenuCommand {
     Open,
     OpenWithApplication,
     OpenWithChooseOther,
+    OpenIn,
+    CompareWith,
     Agent(AgentMenuCommand),
     Copy,
     CopyTo,
@@ -103,6 +105,7 @@ pub enum ContextMenuActionPayload {
     #[default]
     None,
     Application(String),
+    Tool(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
@@ -127,6 +130,8 @@ impl ContextMenuCommand {
             "open.default" => Self::Open,
             "open.with" => Self::OpenWithApplication,
             "open.with.choose-other" => Self::OpenWithChooseOther,
+            "open.in" => Self::OpenIn,
+            "compare.with" => Self::CompareWith,
             "clipboard.copy" => Self::Copy,
             "clipboard.copy-to" => Self::CopyTo,
             "clipboard.copy-path" => Self::CopyPath,
@@ -180,7 +185,12 @@ impl ContextMenuCommand {
         if variant_key.is_some()
             && !matches!(
                 action_id,
-                "open.default" | "open.with" | "open.in" | "compare.with" | "git.open-client"
+                "open.default"
+                    | "open.with"
+                    | "open.with.choose-other"
+                    | "open.in"
+                    | "compare.with"
+                    | "git.open-client"
             )
         {
             return None;

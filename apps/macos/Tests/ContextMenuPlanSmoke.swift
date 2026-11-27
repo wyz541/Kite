@@ -44,6 +44,16 @@ struct ContextMenuPlanSmoke {
                 status: .loading,
                 applications: []
             ),
+            tools: ToolCatalogDto(
+                status: "unavailable",
+                tools: []
+            ),
+            toolPolicy: ToolPolicyDto(
+                pinnedToolIds: [],
+                hiddenToolIds: [],
+                userOrder: [],
+                recentToolIds: []
+            ),
             compact: true,
             hideUnavailable: true,
             confirmHighRisk: true
