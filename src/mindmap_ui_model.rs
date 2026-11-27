@@ -8,13 +8,16 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::mindmap_ffi::{MindmapGraphStructureDto, MindmapTopicMarkerDto, MindmapTopicStyleDto};
+use crate::mindmap_ffi::{
+    MindmapDatePartOrderDto, MindmapGraphStructureDto, MindmapTopicMarkerDto, MindmapTopicStyleDto,
+};
 
 const MIN_NODE_WIDTH: f32 = 168.0;
 const MAX_NODE_WIDTH: f32 = 320.0;
 const NODE_HEIGHT: f32 = 42.0;
 const HORIZONTAL_GAP: f32 = 74.0;
 const VERTICAL_GAP: f32 = 18.0;
+const VISIBLE_MARKER_LIMIT: usize = 8;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MindmapVisualStyle {
@@ -31,6 +34,8 @@ pub struct MindmapVisualStyle {
     pub border_pattern: Option<String>,
     pub corner_radius: Option<u16>,
     pub alignment: Option<String>,
+    pub line_height: Option<String>,
+    pub letter_spacing: Option<String>,
 }
 
 impl MindmapVisualStyle {
@@ -49,6 +54,8 @@ impl MindmapVisualStyle {
             border_pattern: style.border_pattern.clone(),
             corner_radius: style.corner_radius,
             alignment: style.alignment.clone(),
+            line_height: style.line_height.clone(),
+            letter_spacing: style.letter_spacing.clone(),
         }
     }
 
@@ -102,6 +109,12 @@ impl MindmapVisualStyle {
             .and_then(|value| value.get("fo:text-align"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        let line_height = properties
+            .and_then(|value| value.get("fo:line-height"))
+            .and_then(xmind_string);
+        let letter_spacing = properties
+            .and_then(|value| value.get("fo:letter-spacing"))
+            .and_then(xmind_string);
         Self {
             font_family: family,
             font_size,
@@ -120,8 +133,182 @@ impl MindmapVisualStyle {
             border_pattern,
             corner_radius,
             alignment,
+            line_height,
+            letter_spacing,
         }
     }
+}
+
+fn xmind_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse the numeric portion of an XMind measurement while preserving the raw
+/// value in the DTO for lossless writes.
+pub fn measurement_number(value: Option<&str>) -> Option<f64> {
+    let value = value?.trim();
+    let numeric = value
+        .trim_end_matches(|character: char| character.is_ascii_alphabetic() || character == '%')
+        .trim();
+    numeric.parse().ok()
+}
+
+/// GPUI does not expose CSS-like letter spacing. This produces a visual-only
+/// approximation with thin spaces while the persisted title remains unchanged.
+pub fn letter_spacing_preview(text: &str, spacing: Option<f64>) -> String {
+    let Some(spacing) = spacing.filter(|value| *value > 0.05) else {
+        return text.to_owned();
+    };
+    let spacer = if spacing >= 0.35 {
+        "\u{2009}\u{2009}"
+    } else {
+        "\u{2009}"
+    };
+    let mut output = String::with_capacity(text.len() + text.chars().count() * 2);
+    for (index, character) in text.chars().enumerate() {
+        if index > 0 {
+            output.push_str(spacer);
+        }
+        output.push(character);
+    }
+    output
+}
+
+/// Resolve the host's short-date order into a stable request for Core.
+pub fn system_date_pattern() -> (MindmapDatePartOrderDto, String) {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::RegKey;
+        use winreg::enums::HKEY_CURRENT_USER;
+
+        if let Ok(international) =
+            RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Control Panel\International")
+        {
+            let short_date = international
+                .get_value::<String, _>("sShortDate")
+                .unwrap_or_default();
+            let separator = international
+                .get_value::<String, _>("sDate")
+                .unwrap_or_else(|_| "/".to_string());
+            return parse_system_date_pattern(&short_date, &separator);
+        }
+    }
+    (MindmapDatePartOrderDto::YearMonthDay, "/".to_string())
+}
+
+/// Pure parser used by the Windows locale reader and regression tests.
+pub fn parse_system_date_pattern(
+    short_date: &str,
+    separator_hint: &str,
+) -> (MindmapDatePartOrderDto, String) {
+    let lower = short_date.to_ascii_lowercase();
+    let year = lower.find('y');
+    let month = lower.find('m');
+    let day = lower.find('d');
+    let order = match (year, month, day) {
+        (Some(year), Some(month), Some(day)) if year < month && month < day => {
+            MindmapDatePartOrderDto::YearMonthDay
+        }
+        (Some(year), Some(month), Some(day)) if month < day && day < year => {
+            MindmapDatePartOrderDto::MonthDayYear
+        }
+        (Some(year), Some(month), Some(day)) if day < month && month < year => {
+            MindmapDatePartOrderDto::DayMonthYear
+        }
+        _ => MindmapDatePartOrderDto::YearMonthDay,
+    };
+    let separator = separator_hint
+        .trim()
+        .chars()
+        .find(|character| !character.is_ascii_alphanumeric() && !character.is_whitespace())
+        .unwrap_or('/')
+        .to_string();
+    (order, separator)
+}
+
+/// Installed font families, cached for the lifetime of the process. The raw
+/// requested family remains in the document; this list is only for rendering
+/// fallback and the picker.
+pub fn system_font_families() -> Vec<String> {
+    static FONTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut database = fontdb::Database::new();
+            database.load_system_fonts();
+            let mut families = database
+                .faces()
+                .flat_map(|face| face.families.iter().map(|(family, _)| family.clone()))
+                .collect::<Vec<_>>();
+            families.sort_by_key(|family| family.to_ascii_lowercase());
+            families.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            if families.is_empty() {
+                families = vec![
+                    "Segoe UI".to_string(),
+                    "Arial".to_string(),
+                    "Calibri".to_string(),
+                    "Consolas".to_string(),
+                ];
+            }
+            families
+        })
+        .clone()
+}
+
+pub fn missing_font_family(requested: Option<&str>, available: &[String]) -> Option<String> {
+    let requested = requested?.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    let generic = [
+        "serif",
+        "sans-serif",
+        "monospace",
+        "cursive",
+        "fantasy",
+        "system-ui",
+    ];
+    let found = requested.split(',').map(str::trim).any(|candidate| {
+        generic
+            .iter()
+            .any(|name| candidate.eq_ignore_ascii_case(name))
+            || available
+                .iter()
+                .any(|family| family.eq_ignore_ascii_case(candidate))
+    });
+    (!found).then(|| requested.to_string())
+}
+
+pub fn resolve_render_font(
+    requested: Option<&str>,
+    available: &[String],
+    fallback: &str,
+) -> String {
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return fallback.to_string();
+    };
+    for candidate in requested.split(',').map(str::trim) {
+        if [
+            "serif",
+            "sans-serif",
+            "monospace",
+            "cursive",
+            "fantasy",
+            "system-ui",
+        ]
+        .iter()
+        .any(|name| candidate.eq_ignore_ascii_case(name))
+            || available
+                .iter()
+                .any(|family| family.eq_ignore_ascii_case(candidate))
+        {
+            return candidate.to_string();
+        }
+    }
+    fallback.to_string()
 }
 
 fn parse_measurement(value: &Value) -> Option<f64> {
@@ -209,6 +396,10 @@ fn marker_label(marker_id: &str) -> String {
         "task-7oct" => "88%".to_string(),
         "task-done" => "✓".to_string(),
         "task-pause" => "Ⅱ".to_string(),
+        "symbol-wrong" => "⛔".to_string(),
+        "symbol-attention" => "⚠".to_string(),
+        "symbol-pause" => "Ⅱ".to_string(),
+        "symbol-ok" => "✓".to_string(),
         value if value.starts_with("flag-") => "⚑".to_string(),
         value if value.starts_with("star-") => "★".to_string(),
         value if value.starts_with("tag-") => "#".to_string(),
@@ -237,6 +428,9 @@ pub struct MindmapTopic {
     pub shape_class: Option<String>,
     pub markers: Vec<MindmapMarker>,
     pub is_complete: bool,
+    pub task_presentation: Option<String>,
+    pub todo_status: Option<String>,
+    pub todo_progress: Option<f64>,
 }
 
 impl MindmapTopic {
@@ -245,12 +439,27 @@ impl MindmapTopic {
     }
 
     pub fn marker_summary(&self) -> String {
-        self.markers
+        let mut visible = self
+            .markers
             .iter()
-            .filter(|marker| !marker.is_task() || marker.marker_id == "task-done")
+            .filter(|marker| {
+                !marker.is_task() || matches!(marker.marker_id.as_str(), "task-done" | "task-pause")
+            })
             .map(|marker| marker.label.clone())
+            .collect::<Vec<_>>();
+        if self.is_complete && !visible.iter().any(|label| label == "✓") {
+            visible.insert(0, "✓".to_string());
+        }
+        let total = visible.len();
+        let mut summary = visible
+            .into_iter()
+            .take(VISIBLE_MARKER_LIMIT)
             .collect::<Vec<_>>()
-            .join(" · ")
+            .join(" ");
+        if total > VISIBLE_MARKER_LIMIT {
+            summary.push_str(&format!(" +{}", total - VISIBLE_MARKER_LIMIT));
+        }
+        summary
     }
 }
 
@@ -343,7 +552,20 @@ impl MindmapTree {
             .filter_map(|child| child.get("id").and_then(Value::as_str))
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
-        let is_complete = markers.iter().any(|marker| marker.marker_id == "task-done");
+        let task_presentation = object
+            .get("taskPresentation")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let todo_status = object
+            .get("todoStatus")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let todo_progress = object.get("todoProgress").and_then(Value::as_f64);
+        let is_complete = markers.iter().any(|marker| marker.marker_id == "task-done")
+            || todo_status
+                .as_deref()
+                .is_some_and(|status| status.eq_ignore_ascii_case("done"))
+            || todo_progress.is_some_and(|progress| progress >= 0.999);
         self.topics.insert(
             id.clone(),
             MindmapTopic {
@@ -356,6 +578,9 @@ impl MindmapTree {
                 shape_class,
                 markers,
                 is_complete,
+                task_presentation,
+                todo_status,
+                todo_progress,
             },
         );
         for child in child_values {
@@ -501,6 +726,14 @@ pub struct MindmapNodeLayout {
     pub depth: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MindmapEdgeAnchors {
+    pub start_x: f32,
+    pub start_y: f32,
+    pub end_x: f32,
+    pub end_y: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MindmapLayout {
     pub nodes: Vec<MindmapNodeLayout>,
@@ -515,6 +748,43 @@ pub struct MindmapLayout {
 impl MindmapLayout {
     pub fn node(&self, id: &str) -> Option<&MindmapNodeLayout> {
         self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// Choose connectors on the node side that faces the other node. Org charts
+    /// and tree charts use vertical anchors; side layouts use the actual branch
+    /// direction so left-side mindmap branches and logic-left never cut through
+    /// their nodes.
+    pub fn edge_anchors(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+        structure: MindmapGraphStructureDto,
+    ) -> Option<MindmapEdgeAnchors> {
+        let parent = self.node(parent_id)?;
+        let child = self.node(child_id)?;
+        if structure == MindmapGraphStructureDto::OrgChart {
+            return Some(MindmapEdgeAnchors {
+                start_x: parent.center_x,
+                start_y: parent.center_y + parent.height / 2.0,
+                end_x: child.center_x,
+                end_y: child.center_y - child.height / 2.0,
+            });
+        }
+        if child.center_x < parent.center_x {
+            Some(MindmapEdgeAnchors {
+                start_x: parent.center_x - parent.width / 2.0,
+                start_y: parent.center_y,
+                end_x: child.center_x + child.width / 2.0,
+                end_y: child.center_y,
+            })
+        } else {
+            Some(MindmapEdgeAnchors {
+                start_x: parent.center_x + parent.width / 2.0,
+                start_y: parent.center_y,
+                end_x: child.center_x - child.width / 2.0,
+                end_y: child.center_y,
+            })
+        }
     }
 }
 
@@ -542,13 +812,19 @@ impl<'a> LayoutEngine<'a> {
     }
 
     fn node_width(&self, topic: &MindmapTopic) -> f32 {
-        let chars = topic.title.chars().count().min(26) as f32;
+        let marker_chars = topic.marker_summary().chars().count().min(18) as f32;
+        let chars = (topic.title.chars().count() as f32 + marker_chars / 2.0).min(34.0);
         ((MIN_NODE_WIDTH + chars * 5.6) * self.zoom)
             .clamp(MIN_NODE_WIDTH * self.zoom, MAX_NODE_WIDTH * self.zoom)
     }
 
-    fn node_height(&self) -> f32 {
-        NODE_HEIGHT * self.zoom
+    fn node_height(&self, topic: &MindmapTopic) -> f32 {
+        let marker_row = if topic.marker_summary().is_empty() {
+            0.0
+        } else {
+            14.0
+        };
+        (NODE_HEIGHT + marker_row) * self.zoom
     }
 
     fn child_y_gap(&self) -> f32 {
@@ -590,7 +866,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x: direction * depth as f32 * self.horizontal_step(),
                 center_y: y,
                 width: self.node_width(topic),
-                height: self.node_height(),
+                height: self.node_height(topic),
                 parent_id: topic.parent_id.clone(),
                 depth,
             },
@@ -646,7 +922,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x: 0.0,
                 center_y: y,
                 width: self.node_width(root),
-                height: self.node_height(),
+                height: self.node_height(root),
                 parent_id: None,
                 depth: 0,
             },
@@ -681,7 +957,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x: direction * depth as f32 * self.horizontal_step(),
                 center_y: y,
                 width: self.node_width(topic),
-                height: self.node_height(),
+                height: self.node_height(topic),
                 parent_id: topic.parent_id.clone(),
                 depth,
             },
@@ -721,7 +997,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x,
                 center_y,
                 width: self.node_width(topic),
-                height: self.node_height(),
+                height: self.node_height(topic),
                 parent_id: topic.parent_id.clone(),
                 depth,
             },

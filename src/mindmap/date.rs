@@ -267,27 +267,41 @@ pub fn insert_date_into_topic(
     topic: &mut Value,
     request: &DateInsertionRequest,
 ) -> Result<DateInsertionResult, DateInsertionError> {
-    let mut next = topic.clone();
-    insert_date_in_place(&mut next, request)?;
-    *topic = next;
-
+    let rendered = request.value.format(request.format)?;
+    insert_text_into_topic(topic, &rendered, request.target, request.placement)?;
     Ok(DateInsertionResult {
-        text: request.value.format(request.format)?,
+        text: rendered,
         target: request.target,
         placement: request.placement,
     })
 }
 
-fn insert_date_in_place(
+/// Insert already-rendered, editable text into a topic field.
+///
+/// This is used by UI layers that need to make date intent explicit without
+/// claiming an XMind structured date mapping (for example, a text-only due label).
+pub fn insert_text_into_topic(
     topic: &mut Value,
-    request: &DateInsertionRequest,
+    rendered: &str,
+    target: DateInsertionTarget,
+    placement: DateInsertionPlacement,
+) -> Result<(), DateInsertionError> {
+    let mut next = topic.clone();
+    insert_text_in_place(&mut next, rendered, target, placement)?;
+    *topic = next;
+    Ok(())
+}
+
+fn insert_text_in_place(
+    topic: &mut Value,
+    rendered: &str,
+    target: DateInsertionTarget,
+    placement: DateInsertionPlacement,
 ) -> Result<(), DateInsertionError> {
     let topic = topic
         .as_object_mut()
         .ok_or(DateInsertionError::TopicNotObject)?;
-    let rendered = request.value.format(request.format)?;
-
-    match request.target {
+    match target {
         DateInsertionTarget::Title => {
             let title = topic
                 .get("title")
@@ -295,7 +309,7 @@ fn insert_date_in_place(
                 .ok_or(DateInsertionError::TitleNotString)?;
             topic.insert(
                 "title".to_owned(),
-                Value::String(join_text(title, &rendered, request.placement, " ")),
+                Value::String(join_text(title, rendered, placement, " ")),
             );
         }
         DateInsertionTarget::Note => {
@@ -304,7 +318,7 @@ fn insert_date_in_place(
             let current = plain.get("content").and_then(Value::as_str).unwrap_or("");
             plain.insert(
                 "content".to_owned(),
-                Value::String(join_text(current, &rendered, request.placement, "\n")),
+                Value::String(join_text(current, rendered, placement, "\n")),
             );
         }
     }

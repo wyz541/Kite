@@ -14,6 +14,7 @@ pub use date::{
     DateDisplayFormat, DateFormatError, DateInsertionError, DateInsertionPlacement,
     DateInsertionRequest, DateInsertionResult, DateInsertionTarget, DateLocale, DatePartOrder,
     DatePrecision, DateStyle, StaticDateValue, SystemDatePattern, insert_date_into_topic,
+    insert_text_into_topic,
 };
 pub use graph_style::{
     ConnectorColor, ConnectorCornerRadius, ConnectorKind, ConnectorLinePattern, ConnectorStyle,

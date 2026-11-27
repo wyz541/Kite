@@ -331,7 +331,7 @@ pub enum VcsMenuCommand {
 mod tests {
     use super::*;
 
-    #[test]
+    #[std::prelude::v1::test]
     fn mindmap_action_ids_map_to_windows_commands() {
         assert_eq!(
             ContextMenuCommand::from_action_id("tool.kite.mindmap", None),
