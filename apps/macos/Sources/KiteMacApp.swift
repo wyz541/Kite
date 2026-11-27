@@ -330,14 +330,7 @@ struct KiteMacApp: App {
                 }
                 .keyboardShortcut(.tab, modifiers: [.control, .shift])
             }
-            CommandMenu("文件夹") {
-                Button("全选") {
-                    model.selectAll()
-                }
-                .keyboardShortcut("a", modifiers: [.command, .shift])
-
-                Divider()
-
+            CommandMenu("文件与选择") {
                 Button("新建文件夹…") {
                     model.createFolder(in: model.currentPath)
                 }
@@ -347,6 +340,13 @@ struct KiteMacApp: App {
                     model.createFile(in: model.currentPath)
                 }
                 .keyboardShortcut("n", modifiers: [.command])
+
+                Divider()
+
+                Button("全选") {
+                    model.selectAll()
+                }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
 
                 Divider()
 
