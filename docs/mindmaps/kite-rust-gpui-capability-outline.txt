@@ -1,10 +1,314 @@
 Kite × Rust GPUI 工程能力地图
-	00 量化口径
+	00 全文术语目录总览
+		使用方式
+			此节点列出全文主要能力术语和代码术语。
+			完整解释见 17 概念词典；代码关键词说明见各能力卡。
+		02 项目定位与边界
+			Rust Core
+			原生 UI Shell
+		03 技术架构与依赖总览
+			GPUI
+			gpui-kit
+			UniFFI
+			windows / windows-sys
+		04 GPUI 启动与窗口生命周期
+			gpui_kit::application
+			gpui_kit::init
+			gpui_kit::open_window
+			WindowOptions / WindowBounds
+			KiteWindow
+		05 GPUI 编程模型
+			Entity
+			Context
+			Render
+			Element DSL
+			Action / Subscription
+		06 状态模型与数据流
+			KiteApp
+			generation token
+			cx.notify
+			session / preferences
+		07 异步、并发与性能
+			cx.spawn / cx.spawn_in
+			background_spawn
+			Task
+			window.defer
+			debounce
+			perf_trace
+		08 主界面与布局系统
+			h_flex / v_flex
+			gpui-kit 组件
+			theme token
+			responsive breakpoint
+		09 导航、分栏与文件列表
+			ColumnPane
+			DataTable / TableDelegate
+			history
+			selection
+		10 文件操作、预览与编辑
+			std::fs / fs
+			Explorer / Finder clipboard
+			OLE drag & drop
+			zip / tar
+			TextView / Editor
+		11 搜索与索引
+			Tantivy
+			grep-searcher
+			notify
+			USN Journal
+			DeviceIoControl
+		12 VCS、Git 与 Diff
+			git CLI
+			GitService
+			similar
+			Askpass Bridge
+		13 Agent 集成
+			ACP
+			JSON-RPC over stdio
+			AgentSession
+			keyring
+			diff 审核
+		14 Windows 平台集成
+			Win32
+			COM
+			Shell namespace
+			WPD / MTP
+			OLE DataExchange
+		15 共享 Rust Core 与跨语言边界
+			UniFFI Record
+			UniFFI Enum
+			UniFFI Object
+			Core API
+			MCP
+		16 工程化、验证与复用结论
+			feature / cfg
+			Clippy
+			test pyramid
+			perf_trace / performance baseline
+			generation token pattern
+			Task lifecycle
+		主要代码关键词
+			#[cfg(windows)]
+			#[derive(uniffi::Enum)]
+			#[derive(uniffi::Object)]
+			#[derive(uniffi::Record)]
+			#[test]
+			#[uniffi::export]
+			*_generation.wrapping_add(1)
+			--no-optional-locks
+			.child(...)
+			.flex_1()
+			.gap(...)
+			.w_full()
+			AcpStdioTransport
+			AgentReviewDto
+			AgentSession
+			AgentTransportDto
+			ArchiveFormat::{Zip, TarGz}
+			AskpassBridge
+			BooleanQuery
+			Button
+			CF_HDROP
+			CREATE_NO_WINDOW
+			ChangeTag
+			ClipboardMode
+			CoInitializeEx
+			CoInitializeEx(...)
+			ColumnPane { path, directory_entries, selected_paths, sort, ... }
+			ComGuard
+			Command::new("git")
+			Context
+			CoreApi::invoke(...)
+			CoreError
+			CoreRequest
+			CoreResult
+			DataTable
+			DeviceIoControl
+			DirectoryEntryDto
+			DirectorySnapshot
+			Editor
+			Entity
+			Entity<T>
+			Enum
+			EventEmitter<TabRequest>
+			EventKind
+			ExecutionContext
+			FSCTL_*
+			FSCTL_QUERY_USN_JOURNAL
+			FSCTL_READ_UNPRIVILEGED_USN_JOURNAL
+			FileClipboard
+			FileEntry
+			GIT_ASKPASS
+			GitErrorKindDto
+			GitExecutor
+			GitOperationHandle
+			GitPathSummaryDto
+			GitService
+			HANDLE
+			HWND
+			IContextMenu2
+			IContextMenu3
+			IDropSource
+			IEnumShellItems
+			IShellItem
+			IndexReader
+			IndexWriter
+			InputState
+			Interface
+			JournalCursor
+			JournalInfo
+			KiteCore
+			KiteError
+			LPARAM
+			LockedGlobal
+			NavigationIntent::{Push, ReplaceIndex, Refresh}
+			Object
+			PINENTRY_USER_DATA
+			PopupMenu
+			PortableDevice
+			PostMessageW(... WM_APP ...)
+			PostMessageW(...)
+			RecommendedWatcher
+			RecursiveMode
+			RegexMatcherBuilder
+			RegexQuery
+			Render
+			SHCreateItemFromParsingName
+			SHDoDragDrop(...)
+			SSH_ASKPASS
+			SearcherBuilder
+			SessionCommand
+			SessionStateDto
+			SessionTabDto
+			SharedClipboard = Rc<RefCell<Option<FileClipboard>>>
+			Task::ready(())
+			TextDiff::from_lines
+			TextDiff::from_words
+			TextDocument
+			TextView
+			Theme::change(mode, None, cx)
+			TopDocs
+			UsnReadBatch
+			WPARAM
+			WindowOptions
+			_load_task: Task<()>
+			_meta.confirmed
+			actions!(kite, [...])
+			active_after_close(...)
+			agent_session 测试
+			aggregate.py
+			anchor_path
+			apply_review_changes(...)
+			background_executor().timer(Duration::from_millis(...)).await
+			build_review(...)
+			callback_interface
+			cancel(...)
+			cargo clippy --locked --all-targets --features windows-ui -- -D warnings
+			cfg!(target_os = "windows")
+			column
+			compare.py
+			compress_with_progress(...)
+			context_menu
+			core_api_cli
+			core_api_mcp
+			count_output(max_output_bytes)
+			credential_ref(...)
+			cx.background_spawn(async move { load_directory_snapshot(...) }).await
+			cx.new(|cx| ...)
+			cx.notify()
+			cx.observe_in(...)
+			cx.spawn(async move |this, cx| ...)
+			cx.spawn_in(window, ...)
+			cx.spawn_in(window, async move |this, cx| ...)
+			cx.subscribe_in(...)
+			detach()
+			div()
+			extract_with_progress(...)
+			gpui_kit::application().with_assets(...).run(|cx| ...)
+			gpui_kit::open_window
+			gpui_kit::open_window(WindowOptions { ... }, cx, |window, cx| ...)
+			h_flex()
+			hash_bytes(...)
+			history: Vec<PathBuf>
+			history_index: usize
+			if this.generation != generation { return
+			if this.load_generation != generation { return
+			impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
+			impl Sink for LineSink
+			impl TableDelegate for FileTableDelegate
+			initialize
+			is_shell_namespace_path(...)
+			keyring::Entry
+			kite-agent-fixture
+			load_column_pane(path, rule)
+			load_directory(path, sort)
+			load_secret
+			load_session
+			load_ui_preferences
+			on_action(cx.listener(...))
+			perf_trace::mark_once("windows.first_content_render")
+			perf_trace::mark_once(...)
+			perf_trace::start()
+			perform_sort
+			persist_session
+			prompts/get
+			pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
+			read_frame
+			read_frame(max_frame_bytes)
+			read_log_preview
+			read_text_preview
+			reconfirm_file_change(...)
+			recycle_entry
+			render_td
+			repository_state(...)
+			request_file_drag(window, &paths)
+			required-features = [...]
+			resources/list
+			restore_session
+			save_secret
+			save_session
+			save_text_document
+			save_ui_preferences
+			select_all
+			select_range_to
+			selected_path
+			selected_paths
+			self._load_task = cx.spawn_in(...)
+			self._task = cx.spawn_in(...)
+			send_prompt(...)
+			serde_json::Value
+			session/new
+			session/prompt
+			shell_path
+			start_agent(...)
+			start_operation(...)
+			startup.py
+			tabs: Vec<TabEntry>
+			this.update_in(cx, ...)
+			titlebar: Some(TitlebarOptions { ... })
+			toggle_selection
+			tools/call
+			tools/list
+			transfer_entry
+			uniffi::Record
+			v_flex()
+			watch_repository(...)
+			window.defer(...)
+			window_bounds: Some(WindowBounds::centered(...))
+			window_min_size
+			windows::Win32::*
+			windows::core::{Interface, PCWSTR, BOOL}
+			write_frame
+	01 量化口径
 		源码参数
 			尺寸、超时、上限、debounce 来自当前工作区源码常量
+				概念解释：把短时间内的多次事件合并成最后一次执行。
+				示例：background_executor().timer(Duration::from_millis(...)).await
 			统计时间：2026-11-26
 		结构数量
 			模块、类型、窗口、Task、generation 等数量来自当前工作区静态扫描
+				概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+				示例：_load_task: Task<()>
 			统计值会随代码变化，适合作为当前版本基线
 		性能数据
 			功能性能来自 docs/performance v0.6.61 release 基线
@@ -16,7 +320,7 @@ Kite × Rust GPUI 工程能力地图
 			... 表示省略重复参数、分支和中间步骤
 			→ 表示主要调用顺序，不代表唯一执行路径
 			:: 表示 Rust 模块、类型或关联函数路径
-	01 项目定位与边界
+	02 项目定位与边界
 		主题概览
 			一句话定位
 				先看清 Kite 是什么，以及为什么它不是一套 UI 跑遍所有平台。
@@ -27,6 +331,8 @@ Kite × Rust GPUI 工程能力地图
 			分栏导航、预览、搜索、文件操作在同一工作区
 		架构定位
 			共享 Rust Core
+				概念解释：一个不依赖任何 UI 框架的 Rust 业务核心，输出 rlib、staticlib 和 cdylib。
+				示例：pub mod fs/git/agent/search/...
 			Windows：Rust + GPUI
 				Windows
 					作用：目标操作系统
@@ -34,6 +340,8 @@ Kite × Rust GPUI 工程能力地图
 				Rust
 					作用：实现语言和跨平台核心
 					Kite 中：Core、GPUI 前端和系统桥
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				GPUI
 					作用：Rust 原生桌面 UI 框架
 					Kite 中：Windows Kite 界面
@@ -51,6 +359,8 @@ Kite × Rust GPUI 工程能力地图
 		设计原则
 			macOS 作为视觉与交互基准
 			Windows GPUI 实现同一产品语义
+				概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+				示例：Entity
 			路径先于装饰，状态先于品牌，反馈先于动画
 			可逆性优先：历史、回收站、会话恢复、确认
 		核心能力来源
@@ -68,17 +378,27 @@ Kite × Rust GPUI 工程能力地图
 					负责文件、搜索、VCS、会话、Agent、更新等业务规则和副作用。
 				在 Kite 中的用法
 					Windows GPUI 直接依赖它；macOS SwiftUI 通过 UniFFI 调用它；CLI 和 MCP 也复用它。
+						概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+						示例：uniffi::setup_scaffolding!()
 				一句类比
 					同一间后厨，给不同前厅供应同一套菜。
 				项目关键数值
 					顶层 Rust 模块：33 个 pub mod
 					产物类型：rlib / staticlib / cdylib，共 3 种
 					跨端复用入口：GPUI、SwiftUI、CLI、MCP，共 4 个外壳
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				核心代码关键词
 					关键词
 						pub mod fs/git/agent/search/...
+							概念解释：“Rust Core”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“Rust Core”中使用：pub mod fs/git/agent/search/...
 						crate-type = [rlib, staticlib, cdylib]
+							概念解释：“Rust Core”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“Rust Core”中使用：crate-type = [rlib, staticlib, cdylib]
 						uniffi::setup_scaffolding!()
+							概念解释：“Rust Core”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“Rust Core”中使用：uniffi::setup_scaffolding!()
 					过程
 						领域模块 ...
 						→ lib.rs 导出 ...
@@ -90,28 +410,42 @@ Kite × Rust GPUI 工程能力地图
 					负责展示、输入、焦点、主题和系统交互，不复制核心业务状态机。
 				在 Kite 中的用法
 					Windows 用 Rust + GPUI；macOS 用 SwiftUI + AppKit。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				一句类比
 					两套装修风格不同的前厅，共用同一后厨。
 				项目关键数值
 					平台 UI：Windows GPUI + macOS SwiftUI/AppKit，共 2 套
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 					Windows 窗口文件：14 个 *window*.rs
 					Render 实现：18 个
+						概念解释：把 Entity 的当前状态转换成元素树的 trait。
+						示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				核心代码关键词
 					关键词
 						#[cfg(windows)] mod app/tabs/...
+							概念解释：“原生 UI Shell”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“原生 UI Shell”中使用：#[cfg(windows)] mod app/tabs/...
 						gpui_kit::application()
+							概念解释：“原生 UI Shell”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“原生 UI Shell”中使用：gpui_kit::application()
 						SwiftUI + AppKit
+							概念解释：“原生 UI Shell”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“原生 UI Shell”中使用：SwiftUI + AppKit
 					过程
 						main ...
 						→ init ...
 						→ Window
 						→ Render
-	02 技术架构与依赖总览
+	03 技术架构与依赖总览
 		主题概览
 			一句话定位
 				项目由领域层、跨语言层、UI 外壳层和系统适配层共同组成。
 			学完能回答
 				GPUI 在哪里？为什么 Swift 能调用 Rust？Win32 能力从哪里进入？
+					概念解释：Windows 最底层的原生 API 集合。
+					示例：windows::Win32::*
 		核心分层
 			业务核心：fs / search / VCS / Agent / session
 				fs
@@ -139,6 +473,8 @@ Kite × Rust GPUI 工程能力地图
 				Object
 					作用：让 Swift 长期持有 Rust 服务对象
 					Kite 中：GitService、AgentSession、进度监视器
+						概念解释：一次 Agent 进程会话的状态机。
+						示例：AgentSession
 				Callback
 					作用：让 Rust 反向调用 UI 提供的处理函数
 					Kite 中：Git 事件、凭据请求、Agent 事件
@@ -155,6 +491,8 @@ Kite × Rust GPUI 工程能力地图
 				MCP
 					作用：向外部 AI 客户端暴露 Core 工具和资源
 					Kite 中：kite-mcp 服务
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 		Windows 前端组成
 			src/main.rs：进程入口和首个窗口
 			src/tabs.rs：窗口壳与多页签
@@ -175,13 +513,19 @@ Kite × Rust GPUI 工程能力地图
 					Kite 中：设备侧边栏和 Shell 命名空间
 		编译边界
 			windows-ui feature 控制 GPUI 二进制
+				概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+				示例：Entity
 			cfg(windows) 控制 Windows UI 模块
 			agent-fixture 控制 Agent 测试夹具
 			performance 控制性能测试工具
 		核心能力来源
 			框架与跨语言
 				gpui-kit 0.8.0
+					概念解释：对 GPUI、基础层、组件库和资源的统一门面，项目通过它使用 GPUI。
+					示例：use gpui_kit::*
 				uniffi 0.32.2
+					概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+					示例：uniffi::setup_scaffolding!()
 			Windows 依赖
 				windows 0.62.2
 				windows-sys 0.61
@@ -203,15 +547,31 @@ Kite × Rust GPUI 工程能力地图
 					用 Rust 写的界面积木系统。
 				项目关键数值
 					项目通过 gpui-kit 0.8.0 使用 GPUI
+						概念解释：对 GPUI、基础层、组件库和资源的统一门面，项目通过它使用 GPUI。
+						示例：use gpui_kit::*
 					底层 gpui 版本：0.2.2
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 					Windows 窗口文件：14 个；Render 实现：18 个
+						概念解释：把 Entity 的当前状态转换成元素树的 trait。
+						示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				核心代码关键词
 					关键词
 						Entity
+							概念解释：GPUI 的可观察状态对象类型，用于保存页面或组件状态。
+							示例：在“GPUI”中使用：Entity
 						Context
+							概念解释：GPUI 提供的状态操作上下文，可更新 Entity、重绘和创建任务。
+							示例：在“GPUI”中使用：Context
 						Render
+							概念解释：GPUI 将 Entity 状态组合为元素树的 trait。
+							示例：在“GPUI”中使用：Render
 						WindowOptions
+							概念解释：GPUI 窗口创建参数，包含标题栏、尺寸和位置。
+							示例：在“GPUI”中使用：WindowOptions
 						gpui_kit::open_window
+							概念解释：创建操作系统窗口并放入 Render Entity。
+							示例：在“GPUI”中使用：gpui_kit::open_window
 					过程
 						Application ...
 						→ Window
@@ -221,12 +581,18 @@ Kite × Rust GPUI 工程能力地图
 			gpui-kit
 				是什么
 					对 GPUI、基础层、组件库和资源的统一门面，项目通过它使用 GPUI。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					提供 Button、Input、DataTable、Menu、Scroll、Progress、Resizable 等成品组件。
 				在 Kite 中的用法
 					项目统一 `use gpui_kit::*`，并依靠组件库快速组合复杂桌面界面。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				一句类比
 					GPUI 是毛坯房，gpui-kit 是预装家具和工具箱。
+						概念解释：对 GPUI、基础层、组件库和资源的统一门面，项目通过它使用 GPUI。
+						示例：use gpui_kit::*
 				项目关键数值
 					版本：0.8.0
 					已列组件与接口：15 个
@@ -234,11 +600,23 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						use gpui_kit::*
+							概念解释：“gpui-kit”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“gpui-kit”中使用：use gpui_kit::*
 						gpui_kit::init(cx)
+							概念解释：“gpui-kit”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“gpui-kit”中使用：gpui_kit::init(cx)
 						Button
+							概念解释：gpui-kit 的按钮组件。
+							示例：在“gpui-kit”中使用：Button
 						InputState
+							概念解释：gpui-kit 输入框的可观察状态。
+							示例：在“gpui-kit”中使用：InputState
 						DataTable
+							概念解释：gpui-kit 的表格组件，显示行列和处理排序。
+							示例：在“gpui-kit”中使用：DataTable
 						PopupMenu
+							概念解释：gpui-kit 的浮动菜单组件。
+							示例：在“gpui-kit”中使用：PopupMenu
 					过程
 						init ...
 						→ 组件状态 ...
@@ -251,6 +629,8 @@ Kite × Rust GPUI 工程能力地图
 					跨语言传 Record、Enum，持有 Object，接收回调，并把 Rust 能力暴露给 Swift。
 				在 Kite 中的用法
 					macOS SwiftUI 通过 UniFFI 调用目录、搜索、Git、Agent、更新等 Core 能力。
+						概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+						示例：uniffi::setup_scaffolding!()
 				一句类比
 					Rust 和 Swift 之间的标准插头和插座。
 				项目关键数值
@@ -260,11 +640,23 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						uniffi::setup_scaffolding!()
+							概念解释：“UniFFI”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“UniFFI”中使用：uniffi::setup_scaffolding!()
 						#[uniffi::export]
+							概念解释：UniFFI 导出 Rust 函数或方法到其他语言的属性宏。
+							示例：在“UniFFI”中使用：#[uniffi::export]
 						uniffi::Record
+							概念解释：UniFFI 跨语言结构体类型。
+							示例：在“UniFFI”中使用：uniffi::Record
 						Enum
+							概念解释：跨语言枚举类型或固定选项集合。
+							示例：在“UniFFI”中使用：Enum
 						Object
+							概念解释：UniFFI 可被其他语言长期持有的 Rust 对象。
+							示例：在“UniFFI”中使用：Object
 						callback_interface
+							概念解释：UniFFI 跨语言回调接口。
+							示例：在“UniFFI”中使用：callback_interface
 					过程
 						Rust DTO ...
 						→ UniFFI 绑定 ...
@@ -274,28 +666,42 @@ Kite × Rust GPUI 工程能力地图
 					Rust 调用 Windows 原生 API 的绑定 crate。
 				能做什么
 					访问 Win32、COM、Shell、剪贴板、文件属性、设备、更新和窗口消息。
+						概念解释：Windows 最底层的原生 API 集合。
+						示例：windows::Win32::*
 				在 Kite 中的用法
 					右键菜单、拖放、回收站、WPD/MTP、USN Journal、默认文件管理器都依赖它。
+						概念解释：Windows NTFS 文件系统的变更日志。
+						示例：DeviceIoControl
 				一句类比
 					连接 Windows 操作系统的原厂接口。
 				项目关键数值
 					绑定 crate：windows 0.62.2 + windows-sys 0.61
 					发布目标：Windows 10/11 x64
 					主要桥接域：Win32、COM、Shell、WPD，共 4 类
+						概念解释：Windows 最底层的原生 API 集合。
+						示例：windows::Win32::*
 				核心代码关键词
 					关键词
 						windows::Win32::*
+							概念解释：Rust windows crate 提供的 Win32 API 类型和函数。
+							示例：在“windows / windows-sys”中使用：windows::Win32::*
 						windows::core::{Interface, PCWSTR, BOOL}
+							概念解释：windows crate 的 COM 接口与 Windows 类型。
+							示例：在“windows / windows-sys”中使用：windows::core::{Interface, PCWSTR, BOOL}
 						CoInitializeEx
+							概念解释：初始化当前线程的 COM 环境。
+							示例：在“windows / windows-sys”中使用：CoInitializeEx
 					过程
 						Rust ...
 						→ COM 接口 ...
 						→ Win32 调用 ...
 						→ Drop 清理
-	03 GPUI 启动与窗口生命周期
+	04 GPUI 启动与窗口生命周期
 		主题概览
 			一句话定位
 				GPUI 应用先启动 Application，再初始化组件与主题，然后打开 Window，窗口里放 View Entity。
+					概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+					示例：Entity<T>
 			学完能回答
 				从进程启动到 Kite 窗口出现，中间依次发生了什么？
 		进程启动
@@ -310,9 +716,13 @@ Kite × Rust GPUI 工程能力地图
 					Kite 中：排查 Explorer 拖放失败
 		应用初始化
 			gpui_kit::application()
+				概念解释：启动 GPUI 应用和平台事件循环的入口。
+				示例：gpui_kit::application().with_assets(...).run(|cx| ...)
 			.with_assets(AllAssets)
 			.run(|cx| ...)
 			gpui_kit::init(cx)
+				概念解释：初始化 GPUI Kit 的基础层、组件库和主题系统。
+				示例：gpui_kit::init(cx)
 		应用级配置
 			读取 UI Preferences
 			Light / Dark / System 主题
@@ -328,6 +738,8 @@ Kite × Rust GPUI 工程能力地图
 			KiteApp::bind_keys
 				bind_keys
 					作用：把快捷键注册到 GPUI 的动作系统
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 					Kite 中：导航、搜索、页签、文件操作快捷键
 			KiteApp::install_menus
 				install_menus
@@ -348,20 +760,34 @@ Kite × Rust GPUI 工程能力地图
 			gpui_kit::open_window
 				open_window
 					作用：创建系统窗口并放入一个 View Entity
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 					Kite 中：Kite 的所有 GPUI 窗口
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 			KiteWindow::new
 				new
 					作用：创建窗口根 View 并恢复会话/页签
 					Kite 中：Kite 主窗口启动
 		窗口层级
 			KiteWindow：一个 OS 窗口
+				概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+				示例：restore_session
 			KiteApp：一个页签内容
+				概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+				示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 			独立功能窗口：设置、搜索、Git、Agent、Diff 等
 		核心能力来源
 			框架 API
 				gpui_kit::application
+					概念解释：启动 GPUI 应用和平台事件循环的入口。
+					示例：gpui_kit::application().with_assets(...).run(|cx| ...)
 				gpui_kit::init
+					概念解释：初始化 GPUI Kit 的基础层、组件库和主题系统。
+					示例：gpui_kit::init(cx)
 				gpui_kit::open_window
+					概念解释：创建新的操作系统窗口，并把一个实现 Render 的 Entity 放进去。
+					示例：gpui_kit::open_window(WindowOptions { ... }, cx, |window, cx| ...)
 			框架类型
 				WindowOptions
 				WindowBounds
@@ -376,6 +802,8 @@ Kite × Rust GPUI 工程能力地图
 			gpui_kit::application
 				是什么
 					启动 GPUI 应用和平台事件循环的入口。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					加载应用资源、进入 run 回调、管理窗口和进程生命周期。
 				在 Kite 中的用法
@@ -389,6 +817,8 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						gpui_kit::application().with_assets(...).run(|cx| ...)
+							概念解释：启动 GPUI 应用、加载资产并运行主循环。
+							示例：在“gpui_kit::application”中使用：gpui_kit::application().with_assets(...).run(|cx| ...)
 					过程
 						application() ...
 						→ init(cx) ...
@@ -397,20 +827,30 @@ Kite × Rust GPUI 工程能力地图
 			gpui_kit::init
 				是什么
 					初始化 GPUI Kit 的基础层、组件库和主题系统。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					注册输入、菜单、表格、主题等基础能力，让后续窗口能正常使用组件。
 				在 Kite 中的用法
 					每个 GPUI 应用启动时调用一次。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				一句类比
 					给前厅通电、开灯、摆好桌椅。
 				项目关键数值
 					启动调用次数：1 次
 					外观模式：Light / Dark / System，共 3 种
 					初始化层级：GPUI 基础层 + 组件库 + 资产
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				核心代码关键词
 					关键词
 						gpui_kit::init(cx)
+							概念解释：“gpui_kit::init”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“gpui_kit::init”中使用：gpui_kit::init(cx)
 						Theme::change(mode, None, cx)
+							概念解释：切换当前 GPUI 主题。
+							示例：在“gpui_kit::init”中使用：Theme::change(mode, None, cx)
 					过程
 						init(cx) ...
 						→ 主题/组件注册 ...
@@ -418,8 +858,12 @@ Kite × Rust GPUI 工程能力地图
 			gpui_kit::open_window
 				是什么
 					创建新的操作系统窗口，并把一个实现 Render 的 Entity 放进去。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				能做什么
 					设置窗口标题和尺寸，返回窗口句柄与内容 Entity，供后续更新和关闭。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				在 Kite 中的用法
 					主窗口和所有独立功能窗口都通过它创建。
 				一句类比
@@ -431,6 +875,8 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						gpui_kit::open_window(WindowOptions { ... }, cx, |window, cx| ...)
+							概念解释：按窗口参数创建 GPUI 窗口。
+							示例：在“gpui_kit::open_window”中使用：gpui_kit::open_window(WindowOptions { ... }, cx, |window, cx| ...)
 					过程
 						WindowOptions ...
 						→ open_window ...
@@ -451,18 +897,28 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						titlebar: Some(TitlebarOptions { ... })
+							概念解释：配置窗口标题栏。
+							示例：在“WindowOptions / WindowBounds”中使用：titlebar: Some(TitlebarOptions { ... })
 						window_bounds: Some(WindowBounds::centered(...))
+							概念解释：配置窗口初始位置和尺寸。
+							示例：在“WindowOptions / WindowBounds”中使用：window_bounds: Some(WindowBounds::centered(...))
 						window_min_size
+							概念解释：配置窗口最小尺寸。
+							示例：在“WindowOptions / WindowBounds”中使用：window_min_size
 					过程
 						WindowOptions { ... } ...
 						→ open_window
 			KiteWindow
 				是什么
 					主窗口根 Entity，负责管理窗口里的多个页签。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				能做什么
 					创建、关闭、切换页签，共享剪贴板，保存会话，更新窗口标题和焦点。
 				在 Kite 中的用法
 					一个 KiteWindow 内持有多个 KiteApp，活动 KiteApp 显示在页签区域。
+						概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+						示例：restore_session
 				一句类比
 					浏览器窗口的总台，负责管理多个标签页。
 				项目关键数值
@@ -472,18 +928,28 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						restore_session
+							概念解释：从持久化状态恢复页签和路径。
+							示例：在“KiteWindow”中使用：restore_session
 						persist_session
+							概念解释：保存当前页签、路径和视图状态。
+							示例：在“KiteWindow”中使用：persist_session
 						tabs: Vec<TabEntry>
+							概念解释：KiteWindow 持有的页签集合。
+							示例：在“KiteWindow”中使用：tabs: Vec<TabEntry>
 						active_after_close(...)
+							概念解释：计算关闭页签后应激活的索引。
+							示例：在“KiteWindow”中使用：active_after_close(...)
 					过程
 						load_session ...
 						→ new_restored ...
 						→ active tab ...
 						→ save_session
-	04 GPUI 编程模型
+	05 GPUI 编程模型
 		主题概览
 			一句话定位
 				GPUI 的核心写法是：Entity 存状态，Context 改状态，Render 画界面，Action 和 Subscription 接事件。
+					概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+					示例：cx.notify()
 			学完能回答
 				为什么状态变化会引发重绘？页面之间如何通信？
 		Entity 与 Context
@@ -494,6 +960,8 @@ Kite × Rust GPUI 工程能力地图
 			Context<T>：update / notify / spawn / subscribe
 				update
 					作用：修改 Entity 状态
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 					Kite 中：点击、菜单、异步结果回写
 				notify
 					作用：请求界面重绘
@@ -503,21 +971,31 @@ Kite × Rust GPUI 工程能力地图
 					Kite 中：加载目录、搜索、Git 事件
 				subscribe
 					作用：监听其他 Entity 或事件
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 					Kite 中：页签请求、Agent 事件、子组件变化
 			cx.new：创建子 Entity
 				cx.new
 					作用：在当前 GPUI 应用中创建子状态对象
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 					Kite 中：InputState、TableState、AgentPanel
 			this.update / this.update_in：异步结果回到 UI
 				this.update
 					作用：在异步任务中更新 Entity
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 					Kite 中：后台结果写回普通状态
 				this.update_in
 					作用：同时使用窗口上下文更新 Entity
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 					Kite 中：输入框设值、焦点和窗口相关操作
 		Render
 			用 Rust 组合元素树
 			render 读取最新状态
+				概念解释：把 Entity 的当前状态转换成元素树的 trait。
+				示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 			条件组合：when / when_some
 				when
 					作用：根据布尔条件决定是否加入元素
@@ -526,6 +1004,8 @@ Kite × Rust GPUI 工程能力地图
 					作用：在 Option 有值时加入元素并取用值
 					Kite 中：错误提示、Git 信息和更新横幅
 			子窗口通过 Entity 嵌入元素树
+				概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+				示例：Entity<T>
 		Element DSL
 			div / h_flex / v_flex
 				div
@@ -648,11 +1128,15 @@ Kite × Rust GPUI 工程能力地图
 					Kite 中：全局快捷键和搜索框特殊按键
 				listener
 					作用：把 UI 事件转换为 Entity 回调
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 					Kite 中：按钮点击、输入提交、菜单选择
 			Entity observation / EventEmitter / Subscription
 				Entity observation
 					作用：父实体监听子实体变化
 					Kite 中：KiteWindow 观察 KiteApp
+						概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+						示例：restore_session
 				EventEmitter
 					作用：子实体向父实体发送明确事件
 					Kite 中：TabRequest 的新建、关闭和切换
@@ -662,12 +1146,24 @@ Kite × Rust GPUI 工程能力地图
 		核心能力来源
 			框架能力
 				GPUI
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 				gpui-kit component
+					概念解释：对 GPUI、基础层、组件库和资源的统一门面，项目通过它使用 GPUI。
+					示例：use gpui_kit::*
 			GPUI 原语
 				Entity
+					概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+					示例：Entity<T>
 				Context
+					概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+					示例：cx.notify()
 				Render
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				Task
+					概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+					示例：_load_task: Task<()>
 				Subscription
 			项目代码
 				src/actions.rs
@@ -678,22 +1174,38 @@ Kite × Rust GPUI 工程能力地图
 			Entity
 				是什么
 					可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					保存状态、通知观察者变化、被父子组件持有，并能在异步结果回来后安全更新。
 				在 Kite 中的用法
 					KiteWindow、KiteApp、InputState、TableState、AgentPanel 都是 Entity。
+						概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+						示例：restore_session
 				一句类比
 					一个会通知观众“我变了”的数据盒子。
 				项目关键数值
 					Windows Render 实现：18 个
+						概念解释：把 Entity 的当前状态转换成元素树的 trait。
+						示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 					KiteApp 长任务字段：13 个
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					状态对象覆盖：页面、输入框、表格、Agent 面板
 				核心代码关键词
 					关键词
 						Entity<T>
+							概念解释：泛型可观察状态对象。
+							示例：在“Entity”中使用：Entity<T>
 						cx.new(|cx| ...)
+							概念解释：创建新的 Entity。
+							示例：在“Entity”中使用：cx.new(|cx| ...)
 						cx.observe_in(...)
+							概念解释：观察另一个 Entity 的变化并建立生命周期订阅。
+							示例：在“Entity”中使用：cx.observe_in(...)
 						this.update_in(cx, ...)
+							概念解释：在异步任务中带窗口上下文更新 Entity。
+							示例：在“Entity”中使用：this.update_in(cx, ...)
 					过程
 						state ...
 						→ Entity ...
@@ -702,22 +1214,40 @@ Kite × Rust GPUI 工程能力地图
 			Context
 				是什么
 					操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				能做什么
 					调用 update、notify、spawn、subscribe、observe，访问窗口和焦点。
+						概念解释：跨平台文件变化监听库。
+						示例：RecommendedWatcher
 				在 Kite 中的用法
 					所有点击回调、渲染辅助函数、异步回写都使用 Context。
+						概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+						示例：cx.notify()
 				一句类比
 					控制当前页面和数据的遥控器。
 				项目关键数值
 					核心操作：update / notify / spawn / subscribe，共 4 类
+						概念解释：跨平台文件变化监听库。
+						示例：RecommendedWatcher
 					KiteApp 中 notify 调用点：191 个
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					异步回写入口：update / update_in，共 2 种
 				核心代码关键词
 					关键词
 						cx.notify()
+							概念解释：请求当前 Entity 重新渲染。
+							示例：在“Context”中使用：cx.notify()
 						cx.spawn_in(window, ...)
+							概念解释：创建带窗口上下文的 GPUI 异步任务。
+							示例：在“Context”中使用：cx.spawn_in(window, ...)
 						cx.subscribe_in(...)
+							概念解释：订阅另一个 Entity 发出的事件。
+							示例：在“Context”中使用：cx.subscribe_in(...)
 						window.defer(...)
+							概念解释：把回调延后到当前窗口更新之后执行。
+							示例：在“Context”中使用：window.defer(...)
 					过程
 						listener ...
 						→ state update ...
@@ -726,19 +1256,27 @@ Kite × Rust GPUI 工程能力地图
 			Render
 				是什么
 					把 Entity 的当前状态转换成元素树的 trait。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				能做什么
 					状态变化后重新读取数据，组合出最新界面。
 				在 Kite 中的用法
 					KiteWindow、KiteApp 和每个独立窗口都实现 Render。
+						概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+						示例：restore_session
 				一句类比
 					按当前数据重新摆一遍家具。
 				项目关键数值
 					Render 实现：18 个
+						概念解释：把 Entity 的当前状态转换成元素树的 trait。
+						示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 					最大单文件实现：src/app.rs，12,515 行
 					主窗口渲染层级：窗口壳 → 页签 → 工作区 → 面板
 				核心代码关键词
 					关键词
 						impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
+							概念解释：KiteApp 的 GPUI 渲染入口。
+							示例：在“Render”中使用：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 					过程
 						render ...
 						→ v_flex().child(...) ...
@@ -754,17 +1292,33 @@ Kite × Rust GPUI 工程能力地图
 					用代码搭积木。
 				项目关键数值
 					基础容器：div / h_flex / v_flex，共 3 个
+						概念解释：GPUI 中的水平 flex 和垂直 flex 布局容器。
+						示例：h_flex().flex_1().child(...)
 					主界面布局常量：27 个
 					常用布局维度：尺寸、间距、边框、圆角、溢出、颜色
 				核心代码关键词
 					关键词
 						div()
+							概念解释：GPUI 的通用元素容器。
+							示例：在“Element DSL”中使用：div()
 						h_flex()
+							概念解释：水平 flex 布局容器。
+							示例：在“Element DSL”中使用：h_flex()
 						v_flex()
+							概念解释：垂直 flex 布局容器。
+							示例：在“Element DSL”中使用：v_flex()
 						.flex_1()
+							概念解释：让元素占用剩余空间。
+							示例：在“Element DSL”中使用：.flex_1()
 						.w_full()
+							概念解释：让元素占满父容器宽度。
+							示例：在“Element DSL”中使用：.w_full()
 						.gap(...)
+							概念解释：设置子元素间距。
+							示例：在“Element DSL”中使用：.gap(...)
 						.child(...)
+							概念解释：向元素树追加子元素。
+							示例：在“Element DSL”中使用：.child(...)
 					过程
 						容器 ...
 						→ 子元素 ...
@@ -777,6 +1331,8 @@ Kite × Rust GPUI 工程能力地图
 					把用户操作路由到处理函数，并在子实体变化时更新父实体。
 				在 Kite 中的用法
 					快捷键、页签命令、KiteWindow 观察 KiteApp 都使用这套机制。
+						概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+						示例：restore_session
 				一句类比
 					Action 是按钮，Subscription 是连接按钮和设备的电线。
 				项目关键数值
@@ -786,25 +1342,43 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						actions!(kite, [...])
+							概念解释：声明可绑定快捷键和菜单的 GPUI Action。
+							示例：在“Action / Subscription”中使用：actions!(kite, [...])
 						on_action(cx.listener(...))
+							概念解释：把 Action 绑定到处理函数。
+							示例：在“Action / Subscription”中使用：on_action(cx.listener(...))
 						EventEmitter<TabRequest>
+							概念解释：发出页签操作事件的 Entity 接口。
+							示例：在“Action / Subscription”中使用：EventEmitter<TabRequest>
 						cx.subscribe_in
+							概念解释：“Action / Subscription”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“Action / Subscription”中使用：cx.subscribe_in
 					过程
 						KeyDown / Click ...
 						→ Action/listener ...
 						→ state ...
 						→ notify
-	05 状态模型与数据流
+	06 状态模型与数据流
 		主题概览
 			一句话定位
 				Kite 的状态分层为：窗口壳状态、页签页面状态、子 Entity 状态和 Rust Core 领域状态。
+					概念解释：一个不依赖任何 UI 框架的 Rust 业务核心，输出 rlib、staticlib 和 cdylib。
+					示例：pub mod fs/git/agent/search/...
 			学完能回答
 				一个用户操作如何从点击变成状态变化，再变成新界面？
 		状态所有权
 			KiteWindow：页签集合、活动页签、共享剪贴板
+				概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+				示例：restore_session
 			KiteApp：单页签导航、列表/分栏、搜索、预览、Git、Agent 编排
+				概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+				示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 			子 Entity：InputState、TableState、AgentPanel
+				概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+				示例：Entity<T>
 			Rust Core：领域状态、持久化、外部进程与索引
+				概念解释：一个不依赖任何 UI 框架的 Rust 业务核心，输出 rlib、staticlib 和 cdylib。
+				示例：pub mod fs/git/agent/search/...
 		状态分组
 			导航：current_dir / history / history_index
 				current_dir
@@ -881,21 +1455,37 @@ Kite × Rust GPUI 工程能力地图
 					作用：接收 UI 事件并调用处理函数
 					Kite 中：鼠标点击和输入提交
 			修改 KiteApp 或子 Entity 状态
+				概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+				示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 			需要 I/O 时创建 Task
+				概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+				示例：_load_task: Task<()>
 			background_spawn 执行阻塞工作
+				概念解释：在后台执行阻塞或 CPU 密集任务的入口。
+				示例：cx.background_spawn(async move { load_directory_snapshot(...) }).await
 			await 后在 update/update_in 中回写
 			generation 校验过期结果
 			cx.notify 触发 Render
+				概念解释：告诉 GPUI 当前 Entity 的状态已经变化，需要重新渲染。
+				示例：cx.notify()
 		跨实体观察
 			KiteWindow observe KiteApp
+				概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+				示例：restore_session
 			页签变化更新窗口标题和会话
 			TabRequest 事件解耦页签命令
 			共享剪贴板通过 Rc<RefCell<...>> 在页签间复用
 		核心能力来源
 			GPUI 原语
 				Entity
+					概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+					示例：Entity<T>
 				Context
+					概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+					示例：cx.notify()
 				Render
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				observe
 				subscribe
 			项目代码
@@ -908,19 +1498,27 @@ Kite × Rust GPUI 工程能力地图
 			KiteApp
 				是什么
 					单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				能做什么
 					管理当前目录、历史、列表/分栏、搜索、预览、Git 对话和工作流状态。
 				在 Kite 中的用法
 					每个页签创建一个 KiteApp，负责该页签的完整浏览上下文。
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 				一句类比
 					一个浏览器标签页的完整工作和记忆。
 				项目关键数值
 					文件规模：12,515 行
 					Task 字段：13 个
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 					generation 计数器：7 个
 				核心代码关键词
 					关键词
 						pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
+							概念解释：KiteApp 页签页面的核心状态结构。
+							示例：在“KiteApp”中使用：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					过程
 						new_at ...
 						→ request_load ...
@@ -929,12 +1527,18 @@ Kite × Rust GPUI 工程能力地图
 			KiteWindow
 				是什么
 					一个操作系统窗口的根 View Entity。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				能做什么
 					管理页签集合、活动页签、共享文件剪贴板、窗口标题和会话持久化。
 				在 Kite 中的用法
 					它观察各个 KiteApp 的状态变化，并在页签切换时同步标题和剪贴板。
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 				一句类比
 					窗口总台，KiteApp 是里面的工作台。
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 				项目关键数值
 					会话保存页签上限：64 个
 					活动页签：1 个
@@ -942,9 +1546,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						restore_session
+							概念解释：从持久化状态恢复页签和路径。
+							示例：在“KiteWindow”中使用：restore_session
 						persist_session
+							概念解释：保存当前页签、路径和视图状态。
+							示例：在“KiteWindow”中使用：persist_session
 						tabs: Vec<TabEntry>
+							概念解释：KiteWindow 持有的页签集合。
+							示例：在“KiteWindow”中使用：tabs: Vec<TabEntry>
 						active_after_close(...)
+							概念解释：计算关闭页签后应激活的索引。
+							示例：在“KiteWindow”中使用：active_after_close(...)
 					过程
 						load_session ...
 						→ new_restored ...
@@ -961,13 +1573,21 @@ Kite × Rust GPUI 工程能力地图
 					每次下单发一个号码，只认最新号码的结果。
 				项目关键数值
 					KiteApp generation 计数器：7 个
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					典型场景：目录、搜索、VCS、分栏、预览
 					每次请求递增计数：1 次
 				核心代码关键词
 					关键词
 						*_generation.wrapping_add(1)
+							概念解释：递增异步任务版本号，用于丢弃旧结果。
+							示例：在“generation token”中使用：*_generation.wrapping_add(1)
 						if this.load_generation != generation { return
+							概念解释：generation 不相等时丢弃过期异步结果。
+							示例：在“generation token”中使用：if this.load_generation != generation { return
 						}
+							概念解释：“generation token”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“generation token”中使用：}
 					过程
 						request ...
 						→ generation++ ...
@@ -976,19 +1596,29 @@ Kite × Rust GPUI 工程能力地图
 			cx.notify
 				是什么
 					告诉 GPUI 当前 Entity 的状态已经变化，需要重新渲染。
+						概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+						示例：Entity<T>
 				能做什么
 					触发 Render 读取最新状态并更新界面。
+						概念解释：把 Entity 的当前状态转换成元素树的 trait。
+						示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				在 Kite 中的用法
 					文件列表、搜索、预览、窗口标题等状态修改后调用。
 				一句类比
 					通知装修队“数据变了，请重新摆一遍”。
 				项目关键数值
 					KiteApp 中 notify 调用点：191 个
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					每次重绘通知：1 次
 					状态变化后触发最新 Render
+						概念解释：把 Entity 的当前状态转换成元素树的 trait。
+						示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				核心代码关键词
 					关键词
 						cx.notify()
+							概念解释：请求当前 Entity 重新渲染。
+							示例：在“cx.notify”中使用：cx.notify()
 					过程
 						mutate state ...
 						→ notify ...
@@ -1010,28 +1640,48 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						load_session
+							概念解释：读取持久化会话。
+							示例：在“session / preferences”中使用：load_session
 						save_session
+							概念解释：保存当前会话。
+							示例：在“session / preferences”中使用：save_session
 						SessionStateDto
+							概念解释：跨进程持久化的页签会话结构。
+							示例：在“session / preferences”中使用：SessionStateDto
 						SessionTabDto
+							概念解释：单个页签的会话数据。
+							示例：在“session / preferences”中使用：SessionTabDto
 						load_ui_preferences
+							概念解释：读取主题、布局和列宽偏好。
+							示例：在“session / preferences”中使用：load_ui_preferences
 						save_ui_preferences
+							概念解释：保存主题、布局和列宽偏好。
+							示例：在“session / preferences”中使用：save_ui_preferences
 					过程
 						启动 ...
 						→ load ...
 						→ KiteApp 恢复 ...
 						→ 修改后 save
-	06 异步、并发与性能
+	07 异步、并发与性能
 		主题概览
 			一句话定位
 				GPUI 主线程只负责编排和渲染，阻塞工作进入后台；Task 管理生命周期，generation 丢弃旧结果。
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 			学完能回答
 				为什么界面不会因为读大目录、搜索或 Git 命令而冻结？
 		Task 生命周期
 			Task 存入结构体字段以保证存活
+				概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+				示例：_load_task: Task<()>
 			替换或丢弃 Task 会取消旧任务
+				概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+				示例：_load_task: Task<()>
 			Task::ready(()) 用于清空
 				Task::ready(())
 					作用：创建一个立即完成的占位 Task
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 					Kite 中：取消或失效后清空任务字段
 			.detach() 用于明确的后台独立任务
 		任务分工
@@ -1043,8 +1693,14 @@ Kite × Rust GPUI 工程能力地图
 					作用：带窗口上下文创建 UI 异步任务
 					Kite 中：输入框、焦点和窗口相关异步流程
 			cx.background_spawn：阻塞式文件、搜索、Git 工作
+				概念解释：在后台执行阻塞或 CPU 密集任务的入口。
+				示例：cx.background_spawn(async move { load_directory_snapshot(...) }).await
 			await 后回到 foreground 更新 Entity
+				概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+				示例：Entity<T>
 			window.defer：延后到当前更新之后
+				概念解释：把一段操作延后到当前 GPUI 更新结束之后执行。
+				示例：window.defer(cx, move |window, cx| ...)
 		取消与防旧结果
 			load_generation
 			search_generation / column_search_generation
@@ -1076,14 +1732,22 @@ Kite × Rust GPUI 工程能力地图
 			结果数量与输出长度上限
 			图片预览缓存容量
 			perf_trace 首内容渲染标记
+				概念解释：项目内记录性能时间点的轻量工具。
+				示例：perf_trace::start()
 			性能 JSON 基线与对照
 		核心能力来源
 			GPUI 异步 API
 				Task
+					概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+					示例：_load_task: Task<()>
 				cx.spawn
 				cx.spawn_in
 				background_spawn
+					概念解释：在后台执行阻塞或 CPU 密集任务的入口。
+					示例：cx.background_spawn(async move { load_directory_snapshot(...) }).await
 				window.defer
+					概念解释：把一段操作延后到当前 GPUI 更新结束之后执行。
+					示例：window.defer(cx, move |window, cx| ...)
 			Rust 标准库
 				std::sync::atomic
 				mpsc
@@ -1094,6 +1758,8 @@ Kite × Rust GPUI 工程能力地图
 				src/content_search.rs
 				src/name_index.rs
 				src/perf_trace.rs
+					概念解释：项目内记录性能时间点的轻量工具。
+					示例：perf_trace::start()
 			设计文档
 				docs/architecture/auto-refresh.md
 				docs/performance/README.md
@@ -1111,10 +1777,16 @@ Kite × Rust GPUI 工程能力地图
 					cx.spawn 调用点：40 个
 					cx.spawn_in 调用点：60 个
 					background_spawn 调用点：76 个
+						概念解释：在后台执行阻塞或 CPU 密集任务的入口。
+						示例：cx.background_spawn(async move { load_directory_snapshot(...) }).await
 				核心代码关键词
 					关键词
 						cx.spawn(async move |this, cx| ...)
+							概念解释：创建 GPUI UI 异步任务。
+							示例：在“cx.spawn / cx.spawn_in”中使用：cx.spawn(async move |this, cx| ...)
 						cx.spawn_in(window, async move |this, cx| ...)
+							概念解释：创建带窗口上下文的 GPUI 异步任务。
+							示例：在“cx.spawn / cx.spawn_in”中使用：cx.spawn_in(window, async move |this, cx| ...)
 					过程
 						spawn ...
 						→ await ...
@@ -1126,6 +1798,8 @@ Kite × Rust GPUI 工程能力地图
 					读取目录、扫描文件、查询索引、运行 Git、解码图片。
 				在 Kite 中的用法
 					凡是会卡住 UI 的工作，都包在 `cx.background_spawn` 里执行。
+						概念解释：在后台执行阻塞或 CPU 密集任务的入口。
+						示例：cx.background_spawn(async move { load_directory_snapshot(...) }).await
 				一句类比
 					后厨，真正干重活的地方。
 				项目关键数值
@@ -1135,6 +1809,8 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						cx.background_spawn(async move { load_directory_snapshot(...) }).await
+							概念解释：在后台执行阻塞目录读取。
+							示例：在“background_spawn”中使用：cx.background_spawn(async move { load_directory_snapshot(...) }).await
 					过程
 						background_spawn ...
 						→ IO/CPU ...
@@ -1147,17 +1823,31 @@ Kite × Rust GPUI 工程能力地图
 					存进结构体字段可保持任务存活；替换或丢弃会取消旧任务；detach 后继续后台运行。
 				在 Kite 中的用法
 					Kite 用 `_load_task`、`_search_task`、`_vcs_task` 等字段管理任务。
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 				一句类比
 					订单小票；撕掉小票就等于取消订单。
 				项目关键数值
 					KiteApp Task 字段：13 个
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					整个 src 中 Task 字段：29 个
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 					Task 生命周期：持有、替换取消、detach、ready 清空
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 				核心代码关键词
 					关键词
 						_load_task: Task<()>
+							概念解释：持有目录加载任务，防止任务被提前取消。
+							示例：在“Task”中使用：_load_task: Task<()>
 						self._load_task = cx.spawn_in(...)
+							概念解释：替换任务字段并取消旧加载任务。
+							示例：在“Task”中使用：self._load_task = cx.spawn_in(...)
 						Task::ready(())
+							概念解释：创建立即完成的占位 Task，用于清空任务字段。
+							示例：在“Task”中使用：Task::ready(())
 					过程
 						创建 Task ...
 						→ 字段持有 ...
@@ -1165,6 +1855,8 @@ Kite × Rust GPUI 工程能力地图
 			window.defer
 				是什么
 					把一段操作延后到当前 GPUI 更新结束之后执行。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					避免在渲染或更新过程中重入窗口、滚动或原生菜单系统。
 				在 Kite 中的用法
@@ -1175,9 +1867,13 @@ Kite × Rust GPUI 工程能力地图
 					调用点：7 个
 					典型用途：滚动定位、Git 打开、原生菜单
 					执行时机：当前 GPUI 更新返回之后
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				核心代码关键词
 					关键词
 						window.defer(cx, move |window, cx| ...)
+							概念解释：“window.defer”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“window.defer”中使用：window.defer(cx, move |window, cx| ...)
 					过程
 						render/update ...
 						→ defer ...
@@ -1200,6 +1896,8 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						background_executor().timer(Duration::from_millis(...)).await
+							概念解释：在 GPUI 后台执行器上等待定时器。
+							示例：在“debounce”中使用：background_executor().timer(Duration::from_millis(...)).await
 					过程
 						高频事件 ...
 						→ debounce timer ...
@@ -1220,13 +1918,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						perf_trace::start()
+							概念解释：启动性能事件记录。
+							示例：在“perf_trace”中使用：perf_trace::start()
 						perf_trace::mark_once("windows.first_content_render")
+							概念解释：记录首次内容渲染时间点。
+							示例：在“perf_trace”中使用：perf_trace::mark_once("windows.first_content_render")
 					过程
 						process start ...
 						→ first window ...
 						→ first content ...
 						→ JSON 基线
-	07 主界面与布局系统
+	08 主界面与布局系统
 		主题概览
 			一句话定位
 				主界面由窗口壳、工具栏、侧边栏、内容区、右侧面板和状态栏组成，并用断点适配窄窗口。
@@ -1234,8 +1936,12 @@ Kite × Rust GPUI 工程能力地图
 				为什么同一个界面在宽窗口和窄窗口下布局不同？
 		窗口壳
 			KiteWindow 根 v_flex
+				概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+				示例：restore_session
 			Tab Bar
 			Active KiteApp
+				概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+				示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 		页签内容
 			Toolbar
 			Main Workspace
@@ -1263,6 +1969,8 @@ Kite × Rust GPUI 工程能力地图
 		中间内容区
 			列表模式：DataTable
 			分栏模式：横向 ColumnPane 链
+				概念解释：表示一个目录栏的状态对象。
+				示例：ColumnPane { path, directory_entries, selected_paths, sort, ... }
 		响应式规则
 			侧边栏可隐藏
 			窗口变窄时栏目横向滚动
@@ -1277,7 +1985,11 @@ Kite × Rust GPUI 工程能力地图
 		核心能力来源
 			框架能力
 				GPUI 元素 DSL
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 				GPUI 样式系统
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 			GPUI 组件
 				Button
 				Input
@@ -1289,14 +2001,26 @@ Kite × Rust GPUI 工程能力地图
 				src/tabs.rs
 			关键函数
 				render_toolbar
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				render_sidebar
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				render_columns
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				render_right_pane
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				render_tab_bar
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 		能力说明
 			h_flex / v_flex
 				是什么
 					GPUI 中的水平 flex 和垂直 flex 布局容器。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					横向或纵向排列子元素，并支持居中、拉伸、换行、间距和固定尺寸。
 				在 Kite 中的用法
@@ -1311,7 +2035,11 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						h_flex().flex_1().child(...)
+							概念解释：“h_flex / v_flex”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“h_flex / v_flex”中使用：h_flex().flex_1().child(...)
 						v_flex().size_full().child(...)
+							概念解释：“h_flex / v_flex”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“h_flex / v_flex”中使用：v_flex().size_full().child(...)
 					过程
 						根容器 ...
 						→ 子容器 ...
@@ -1320,6 +2048,8 @@ Kite × Rust GPUI 工程能力地图
 			gpui-kit 组件
 				是什么
 					一组基于 GPUI 的成品 UI 控件。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					提供按钮、输入框、表格、菜单、滚动条、进度条、可调整面板等常用能力。
 				在 Kite 中的用法
@@ -1334,9 +2064,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						Button::new(...)
+							概念解释：“gpui-kit 组件”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“gpui-kit 组件”中使用：Button::new(...)
 						InputState
+							概念解释：gpui-kit 输入框的可观察状态。
+							示例：在“gpui-kit 组件”中使用：InputState
 						DataTable::new(&self.table)
+							概念解释：“gpui-kit 组件”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“gpui-kit 组件”中使用：DataTable::new(&self.table)
 						PopupMenu
+							概念解释：gpui-kit 的浮动菜单组件。
+							示例：在“gpui-kit 组件”中使用：PopupMenu
 					过程
 						组件 state ...
 						→ UI event ...
@@ -1358,9 +2096,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						cx.theme().background
+							概念解释：“theme token”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“theme token”中使用：cx.theme().background
 						.border
+							概念解释：“theme token”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“theme token”中使用：.border
 						.muted_foreground
+							概念解释：“theme token”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“theme token”中使用：.muted_foreground
 						.danger
+							概念解释：“theme token”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“theme token”中使用：.danger
 					过程
 						Theme::change ...
 						→ cx.theme() ...
@@ -1382,14 +2128,18 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						window.viewport_size().width < px(RIGHT_PANE_OVERLAY_BREAKPOINT)
+							概念解释：“responsive breakpoint”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“responsive breakpoint”中使用：window.viewport_size().width < px(RIGHT_PANE_OVERLAY_BREAKPOINT)
 					过程
 						viewport ...
 						→ 980px 判断 ...
 						→ 并排布局/absolute overlay
-	08 导航、分栏与文件列表
+	09 导航、分栏与文件列表
 		主题概览
 			一句话定位
 				分栏用有序 ColumnPane 表示路径链，列表用 TableDelegate 把文件数据适配成可排序表格。
+					概念解释：表示一个目录栏的状态对象。
+					示例：ColumnPane { path, directory_entries, selected_paths, sort, ... }
 			学完能回答
 				为什么选中一个目录后右边会出现下一栏？为什么选中文件会关掉更深的栏？
 		导航
@@ -1408,6 +2158,8 @@ Kite × Rust GPUI 工程能力地图
 			页签与会话恢复
 		分栏浏览
 			ColumnPane 有序向量
+				概念解释：表示一个目录栏的状态对象。
+				示例：ColumnPane { path, directory_entries, selected_paths, sort, ... }
 			选中目录追加下一栏
 			选中文件截断更深栏
 			复用已加载共同前缀
@@ -1461,8 +2213,14 @@ Kite × Rust GPUI 工程能力地图
 				src/app.rs
 			关键函数
 				ColumnPane
+					概念解释：表示一个目录栏的状态对象。
+					示例：ColumnPane { path, directory_entries, selected_paths, sort, ... }
 				render_columns
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 				render_column
+					概念解释：把 Entity 的当前状态转换成元素树的 trait。
+					示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
 			设计文档
 				docs/architecture/sidebar-navigation.md
 				docs/architecture/macos-column-rules.md
@@ -1474,6 +2232,8 @@ Kite × Rust GPUI 工程能力地图
 					保存目录路径、文件条目、选中项、排序、筛选、分组、搜索和加载状态。
 				在 Kite 中的用法
 					`Vec<ColumnPane>` 按路径层级排列；选中目录追加下一栏，选中文件截断更深栏。
+						概念解释：表示一个目录栏的状态对象。
+						示例：ColumnPane { path, directory_entries, selected_paths, sort, ... }
 				一句类比
 					一行文件夹窗口，串起来就是路径链。
 				项目关键数值
@@ -1484,7 +2244,11 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						ColumnPane { path, directory_entries, selected_paths, sort, ... }
+							概念解释：保存一栏目录、条目、选择和排序状态。
+							示例：在“ColumnPane”中使用：ColumnPane { path, directory_entries, selected_paths, sort, ... }
 						load_column_pane(path, rule)
+							概念解释：按显示规则加载单个目录栏。
+							示例：在“ColumnPane”中使用：load_column_pane(path, rule)
 					过程
 						root ...
 						→ column_chain ...
@@ -1507,10 +2271,20 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						impl TableDelegate for FileTableDelegate
+							概念解释：让文件数据适配 gpui-kit DataTable。
+							示例：在“DataTable / TableDelegate”中使用：impl TableDelegate for FileTableDelegate
 						column
+							概念解释：TableDelegate 的列定义方法。
+							示例：在“DataTable / TableDelegate”中使用：column
 						render_td
+							概念解释：TableDelegate 的表格单元格渲染方法。
+							示例：在“DataTable / TableDelegate”中使用：render_td
 						perform_sort
+							概念解释：TableDelegate 的排序处理入口。
+							示例：在“DataTable / TableDelegate”中使用：perform_sort
 						context_menu
+							概念解释：TableDelegate 的行右键菜单入口。
+							示例：在“DataTable / TableDelegate”中使用：context_menu
 					过程
 						FileEntry[] ...
 						→ FileTableDelegate ...
@@ -1523,6 +2297,8 @@ Kite × Rust GPUI 工程能力地图
 					支持返回、前进和恢复导航上下文。
 				在 Kite 中的用法
 					`history` 与 `history_index` 支撑浏览器式前后导航。
+						概念解释：记录当前路径访问顺序和历史位置的数据结构。
+						示例：history: Vec<PathBuf>
 				一句类比
 					网页浏览器的历史记录。
 				项目关键数值
@@ -1532,8 +2308,14 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						history: Vec<PathBuf>
+							概念解释：当前页签访问过的路径栈。
+							示例：在“history”中使用：history: Vec<PathBuf>
 						history_index: usize
+							概念解释：当前位于历史路径栈中的位置。
+							示例：在“history”中使用：history_index: usize
 						NavigationIntent::{Push, ReplaceIndex, Refresh}
+							概念解释：导航动作类型，决定如何修改历史。
+							示例：在“history”中使用：NavigationIntent::{Push, ReplaceIndex, Refresh}
 					过程
 						navigate_to ...
 						→ apply_history ...
@@ -1554,19 +2336,33 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						selected_path
+							概念解释：当前单选路径。
+							示例：在“selection”中使用：selected_path
 						selected_paths
+							概念解释：当前多选路径集合。
+							示例：在“selection”中使用：selected_paths
 						anchor_path
+							概念解释：范围选择的锚点路径。
+							示例：在“selection”中使用：anchor_path
 						toggle_selection
+							概念解释：切换单个条目的选中状态。
+							示例：在“selection”中使用：toggle_selection
 						select_range_to
+							概念解释：从锚点到目标进行范围选择。
+							示例：在“selection”中使用：select_range_to
 						select_all
+							概念解释：选择当前可见全部条目。
+							示例：在“selection”中使用：select_all
 					过程
 						click/key ...
 						→ selection update ...
 						→ preview/actions
-	09 文件操作、预览与编辑
+	10 文件操作、预览与编辑
 		主题概览
 			一句话定位
 				文件操作由 Rust 库执行，系统剪贴板和拖放交给操作系统，预览和编辑由 GPUI 文本/媒体组件展示。
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 			学完能回答
 				复制、粘贴、拖放、压缩和预览分别由哪一层负责？
 		文件管理
@@ -1663,6 +2459,8 @@ Kite × Rust GPUI 工程能力地图
 			设计文档
 				docs/architecture/file-drag-drop.md
 				docs/architecture/context-menu.md
+					概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+					示例：cx.notify()
 		能力说明
 			std::fs / fs
 				是什么
@@ -1680,10 +2478,20 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						load_directory(path, sort)
+							概念解释：读取目录并返回快照。
+							示例：在“std::fs / fs”中使用：load_directory(path, sort)
 						DirectorySnapshot
+							概念解释：目录读取结果，包含路径、条目和跳过数量。
+							示例：在“std::fs / fs”中使用：DirectorySnapshot
 						FileEntry
+							概念解释：单个文件或目录的元数据。
+							示例：在“std::fs / fs”中使用：FileEntry
 						transfer_entry
+							概念解释：执行复制或移动文件操作。
+							示例：在“std::fs / fs”中使用：transfer_entry
 						recycle_entry
+							概念解释：把文件或目录移入回收站。
+							示例：在“std::fs / fs”中使用：recycle_entry
 					过程
 						request_load ...
 						→ load_directory ...
@@ -1705,9 +2513,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						FileClipboard
+							概念解释：Kite 内部文件剪贴板状态。
+							示例：在“Explorer / Finder clipboard”中使用：FileClipboard
 						ClipboardMode
+							概念解释：文件剪贴板模式，复制或剪切。
+							示例：在“Explorer / Finder clipboard”中使用：ClipboardMode
 						CF_HDROP
+							概念解释：Windows 文件拖放和剪贴板格式。
+							示例：在“Explorer / Finder clipboard”中使用：CF_HDROP
 						SharedClipboard = Rc<RefCell<Option<FileClipboard>>>
+							概念解释：多个页签共享的 Kite 文件剪贴板。
+							示例：在“Explorer / Finder clipboard”中使用：SharedClipboard = Rc<RefCell<Option<FileClipboard>>>
 					过程
 						system clipboard ...
 						→ FileClipboard ...
@@ -1728,8 +2544,14 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						request_file_drag(window, &paths)
+							概念解释：向原生窗口投递文件拖出请求。
+							示例：在“OLE drag & drop”中使用：request_file_drag(window, &paths)
 						PostMessageW(... WM_APP ...)
+							概念解释：向 Windows 窗口投递私有异步消息。
+							示例：在“OLE drag & drop”中使用：PostMessageW(... WM_APP ...)
 						SHDoDragDrop(...)
+							概念解释：调用 Windows Shell 执行 OLE 文件拖放。
+							示例：在“OLE drag & drop”中使用：SHDoDragDrop(...)
 					过程
 						GPUI drag ...
 						→ WM_KITE_FILE_DRAG ...
@@ -1752,8 +2574,14 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						ArchiveFormat::{Zip, TarGz}
+							概念解释：支持的压缩格式枚举。
+							示例：在“zip / tar”中使用：ArchiveFormat::{Zip, TarGz}
 						compress_with_progress(...)
+							概念解释：带进度回调创建压缩包。
+							示例：在“zip / tar”中使用：compress_with_progress(...)
 						extract_with_progress(...)
+							概念解释：带进度回调解压归档。
+							示例：在“zip / tar”中使用：extract_with_progress(...)
 					过程
 						source ...
 						→ temp dir ...
@@ -1762,6 +2590,8 @@ Kite × Rust GPUI 工程能力地图
 			TextView / Editor
 				是什么
 					GPUI Kit 的文本展示和编辑组件。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				能做什么
 					显示代码、日志、Markdown 和普通文本，支持编辑、保存和语法高亮。
 				在 Kite 中的用法
@@ -1776,17 +2606,29 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						read_text_preview
+							概念解释：读取受限文本预览。
+							示例：在“TextView / Editor”中使用：read_text_preview
 						read_log_preview
+							概念解释：读取日志尾部预览。
+							示例：在“TextView / Editor”中使用：read_log_preview
 						TextDocument
+							概念解释：可编辑文本内容、编码和哈希模型。
+							示例：在“TextView / Editor”中使用：TextDocument
 						TextView
+							概念解释：gpui-kit 文本展示组件。
+							示例：在“TextView / Editor”中使用：TextView
 						Editor
+							概念解释：gpui-kit 多行编辑组件。
+							示例：在“TextView / Editor”中使用：Editor
 						save_text_document
+							概念解释：保存文本并保持换行、编码和哈希语义。
+							示例：在“TextView / Editor”中使用：save_text_document
 					过程
 						path ...
 						→ read_preview ...
 						→ TextView/Editor ...
 						→ save
-	10 搜索与索引
+	11 搜索与索引
 		主题概览
 			一句话定位
 				搜索先通过索引或系统日志找候选，再用 grep 精确确认内容；索引在后台低优先级运行。
@@ -1813,10 +2655,16 @@ Kite × Rust GPUI 工程能力地图
 					作用：保存文本词项和文件元数据
 					Kite 中：避免每次全盘读取正文
 			Tantivy 字段与查询
+				概念解释：Rust 实现的全文搜索索引库，思路类似 Lucene。
+				示例：IndexWriter
 			候选文件再精确匹配
 		增量与范围
 			USN Journal 增量变更
+				概念解释：Windows NTFS 文件系统的变更日志。
+				示例：DeviceIoControl
 			notify 文件变化监听
+				概念解释：跨平台文件变化监听库。
+				示例：RecommendedWatcher
 			当前目录 / 收藏 / 本地磁盘 / 网络卷范围
 				当前目录
 					作用：只在当前打开的目录内搜索
@@ -1848,14 +2696,24 @@ Kite × Rust GPUI 工程能力地图
 		核心能力来源
 			Rust 依赖
 				Tantivy
+					概念解释：Rust 实现的全文搜索索引库，思路类似 Lucene。
+					示例：IndexWriter
 				grep-searcher
+					概念解释：高性能文本搜索库，用于在文件中精确查找内容。
+					示例：RegexMatcherBuilder
 				ignore
 				walkdir
 				notify
+					概念解释：跨平台文件变化监听库。
+					示例：RecommendedWatcher
 				sysinfo
 			Windows API
 				USN Journal
+					概念解释：Windows NTFS 文件系统的变更日志。
+					示例：DeviceIoControl
 				DeviceIoControl
+					概念解释：Windows 用来向设备发送控制命令的原生 API。
+					示例：DeviceIoControl(...)
 			项目代码
 				src/content_search.rs
 				src/name_index.rs
@@ -1882,10 +2740,20 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						IndexWriter
+							概念解释：Tantivy 索引写入器。
+							示例：在“Tantivy”中使用：IndexWriter
 						IndexReader
+							概念解释：Tantivy 索引读取器。
+							示例：在“Tantivy”中使用：IndexReader
 						TopDocs
+							概念解释：Tantivy 查询结果集合。
+							示例：在“Tantivy”中使用：TopDocs
 						BooleanQuery
+							概念解释：Tantivy 布尔组合查询。
+							示例：在“Tantivy”中使用：BooleanQuery
 						RegexQuery
+							概念解释：Tantivy 正则查询。
+							示例：在“Tantivy”中使用：RegexQuery
 					过程
 						documents ...
 						→ IndexWriter.commit ...
@@ -1898,6 +2766,8 @@ Kite × Rust GPUI 工程能力地图
 					读取候选文件，返回匹配行、行号和匹配片段，并跳过二进制内容。
 				在 Kite 中的用法
 					内容索引只负责找候选，`grep-searcher` 负责确认真实匹配。
+						概念解释：高性能文本搜索库，用于在文件中精确查找内容。
+						示例：RegexMatcherBuilder
 				一句类比
 					索引告诉你哪本书，grep 帮你找到具体句子。
 				项目关键数值
@@ -1908,8 +2778,14 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						RegexMatcherBuilder
+							概念解释：grep-regex 的匹配器构建器。
+							示例：在“grep-searcher”中使用：RegexMatcherBuilder
 						SearcherBuilder
+							概念解释：grep-searcher 的搜索器构建器。
+							示例：在“grep-searcher”中使用：SearcherBuilder
 						impl Sink for LineSink
+							概念解释：接收 grep 匹配行和片段。
+							示例：在“grep-searcher”中使用：impl Sink for LineSink
 					过程
 						candidate file ...
 						→ searcher ...
@@ -1931,8 +2807,14 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						RecommendedWatcher
+							概念解释：notify 推荐的跨平台文件监听器。
+							示例：在“notify”中使用：RecommendedWatcher
 						RecursiveMode
+							概念解释：文件监听递归模式。
+							示例：在“notify”中使用：RecursiveMode
 						EventKind
+							概念解释：文件系统事件类型。
+							示例：在“notify”中使用：EventKind
 					过程
 						watch(root) ...
 						→ EventKind ...
@@ -1945,6 +2827,8 @@ Kite × Rust GPUI 工程能力地图
 					增量读取卷上发生的文件变化，避免每次重新扫描整个磁盘。
 				在 Kite 中的用法
 					名称索引使用 USN Journal 和游标维护最新文件清单。
+						概念解释：Windows NTFS 文件系统的变更日志。
+						示例：DeviceIoControl
 				一句类比
 					图书馆的借还登记簿。
 				项目关键数值
@@ -1955,9 +2839,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						DeviceIoControl
+							概念解释：Windows 向设备发送控制命令的 API。
+							示例：在“USN Journal”中使用：DeviceIoControl
 						FSCTL_QUERY_USN_JOURNAL
+							概念解释：查询 USN Journal 元数据。
+							示例：在“USN Journal”中使用：FSCTL_QUERY_USN_JOURNAL
 						FSCTL_READ_UNPRIVILEGED_USN_JOURNAL
+							概念解释：读取 USN Journal 变更记录。
+							示例：在“USN Journal”中使用：FSCTL_READ_UNPRIVILEGED_USN_JOURNAL
 						JournalCursor
+							概念解释：USN Journal 游标。
+							示例：在“USN Journal”中使用：JournalCursor
 					过程
 						volume ...
 						→ journal query ...
@@ -1976,23 +2868,37 @@ Kite × Rust GPUI 工程能力地图
 				项目关键数值
 					卷级日志通道：1 类
 					用途：读取 USN Journal 与卷信息
+						概念解释：Windows NTFS 文件系统的变更日志。
+						示例：DeviceIoControl
 					单次结果：无固定上限，由设备记录和缓冲决定
 				核心代码关键词
 					关键词
 						DeviceIoControl(...)
+							概念解释：“DeviceIoControl”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“DeviceIoControl”中使用：DeviceIoControl(...)
 						FSCTL_*
+							概念解释：Windows 文件系统控制码族。
+							示例：在“DeviceIoControl”中使用：FSCTL_*
 						JournalInfo
+							概念解释：USN Journal 元数据。
+							示例：在“DeviceIoControl”中使用：JournalInfo
 						UsnReadBatch
+							概念解释：USN Journal 读取批次。
+							示例：在“DeviceIoControl”中使用：UsnReadBatch
 					过程
 						volume handle ...
 						→ DeviceIoControl ...
 						→ UsnReadBatch
-	11 VCS、Git 与 Diff
+	12 VCS、Git 与 Diff
 		主题概览
 			一句话定位
 				Git 能力通过调用用户本机 git CLI 实现，Core 负责结构化结果，GPUI 负责窗口、进度和交互。
+					概念解释：调用用户本机安装的 `git` 命令，而不是链接 libgit2。
+					示例：GitExecutor
 			学完能回答
 				为什么选择 git CLI？一次 Git 操作如何从按钮变成真实命令和进度事件？
+					概念解释：调用用户本机安装的 `git` 命令，而不是链接 libgit2。
+					示例：GitExecutor
 		VCS 状态
 			Git / SVN 状态徽标
 				Git 徽标
@@ -2005,12 +2911,18 @@ Kite × Rust GPUI 工程能力地图
 			工作区根路径与 VCS 可用性
 		Git 服务
 			GitService 统一入口
+				概念解释：对 UI 暴露的统一 Git 能力入口。
+				示例：GitService
 			命令执行器
 			结构化错误
 			控制台与输出上限
 			凭据 Askpass Bridge
+				概念解释：桥接 Git/SSH 凭据提示和 UI 输入框。
+				示例：AskpassBridge
 		Git 窗口
 			Git Client
+				概念解释：调用用户本机安装的 `git` 命令，而不是链接 libgit2。
+				示例：GitExecutor
 			提交
 			提交历史与提交图
 			分支与标签
@@ -2052,10 +2964,18 @@ Kite × Rust GPUI 工程能力地图
 		核心能力来源
 			外部能力
 				git CLI（不链接 libgit2）
+					概念解释：调用用户本机安装的 `git` 命令，而不是链接 libgit2。
+					示例：GitExecutor
 			Rust 依赖
 				similar
+					概念解释：Rust 文本差异计算库。
+					示例：TextDiff::from_lines
 				keyring
+					概念解释：系统凭据存储库。
+					示例：keyring::Entry
 				notify
+					概念解释：跨平台文件变化监听库。
+					示例：RecommendedWatcher
 				std::process
 			项目代码
 				src/git/*
@@ -2072,8 +2992,12 @@ Kite × Rust GPUI 工程能力地图
 					调用用户本机安装的 `git` 命令，而不是链接 libgit2。
 				能做什么
 					执行 status、diff、log、commit、fetch、pull、push、clone、rebase 等操作。
+						概念解释：Windows 组件对象模型，用统一接口调用系统对象。
+						示例：CoInitializeEx(...)
 				在 Kite 中的用法
 					`src/git/command.rs` 统一配置环境变量、输出上限、进度和取消。
+						概念解释：Windows 组件对象模型，用统一接口调用系统对象。
+						示例：CoInitializeEx(...)
 				一句类比
 					让系统里的 Git 师傅干活，Kite 负责点单和查看进度。
 				项目关键数值
@@ -2084,9 +3008,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						GitExecutor
+							概念解释：统一执行 Git CLI 的命令执行器。
+							示例：在“git CLI”中使用：GitExecutor
 						Command::new("git")
+							概念解释：创建 git 子进程。
+							示例：在“git CLI”中使用：Command::new("git")
 						--no-optional-locks
+							概念解释：避免 Git 命令获取可选锁。
+							示例：在“git CLI”中使用：--no-optional-locks
 						CREATE_NO_WINDOW
+							概念解释：Windows 子进程不创建控制台窗口。
+							示例：在“git CLI”中使用：CREATE_NO_WINDOW
 					过程
 						label ...
 						→ Command ...
@@ -2099,6 +3031,8 @@ Kite × Rust GPUI 工程能力地图
 					读取仓库状态、执行同步操作、启动后台任务、监听 `.git` 变化和返回结构化错误。
 				在 Kite 中的用法
 					GPUI、SwiftUI、CLI 和 MCP 都通过同一套 Git 服务能力工作。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				一句类比
 					Git 师傅的调度台。
 				项目关键数值
@@ -2108,9 +3042,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						GitService
+							概念解释：对 UI 暴露的统一 Git 服务。
+							示例：在“GitService”中使用：GitService
 						repository_state(...)
+							概念解释：读取 Git 仓库状态。
+							示例：在“GitService”中使用：repository_state(...)
 						start_operation(...)
+							概念解释：启动后台 Git 长操作。
+							示例：在“GitService”中使用：start_operation(...)
 						watch_repository(...)
+							概念解释：监听 Git 仓库变化。
+							示例：在“GitService”中使用：watch_repository(...)
 					过程
 						GitService ...
 						→ operation ...
@@ -2133,8 +3075,14 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						TextDiff::from_lines
+							概念解释：按行计算文本差异。
+							示例：在“similar”中使用：TextDiff::from_lines
 						TextDiff::from_words
+							概念解释：按词计算文本差异。
+							示例：在“similar”中使用：TextDiff::from_words
 						ChangeTag
+							概念解释：文本差异中的新增、删除或保留类型。
+							示例：在“similar”中使用：ChangeTag
 					过程
 						old/new ...
 						→ TextDiff ...
@@ -2147,6 +3095,8 @@ Kite × Rust GPUI 工程能力地图
 					把 Git 的密码、口令或认证请求转换成界面对话框，再把用户输入写回命令。
 				在 Kite 中的用法
 					`GitCredentialCallback` 负责在 GPUI 中弹窗并返回凭据。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				一句类比
 					Git 想问密码时，Kite 代为转达。
 				项目关键数值
@@ -2156,18 +3106,28 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						AskpassBridge
+							概念解释：把 Git 凭据请求桥接到 UI。
+							示例：在“Askpass Bridge”中使用：AskpassBridge
 						GIT_ASKPASS
+							概念解释：Git 调用的凭据输入程序。
+							示例：在“Askpass Bridge”中使用：GIT_ASKPASS
 						SSH_ASKPASS
+							概念解释：SSH 调用的凭据输入程序。
+							示例：在“Askpass Bridge”中使用：SSH_ASKPASS
 						PINENTRY_USER_DATA
+							概念解释：向 GPG pinentry 传入上下文。
+							示例：在“Askpass Bridge”中使用：PINENTRY_USER_DATA
 					过程
 						git prompt ...
 						→ askpass script ...
 						→ request/response file ...
 						→ UI callback
-	12 Agent 集成
+	13 Agent 集成
 		主题概览
 			一句话定位
 				Kite 是 Agent 宿主，不是模型运行时；它负责配置、上下文、ACP 会话、权限确认和结果审核。
+					概念解释：Agent Client Protocol，客户端与 Agent 之间的通信协议。
+					示例：AcpStdioTransport
 			学完能回答
 				一个外部 Agent 如何被启动、对话、暂停、取消并安全修改文件？
 		Agent Core
@@ -2181,12 +3141,18 @@ Kite × Rust GPUI 工程能力地图
 					作用：Windows 系统安全凭据存储
 					Kite 中：保存 Agent 密钥引用
 			AgentSession 状态机
+				概念解释：一次 Agent 进程会话的状态机。
+				示例：AgentSession
 		ACP 会话
 			JSON-RPC over stdio
+				概念解释：用 JSON 表示请求、响应和通知，并通过标准输入输出传输。
+				示例：serde_json::Value
 			initialize / session/new / session/prompt
 				initialize
 					作用：协商协议版本和客户端能力
 					Kite 中：Agent 启动后的首个 ACP 请求
+						概念解释：Agent Client Protocol，客户端与 Agent 之间的通信协议。
+						示例：AcpStdioTransport
 				session/new
 					作用：创建工作目录和上下文会话
 					Kite 中：每次新 Agent 对话
@@ -2222,18 +3188,30 @@ Kite × Rust GPUI 工程能力地图
 		核心能力来源
 			Rust 依赖
 				uniffi
+					概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+					示例：uniffi::setup_scaffolding!()
 				keyring
+					概念解释：系统凭据存储库。
+					示例：keyring::Entry
 				std::process
 				similar
+					概念解释：Rust 文本差异计算库。
+					示例：TextDiff::from_lines
 			协议
 				ACP
+					概念解释：Agent Client Protocol，客户端与 Agent 之间的通信协议。
+					示例：AcpStdioTransport
 				JSON-RPC over stdio
+					概念解释：用 JSON 表示请求、响应和通知，并通过标准输入输出传输。
+					示例：serde_json::Value
 			项目代码
 				src/agent/*
 				src/agent_review.rs
 				src/agent_panel.rs
 				src/bin/kite-cli.rs
 				src/bin/kite-mcp.rs
+					概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+					示例：tools/list
 			设计文档
 				docs/architecture/agent-integration.md
 				docs/architecture/agent-session.md
@@ -2246,21 +3224,37 @@ Kite × Rust GPUI 工程能力地图
 					完成初始化、会话创建、提示词发送、流式事件接收和权限请求。
 				在 Kite 中的用法
 					`src/agent/acp.rs` 实现 ACP/JSON-RPC over stdio 适配。
+						概念解释：用 JSON 表示请求、响应和通知，并通过标准输入输出传输。
+						示例：serde_json::Value
 				一句类比
 					Kite 和外部 Agent 之间的对讲机。
 				项目关键数值
 					协议版本：ACP v1
+						概念解释：Agent Client Protocol，客户端与 Agent 之间的通信协议。
+						示例：AcpStdioTransport
 					单帧上限：256 KiB
 					协议预览：240 字符
 					stdin/stdout 读取线程：2 个
 				核心代码关键词
 					关键词
 						AcpStdioTransport
+							概念解释：ACP JSON-RPC over stdio 传输器。
+							示例：在“ACP”中使用：AcpStdioTransport
 						initialize
+							概念解释：ACP 初始化请求。
+							示例：在“ACP”中使用：initialize
 						session/new
+							概念解释：ACP 创建会话请求。
+							示例：在“ACP”中使用：session/new
 						session/prompt
+							概念解释：ACP 发送提示词请求。
+							示例：在“ACP”中使用：session/prompt
 						read_frame
+							概念解释：从标准输出读取 ACP JSON-RPC 帧。
+							示例：在“ACP”中使用：read_frame
 						write_frame
+							概念解释：向标准输入写入 ACP JSON-RPC 帧。
+							示例：在“ACP”中使用：write_frame
 					过程
 						start_process ...
 						→ initialize ...
@@ -2284,8 +3278,14 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						serde_json::Value
+							概念解释：serde_json 通用 JSON 值。
+							示例：在“JSON-RPC over stdio”中使用：serde_json::Value
 						read_frame(max_frame_bytes)
+							概念解释：按最大帧大小读取 JSON-RPC 帧。
+							示例：在“JSON-RPC over stdio”中使用：read_frame(max_frame_bytes)
 						count_output(max_output_bytes)
+							概念解释：累计输出字节并执行上限保护。
+							示例：在“JSON-RPC over stdio”中使用：count_output(max_output_bytes)
 					过程
 						Value ...
 						→ write_frame ...
@@ -2309,10 +3309,20 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						AgentSession
+							概念解释：Agent 进程会话状态机。
+							示例：在“AgentSession”中使用：AgentSession
 						SessionCommand
+							概念解释：Agent 后台工作线程命令。
+							示例：在“AgentSession”中使用：SessionCommand
 						start_agent(...)
+							概念解释：启动 Agent 子进程并完成初始化。
+							示例：在“AgentSession”中使用：start_agent(...)
 						send_prompt(...)
+							概念解释：发送用户提示词。
+							示例：在“AgentSession”中使用：send_prompt(...)
 						cancel(...)
+							概念解释：请求取消当前 Agent 任务。
+							示例：在“AgentSession”中使用：cancel(...)
 					过程
 						start ...
 						→ Ready ...
@@ -2335,9 +3345,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						keyring::Entry
+							概念解释：系统凭据存储条目。
+							示例：在“keyring”中使用：keyring::Entry
 						save_secret
+							概念解释：保存密钥到系统凭据库。
+							示例：在“keyring”中使用：save_secret
 						load_secret
+							概念解释：从系统凭据库读取密钥。
+							示例：在“keyring”中使用：load_secret
 						credential_ref(...)
+							概念解释：生成凭据引用字符串。
+							示例：在“keyring”中使用：credential_ref(...)
 					过程
 						profile ...
 						→ keyring entry ...
@@ -2360,19 +3378,29 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						build_review(...)
+							概念解释：构建 Agent 结果只读审核。
+							示例：在“diff 审核”中使用：build_review(...)
 						apply_review_changes(...)
+							概念解释：应用通过审核的文件修改。
+							示例：在“diff 审核”中使用：apply_review_changes(...)
 						reconfirm_file_change(...)
+							概念解释：文件外部变化后要求重新确认。
+							示例：在“diff 审核”中使用：reconfirm_file_change(...)
 						hash_bytes(...)
+							概念解释：计算 SHA-256 内容哈希。
+							示例：在“diff 审核”中使用：hash_bytes(...)
 					过程
 						draft ...
 						→ build_review ...
 						→ diff ...
 						→ reconfirm ...
 						→ apply
-	13 Windows 平台集成
+	14 Windows 平台集成
 		主题概览
 			一句话定位
 				Windows 集成把 GPUI 与 Win32、COM、Shell、WPD/MTP 连接起来，重点是对象生命周期和消息重入。
+					概念解释：Windows 最底层的原生 API 集合。
+					示例：windows::Win32::*
 			学完能回答
 				右键菜单、文件拖放、手机设备浏览为什么需要单独的 Windows 桥接层？
 		Shell 命名空间
@@ -2393,7 +3421,11 @@ Kite × Rust GPUI 工程能力地图
 			设备路径与本地文件路径区分
 		系统右键菜单
 			ContextMenuTarget
+				概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+				示例：cx.notify()
 			ContextMenuModel
+				概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+				示例：cx.notify()
 			MenuProvider
 			Action Envelope
 			Kite 原生菜单 + Windows Shell 扩展
@@ -2414,6 +3446,8 @@ Kite × Rust GPUI 工程能力地图
 					Kite 中：新扩展的弹出、绘制和字符消息
 			PostMessageW 延迟原生菜单
 			避免在 GPUI update 中嵌套 Windows 消息循环
+				概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+				示例：Entity
 		系统能力
 			Explorer 文件剪贴板
 			OLE 拖放
@@ -2423,7 +3457,11 @@ Kite × Rust GPUI 工程能力地图
 		核心能力来源
 			Windows API
 				Win32
+					概念解释：Windows 最底层的原生 API 集合。
+					示例：windows::Win32::*
 				COM
+					概念解释：Windows 组件对象模型，用统一接口调用系统对象。
+					示例：CoInitializeEx(...)
 				Shell
 				DataExchange
 				OLE
@@ -2433,14 +3471,22 @@ Kite × Rust GPUI 工程能力地图
 				windows-sys
 				winreg
 				keyring
+					概念解释：系统凭据存储库。
+					示例：keyring::Entry
 			项目代码
 				src/context_menu/mod.rs
+					概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+					示例：cx.notify()
 				src/context_menu/windows.rs
+					概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+					示例：cx.notify()
 				src/file_clipboard.rs
 				src/shell_fs.rs
 				src/explorer_integration.rs
 			设计文档
 				docs/architecture/context-menu.md
+					概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+					示例：cx.notify()
 				docs/architecture/default-file-manager.md
 				docs/architecture/file-drag-drop.md
 		能力说明
@@ -2451,6 +3497,8 @@ Kite × Rust GPUI 工程能力地图
 					访问窗口、消息、文件、线程、设备、剪贴板和系统设置。
 				在 Kite 中的用法
 					更新器、文件属性、设备枚举、窗口消息等场景使用 Win32。
+						概念解释：Windows 最底层的原生 API 集合。
+						示例：windows::Win32::*
 				一句类比
 					Windows 操作系统的底层插座。
 				项目关键数值
@@ -2460,11 +3508,23 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						windows::Win32::*
+							概念解释：Rust windows crate 提供的 Win32 API 类型和函数。
+							示例：在“Win32”中使用：windows::Win32::*
 						HANDLE
+							概念解释：Windows 内核对象句柄。
+							示例：在“Win32”中使用：HANDLE
 						HWND
+							概念解释：Windows 窗口句柄。
+							示例：在“Win32”中使用：HWND
 						LPARAM
+							概念解释：Windows 窗口消息参数。
+							示例：在“Win32”中使用：LPARAM
 						WPARAM
+							概念解释：Windows 窗口消息参数。
+							示例：在“Win32”中使用：WPARAM
 						PostMessageW(...)
+							概念解释：向 Windows 窗口投递消息。
+							示例：在“Win32”中使用：PostMessageW(...)
 					过程
 						Rust call ...
 						→ Win32 API ...
@@ -2477,6 +3537,8 @@ Kite × Rust GPUI 工程能力地图
 					访问 Shell、剪贴板、拖放、上下文菜单和系统服务。
 				在 Kite 中的用法
 					`src/context_menu/windows.rs`、`src/file_clipboard.rs`、`shell_fs.rs` 大量使用 COM。
+						概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+						示例：cx.notify()
 				一句类比
 					Windows 的通用插座标准。
 				项目关键数值
@@ -2486,10 +3548,20 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						CoInitializeEx(...)
+							概念解释：初始化线程 COM。
+							示例：在“COM”中使用：CoInitializeEx(...)
 						Interface
+							概念解释：windows crate 的 COM 接口 trait。
+							示例：在“COM”中使用：Interface
 						ComGuard
+							概念解释：RAII COM 初始化守卫。
+							示例：在“COM”中使用：ComGuard
 						IContextMenu2
+							概念解释：旧式 Windows Shell 上下文菜单接口。
+							示例：在“COM”中使用：IContextMenu2
 						IContextMenu3
+							概念解释：增强的 Windows Shell 上下文菜单接口。
+							示例：在“COM”中使用：IContextMenu3
 					过程
 						CoInitializeEx ...
 						→ interface ...
@@ -2511,9 +3583,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						IShellItem
+							概念解释：Windows Shell 命名空间项目接口。
+							示例：在“Shell namespace”中使用：IShellItem
 						IEnumShellItems
+							概念解释：Windows Shell 项目枚举接口。
+							示例：在“Shell namespace”中使用：IEnumShellItems
 						SHCreateItemFromParsingName
+							概念解释：从路径创建 IShellItem。
+							示例：在“Shell namespace”中使用：SHCreateItemFromParsingName
 						is_shell_namespace_path(...)
+							概念解释：判断路径是否为 Shell 命名空间路径。
+							示例：在“Shell namespace”中使用：is_shell_namespace_path(...)
 					过程
 						path ...
 						→ IShellItem ...
@@ -2535,9 +3615,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						PortableDevice
+							概念解释：WPD 便携设备模型。
+							示例：在“WPD / MTP”中使用：PortableDevice
 						shell_path
+							概念解释：设备在 Windows Shell 命名空间中的路径。
+							示例：在“WPD / MTP”中使用：shell_path
 						IShellItem
+							概念解释：Windows Shell 命名空间项目接口。
+							示例：在“WPD / MTP”中使用：IShellItem
 						is_shell_namespace_path(...)
+							概念解释：判断路径是否为 Shell 命名空间路径。
+							示例：在“WPD / MTP”中使用：is_shell_namespace_path(...)
 					过程
 						device enumerate ...
 						→ shell_path ...
@@ -2558,20 +3646,32 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						CF_HDROP
+							概念解释：Windows 文件拖放和剪贴板格式。
+							示例：在“OLE DataExchange”中使用：CF_HDROP
 						IDropSource
+							概念解释：Windows OLE 拖放源接口。
+							示例：在“OLE DataExchange”中使用：IDropSource
 						SHDoDragDrop
+							概念解释：“OLE DataExchange”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“OLE DataExchange”中使用：SHDoDragDrop
 						LockedGlobal
+							概念解释：Windows 全局内存锁 RAII 包装。
+							示例：在“OLE DataExchange”中使用：LockedGlobal
 					过程
 						paths ...
 						→ CF_HDROP ...
 						→ IDropSource ...
 						→ SHDoDragDrop
-	14 共享 Rust Core 与跨语言边界
+	15 共享 Rust Core 与跨语言边界
 		主题概览
 			一句话定位
 				Core API 是业务能力统一入口，UniFFI 是跨语言桥，CLI 和 MCP 是除 UI 外的其他外壳。
+					概念解释：业务能力的统一分发层。
+					示例：CoreApi::invoke(...)
 			学完能回答
 				同一套 Rust 业务能力如何被 GPUI、SwiftUI、CLI 和 MCP 同时复用？
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 		Core 约束
 			不依赖 GPUI / SwiftUI / AppKit
 				不依赖 GPUI
@@ -2580,6 +3680,8 @@ Kite × Rust GPUI 工程能力地图
 				不依赖 SwiftUI
 					作用：保证 Core 可被 macOS 调用
 					Kite 中：Swift 通过 UniFFI 调用
+						概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+						示例：uniffi::setup_scaffolding!()
 				不依赖 AppKit
 					作用：把系统 UI 能力留在 macOS 外壳
 					Kite 中：Finder、Quick Look 和菜单
@@ -2598,22 +3700,32 @@ Kite × Rust GPUI 工程能力地图
 				Object
 					作用：让调用方长期持有 Rust 服务对象
 					Kite 中：GitService、AgentSession 和进度监视器
+						概念解释：一次 Agent 进程会话的状态机。
+						示例：AgentSession
 			Callback interface：Git 事件与凭据回调
 				Callback interface
 					作用：让 Rust Core 回调宿主 UI
+						概念解释：一个不依赖任何 UI 框架的 Rust 业务核心，输出 rlib、staticlib 和 cdylib。
+						示例：pub mod fs/git/agent/search/...
 					Kite 中：Git 进度、凭据请求和事件通知
 		Core API
 			CoreRequest / CoreResult / CoreError
 				CoreRequest
 					作用：描述工具调用的请求类型和参数
 					Kite 中：CLI、MCP 和 UI 统一调用
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 				CoreResult
 					作用：返回数据、状态、是否变更和恢复点
 					Kite 中：所有工具调用的统一结果
 				CoreError
 					作用：返回稳定错误分类、可重试性和恢复建议
 					Kite 中：CLI 退出码、MCP 错误和 UI 提示
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 			ExecutionContext
+				概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+				示例：cx.notify()
 			trace_id / deadline / idempotency_key
 				trace_id
 					作用：给一次调用分配全链路追踪标识
@@ -2628,6 +3740,8 @@ Kite × Rust GPUI 工程能力地图
 				read_only
 					作用：拒绝所有状态变更工具
 					Kite 中：只读 MCP 服务和查询模式
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 				confirmed
 					作用：要求用户显式确认高危操作
 					Kite 中：关闭 Agent、写文件和破坏性操作
@@ -2643,17 +3757,25 @@ Kite × Rust GPUI 工程能力地图
 					Kite 中：Agent 调试和验收入口
 		多端入口
 			GPUI UI
+				概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+				示例：Entity
 			SwiftUI UI
 			kite-cli
 			kite-mcp
+				概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+				示例：tools/list
 		核心能力来源
 			跨语言依赖
 				uniffi 0.32.2
+					概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+					示例：uniffi::setup_scaffolding!()
 			项目代码
 				src/ffi.rs
 				src/core_api.rs
 				src/bin/kite-cli.rs
 				src/bin/kite-mcp.rs
+					概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+					示例：tools/list
 			设计文档
 				docs/architecture/platforms.md
 				docs/architecture/core-api.md
@@ -2665,6 +3787,8 @@ Kite × Rust GPUI 工程能力地图
 					传输目录列表、文件条目、Git 结果、Agent 状态等数据。
 				在 Kite 中的用法
 					`ffi.rs` 中大量 `*Dto` 类型通过 UniFFI 暴露给 Swift。
+						概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+						示例：uniffi::setup_scaffolding!()
 				一句类比
 					跨国海关的申报表，字段固定、内容可读。
 				项目关键数值
@@ -2674,9 +3798,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						#[derive(uniffi::Record)]
+							概念解释：声明跨语言 Record 结构。
+							示例：在“UniFFI Record”中使用：#[derive(uniffi::Record)]
 						DirectoryEntryDto
+							概念解释：目录条目跨语言结构。
+							示例：在“UniFFI Record”中使用：DirectoryEntryDto
 						GitPathSummaryDto
+							概念解释：Git 路径状态摘要 DTO。
+							示例：在“UniFFI Record”中使用：GitPathSummaryDto
 						AgentReviewDto
+							概念解释：Agent 审核结果 DTO。
+							示例：在“UniFFI Record”中使用：AgentReviewDto
 					过程
 						Rust struct ...
 						→ uniffi::Record ...
@@ -2697,9 +3829,17 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						#[derive(uniffi::Enum)]
+							概念解释：声明跨语言 Enum。
+							示例：在“UniFFI Enum”中使用：#[derive(uniffi::Enum)]
 						KiteError
+							概念解释：统一跨语言错误类型。
+							示例：在“UniFFI Enum”中使用：KiteError
 						AgentTransportDto
+							概念解释：Agent 传输方式枚举。
+							示例：在“UniFFI Enum”中使用：AgentTransportDto
 						GitErrorKindDto
+							概念解释：Git 错误类型枚举。
+							示例：在“UniFFI Enum”中使用：GitErrorKindDto
 					过程
 						Rust enum ...
 						→ uniffi::Enum ...
@@ -2711,18 +3851,30 @@ Kite × Rust GPUI 工程能力地图
 					持有服务、会话、进度监视器、Git 任务和监听句柄。
 				在 Kite 中的用法
 					Swift 可以持有 Rust 的 `GitService`、`AgentSession` 等对象。
+						概念解释：一次 Agent 进程会话的状态机。
+						示例：AgentSession
 				一句类比
 					一个可以在 Swift 侧拿着的 Rust 遥控器。
 				项目关键数值
 					Object 数量：6 个
 					典型对象：KiteCore、GitService、AgentSession、进度监视器
+						概念解释：一次 Agent 进程会话的状态机。
+						示例：AgentSession
 					持有方式：Swift 侧长期持有 Rust 对象
 				核心代码关键词
 					关键词
 						#[derive(uniffi::Object)]
+							概念解释：声明跨语言可持有对象。
+							示例：在“UniFFI Object”中使用：#[derive(uniffi::Object)]
 						KiteCore
+							概念解释：UniFFI 暴露的 Kite Core 对象。
+							示例：在“UniFFI Object”中使用：KiteCore
 						GitService
+							概念解释：对 UI 暴露的统一 Git 服务。
+							示例：在“UniFFI Object”中使用：GitService
 						GitOperationHandle
+							概念解释：UniFFI 暴露的后台 Git 任务句柄。
+							示例：在“UniFFI Object”中使用：GitOperationHandle
 					过程
 						Rust object ...
 						→ uniffi::Object ...
@@ -2735,6 +3887,8 @@ Kite × Rust GPUI 工程能力地图
 					做参数校验、只读/确认检查、幂等、超时、错误映射和统一结果封装。
 				在 Kite 中的用法
 					`CoreRequest`、`CoreResult`、`CoreError`、`ExecutionContext` 共同定义契约。
+						概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+						示例：cx.notify()
 				一句类比
 					前台统一接单台，所有外壳都从这里提交请求。
 				项目关键数值
@@ -2745,10 +3899,20 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						CoreApi::invoke(...)
+							概念解释：统一 Core API 请求入口。
+							示例：在“Core API”中使用：CoreApi::invoke(...)
 						CoreRequest
+							概念解释：Core API 强类型请求。
+							示例：在“Core API”中使用：CoreRequest
 						CoreResult
+							概念解释：Core API 统一结果。
+							示例：在“Core API”中使用：CoreResult
 						CoreError
+							概念解释：Core API 结构化错误。
+							示例：在“Core API”中使用：CoreError
 						ExecutionContext
+							概念解释：Core API 追踪、权限、截止时间和幂等上下文。
+							示例：在“Core API”中使用：ExecutionContext
 					过程
 						CoreRequest ...
 						→ CoreApi::invoke ...
@@ -2756,35 +3920,55 @@ Kite × Rust GPUI 工程能力地图
 			MCP
 				是什么
 					Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+						示例：cx.notify()
 				能做什么
 					让外部 Agent 通过标准协议发现并调用 Kite Core 能力。
 				在 Kite 中的用法
 					`kite-mcp` 提供 stdio MCP 服务、只读模式和确认策略。
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 				一句类比
 					给外部 AI 使用的标准 USB 接口。
 				项目关键数值
 					Tools：16 个；Resources：3 个；Prompts：2 个
 					传输：stdio MCP
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 					只读模式：1 个服务级开关
 					确认语义：高危工具需要 confirmed
 				核心代码关键词
 					关键词
 						tools/list
+							概念解释：MCP 列出工具。
+							示例：在“MCP”中使用：tools/list
 						tools/call
+							概念解释：MCP 调用工具。
+							示例：在“MCP”中使用：tools/call
 						resources/list
+							概念解释：MCP 列出资源。
+							示例：在“MCP”中使用：resources/list
 						prompts/get
+							概念解释：MCP 获取提示词。
+							示例：在“MCP”中使用：prompts/get
 						_meta.confirmed
+							概念解释：MCP 高危操作显式确认标记。
+							示例：在“MCP”中使用：_meta.confirmed
 					过程
 						MCP client ...
 						→ tool/resource/prompt ...
 						→ CoreApi ...
 						→ JSON response
-	15 工程化、验证与复用结论
+	16 工程化、验证与复用结论
 		主题概览
 			一句话定位
 				工程化让 GPUI 功能可编译、可测试、可测量、可发布，并帮助识别哪些模式值得复用。
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 			学完能回答
 				如何证明一个 GPUI 功能不仅能跑，而且可维护、可回归、可发布？
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 		测试与验收
 			纯函数与状态机测试
 			分栏行为和选择测试
@@ -2793,19 +3977,27 @@ Kite × Rust GPUI 工程能力地图
 				CLI 测试
 					作用：验证命令解析、退出码和错误映射
 					Kite 中：Core API 终端入口
+						概念解释：业务能力的统一分发层。
+						示例：CoreApi::invoke(...)
 				MCP 测试
 					作用：验证只读模式和确认策略
 					Kite 中：MCP 服务协议
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 			Windows 真机截图与 UI Automation
 		持续集成与发布
 			Windows CI
 			Clippy
+				概念解释：Rust 官方静态代码检查工具。
+				示例：cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 			Release build
 			浏览器拖拽 E2E
 			发布包与 SHA-256
 			Windows / macOS 发布对齐
 				Windows 发布
 					作用：构建 x64 包并验证 GPUI 功能
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 					Kite 中：Windows CI 和发布包
 				macOS 发布
 					作用：构建 arm64 App 并验证 SwiftUI 功能
@@ -2821,24 +4013,40 @@ Kite × Rust GPUI 工程能力地图
 				Window Shell
 					作用：管理窗口、页签和跨页签共享状态
 					Kite 中：KiteWindow
+						概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+						示例：restore_session
 				Tab View
 					作用：管理单个页签的业务界面
 					Kite 中：KiteApp
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 			Entity 持有子 Entity
+				概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+				示例：Entity<T>
 			TableDelegate 适配业务数据
 			Provider 组合右键菜单
 			Generation token 丢弃旧结果
+				概念解释：每次异步请求递增的版本号。
+				示例：*_generation.wrapping_add(1)
 			Task 字段管理异步生命周期
+				概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+				示例：_load_task: Task<()>
 			UI 与 Core 严格分层
 		风险与重构机会
 			KiteApp 约 1.25 万行，编排职责过多
+				概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+				示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 			ffi.rs 约 5300 行，跨语言出口较大
 			建议拆分 NavigationState / ColumnBrowserState / SearchState
 				NavigationState
 					作用：集中当前目录、历史和路径动作
 					Kite 中：降低 KiteApp 导航职责
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 				ColumnBrowserState
 					作用：集中 ColumnPane、选择和滚动
+						概念解释：表示一个目录栏的状态对象。
+						示例：ColumnPane { path, directory_entries, selected_paths, sort, ... }
 					Kite 中：降低分栏职责
 				SearchState
 					作用：集中查询、结果、取消和恢复选择
@@ -2875,25 +4083,39 @@ Kite × Rust GPUI 工程能力地图
 				docs/architecture/release-parity.md
 			项目实践
 				真实功能链路验证 GPUI、异步和系统桥接
+					概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+					示例：Entity
 		能力说明
 			feature / cfg
 				是什么
 					Rust 的条件编译开关。
 				能做什么
 					只在 Windows 编译 GPUI，只在测试时编译 Agent fixture，只在性能模式编译测试工具。
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 				在 Kite 中的用法
 					`Cargo.toml` 的 `windows-ui`、`agent-fixture`、`performance` 控制不同构建。
 				一句类比
 					按用途装不同配件，不需要的功能不装上车。
 				项目关键数值
 					Cargo features：windows-ui / uniffi-bindgen / agent-fixture / performance，共 4 个
+						概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+						示例：uniffi::setup_scaffolding!()
 					Windows GPUI 二进制：1 个
+						概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+						示例：Entity
 					agent-fixture 集成测试目标：1 个
 				核心代码关键词
 					关键词
 						#[cfg(windows)]
+							概念解释：仅在 Windows 目标编译。
+							示例：在“feature / cfg”中使用：#[cfg(windows)]
 						required-features = [...]
+							概念解释：Cargo 目标要求的 feature。
+							示例：在“feature / cfg”中使用：required-features = [...]
 						cfg!(target_os = "windows")
+							概念解释：编译期判断目标操作系统。
+							示例：在“feature / cfg”中使用：cfg!(target_os = "windows")
 					过程
 						Cargo feature ...
 						→ cfg 编译 ...
@@ -2905,6 +4127,8 @@ Kite × Rust GPUI 工程能力地图
 					发现常见错误、代码风格问题、潜在性能和可维护性风险。
 				在 Kite 中的用法
 					CI 使用 `cargo clippy --all-targets --features windows-ui -D warnings`。
+						概念解释：Rust 官方静态代码检查工具。
+						示例：cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 				一句类比
 					给代码做体检。
 				项目关键数值
@@ -2914,6 +4138,8 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						cargo clippy --locked --all-targets --features windows-ui -- -D warnings
+							概念解释：CI 的 Rust 静态检查命令。
+							示例：在“Clippy”中使用：cargo clippy --locked --all-targets --features windows-ui -- -D warnings
 					过程
 						源码 ...
 						→ Clippy ...
@@ -2926,6 +4152,8 @@ Kite × Rust GPUI 工程能力地图
 					快速测试业务逻辑，完整测试协议和窗口，最后用真机验证关键交互。
 				在 Kite 中的用法
 					Kite 组合纯函数测试、Agent fixture、CLI/MCP 测试和 Windows UI Automation。
+						概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+						示例：tools/list
 				一句类比
 					先在家练动作，再上场比赛。
 				项目关键数值
@@ -2935,10 +4163,20 @@ Kite × Rust GPUI 工程能力地图
 				核心代码关键词
 					关键词
 						#[test]
+							概念解释：Rust 单元或集成测试标记。
+							示例：在“test pyramid”中使用：#[test]
 						kite-agent-fixture
+							概念解释：Agent 协议测试夹具进程。
+							示例：在“test pyramid”中使用：kite-agent-fixture
 						core_api_cli
+							概念解释：Core API CLI 集成测试。
+							示例：在“test pyramid”中使用：core_api_cli
 						core_api_mcp
+							概念解释：Core API MCP 集成测试。
+							示例：在“test pyramid”中使用：core_api_mcp
 						agent_session 测试
+							概念解释：Agent 会话集成测试。
+							示例：在“test pyramid”中使用：agent_session 测试
 					过程
 						unit ...
 						→ integration ...
@@ -2951,19 +4189,31 @@ Kite × Rust GPUI 工程能力地图
 					发现启动、目录加载、搜索、Git 和 Agent 路径的性能回归。
 				在 Kite 中的用法
 					`perf_trace` 标记首窗口和首内容渲染，性能工作流生成 JSON 基线与聚合报告。
+						概念解释：项目内记录性能时间点的轻量工具。
+						示例：perf_trace::start()
 				一句类比
 					给关键流程按秒表，并和历史成绩比较。
 				项目关键数值
 					Windows 首内容：p50 558.0 ms，p95 828.9 ms
 					macOS 首内容：p50 810.0 ms，p95 817.8 ms
 					Agent Windows：ACP Ready 124 ms，输出 1.56 MiB/s
+						概念解释：Agent Client Protocol，客户端与 Agent 之间的通信协议。
+						示例：AcpStdioTransport
 					Agent 长输出：2,000 条约 0.117 ms，清理 44 ms
 				核心代码关键词
 					关键词
 						perf_trace::mark_once(...)
+							概念解释：记录一次性性能事件。
+							示例：在“perf_trace / performance baseline”中使用：perf_trace::mark_once(...)
 						startup.py
+							概念解释：启动性能采样脚本。
+							示例：在“perf_trace / performance baseline”中使用：startup.py
 						aggregate.py
+							概念解释：多次性能结果聚合脚本。
+							示例：在“perf_trace / performance baseline”中使用：aggregate.py
 						compare.py
+							概念解释：性能基线与候选结果比较脚本。
+							示例：在“perf_trace / performance baseline”中使用：compare.py
 					过程
 						marker ...
 						→ JSON ...
@@ -2980,13 +4230,21 @@ Kite × Rust GPUI 工程能力地图
 					订单号码只认最新一单。
 				项目关键数值
 					KiteApp generation 计数器：7 个
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					过期结果处理：1 次 generation 比对
 					覆盖域：目录、搜索、VCS、分栏、预览
 				核心代码关键词
 					关键词
 						*_generation.wrapping_add(1)
+							概念解释：递增异步任务版本号，用于丢弃旧结果。
+							示例：在“generation token pattern”中使用：*_generation.wrapping_add(1)
 						if this.generation != generation { return
+							概念解释：generation 不匹配时丢弃旧异步结果。
+							示例：在“generation token pattern”中使用：if this.generation != generation { return
 						}
+							概念解释：“generation token pattern”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“generation token pattern”中使用：}
 					过程
 						request ...
 						→ generation++ ...
@@ -2997,23 +4255,335 @@ Kite × Rust GPUI 工程能力地图
 					管理异步任务何时存活、取消和继续运行。
 				能做什么
 					把 Task 存入字段保持任务；替换字段取消旧任务；需要脱离时调用 detach。
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 				在 Kite 中的用法
 					Kite 使用 `_load_task`、`_search_task`、`_vcs_task` 等字段。
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 				一句类比
 					订单小票决定这张订单是继续、取消还是留在后厨完成。
 				项目关键数值
 					KiteApp Task 字段：13 个
+						概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+						示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
 					整个 src 中 Task 字段：29 个
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 					window.defer 调用点：7 个
+						概念解释：把一段操作延后到当前 GPUI 更新结束之后执行。
+						示例：window.defer(cx, move |window, cx| ...)
 					Task 清理入口：Task::ready(())
+						概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+						示例：_load_task: Task<()>
 				核心代码关键词
 					关键词
 						_task: Task<()>
+							概念解释：“Task lifecycle”能力实现中的关键代码术语，表示该能力使用的 API、类型、字段或调用片段。
+							示例：在“Task lifecycle”中使用：_task: Task<()>
 						self._task = cx.spawn_in(...)
+							概念解释：把新任务保存到字段并取消旧任务。
+							示例：在“Task lifecycle”中使用：self._task = cx.spawn_in(...)
 						Task::ready(())
+							概念解释：创建立即完成的占位 Task，用于清空任务字段。
+							示例：在“Task lifecycle”中使用：Task::ready(())
 						detach()
+							概念解释：让 Task 在后台继续运行并丢弃返回值。
+							示例：在“Task lifecycle”中使用：detach()
 					过程
 						spawn ...
 						→ 字段持有 ...
 						→ replace/drop ...
 						→ cancel/ready
+	17 概念词典
+		02 项目定位与边界
+			Rust Core
+				概念解释：一个不依赖任何 UI 框架的 Rust 业务核心，输出 rlib、staticlib 和 cdylib。
+				示例：pub mod fs/git/agent/search/...
+				能力范围：负责文件、搜索、VCS、会话、Agent、更新等业务规则和副作用。
+			原生 UI Shell
+				概念解释：每个平台用符合系统习惯的界面技术实现窗口、菜单、布局和交互。
+				示例：#[cfg(windows)] mod app/tabs/...
+				能力范围：负责展示、输入、焦点、主题和系统交互，不复制核心业务状态机。
+		03 技术架构与依赖总览
+			GPUI
+				概念解释：用 Rust 编写原生桌面界面的 UI 框架，界面由元素树、状态和事件组成。
+				示例：Entity
+				能力范围：创建窗口、渲染元素、处理键鼠、管理焦点、订阅状态和运行异步任务。
+			gpui-kit
+				概念解释：对 GPUI、基础层、组件库和资源的统一门面，项目通过它使用 GPUI。
+				示例：use gpui_kit::*
+				能力范围：提供 Button、Input、DataTable、Menu、Scroll、Progress、Resizable 等成品组件。
+			UniFFI
+				概念解释：把 Rust 的类型和函数自动生成其他语言绑定的跨语言工具。
+				示例：uniffi::setup_scaffolding!()
+				能力范围：跨语言传 Record、Enum，持有 Object，接收回调，并把 Rust 能力暴露给 Swift。
+			windows / windows-sys
+				概念解释：Rust 调用 Windows 原生 API 的绑定 crate。
+				示例：windows::Win32::*
+				能力范围：访问 Win32、COM、Shell、剪贴板、文件属性、设备、更新和窗口消息。
+		04 GPUI 启动与窗口生命周期
+			gpui_kit::application
+				概念解释：启动 GPUI 应用和平台事件循环的入口。
+				示例：gpui_kit::application().with_assets(...).run(|cx| ...)
+				能力范围：加载应用资源、进入 run 回调、管理窗口和进程生命周期。
+			gpui_kit::init
+				概念解释：初始化 GPUI Kit 的基础层、组件库和主题系统。
+				示例：gpui_kit::init(cx)
+				能力范围：注册输入、菜单、表格、主题等基础能力，让后续窗口能正常使用组件。
+			gpui_kit::open_window
+				概念解释：创建新的操作系统窗口，并把一个实现 Render 的 Entity 放进去。
+				示例：gpui_kit::open_window(WindowOptions { ... }, cx, |window, cx| ...)
+				能力范围：设置窗口标题和尺寸，返回窗口句柄与内容 Entity，供后续更新和关闭。
+			WindowOptions / WindowBounds
+				概念解释：描述窗口标题栏、尺寸、位置和显示方式的数据结构。
+				示例：titlebar: Some(TitlebarOptions { ... })
+				能力范围：决定窗口大小、是否居中、标题栏样式以及初始位置。
+			KiteWindow
+				概念解释：主窗口根 Entity，负责管理窗口里的多个页签。
+				示例：restore_session
+				能力范围：创建、关闭、切换页签，共享剪贴板，保存会话，更新窗口标题和焦点。
+		05 GPUI 编程模型
+			Entity
+				概念解释：可观察、可共享的状态对象，是 GPUI 页面和组件的核心载体。
+				示例：Entity<T>
+				能力范围：保存状态、通知观察者变化、被父子组件持有，并能在异步结果回来后安全更新。
+			Context
+				概念解释：操作 Entity 的上下文对象，封装更新、重绘、异步和订阅能力。
+				示例：cx.notify()
+				能力范围：调用 update、notify、spawn、subscribe、observe，访问窗口和焦点。
+			Render
+				概念解释：把 Entity 的当前状态转换成元素树的 trait。
+				示例：impl Render for KiteApp { fn render(&mut self, window, cx) -> impl IntoElement }
+				能力范围：状态变化后重新读取数据，组合出最新界面。
+			Element DSL
+				概念解释：用 `div`、`h_flex`、`v_flex` 和链式样式方法描述界面的 Rust DSL。
+				示例：div()
+				能力范围：布局、设置间距、边框、颜色、尺寸、溢出、条件显示和事件绑定。
+			Action / Subscription
+				概念解释：Action 表示键盘或菜单命令；Subscription 表示实体之间的观察和订阅关系。
+				示例：actions!(kite, [...])
+				能力范围：把用户操作路由到处理函数，并在子实体变化时更新父实体。
+		06 状态模型与数据流
+			KiteApp
+				概念解释：单个页签的 GPUI 页面 Entity，是主界面的业务编排中心。
+				示例：pub struct KiteApp { current_dir, history, column_panes, _load_task, ... }
+				能力范围：管理当前目录、历史、列表/分栏、搜索、预览、Git 对话和工作流状态。
+			generation token
+				概念解释：每次异步请求递增的版本号。
+				示例：*_generation.wrapping_add(1)
+				能力范围：判断异步结果是否属于最新请求，防止旧结果覆盖新状态。
+			cx.notify
+				概念解释：告诉 GPUI 当前 Entity 的状态已经变化，需要重新渲染。
+				示例：cx.notify()
+				能力范围：触发 Render 读取最新状态并更新界面。
+			session / preferences
+				概念解释：保存页签、路径、布局、主题、收藏等跨启动状态的数据层。
+				示例：load_session
+				能力范围：启动时恢复工作区，关闭或修改时保存；路径失效时提供修复。
+		07 异步、并发与性能
+			cx.spawn / cx.spawn_in
+				概念解释：创建一个与 UI 上下文关联的异步任务。
+				示例：cx.spawn(async move |this, cx| ...)
+				能力范围：等待后台结果，再通过 `update` 或 `update_in` 回到 UI 更新状态。
+			background_spawn
+				概念解释：在后台执行阻塞或 CPU 密集任务的入口。
+				示例：cx.background_spawn(async move { load_directory_snapshot(...) }).await
+				能力范围：读取目录、扫描文件、查询索引、运行 Git、解码图片。
+			Task
+				概念解释：异步任务的句柄，可以存储、等待、取消或分离。
+				示例：_load_task: Task<()>
+				能力范围：存进结构体字段可保持任务存活；替换或丢弃会取消旧任务；detach 后继续后台运行。
+			window.defer
+				概念解释：把一段操作延后到当前 GPUI 更新结束之后执行。
+				示例：window.defer(cx, move |window, cx| ...)
+				能力范围：避免在渲染或更新过程中重入窗口、滚动或原生菜单系统。
+			debounce
+				概念解释：把短时间内的多次事件合并成最后一次执行。
+				示例：background_executor().timer(Duration::from_millis(...)).await
+				能力范围：减少搜索请求、预览加载、目录刷新和文件监听的抖动。
+			perf_trace
+				概念解释：项目内记录性能时间点的轻量工具。
+				示例：perf_trace::start()
+				能力范围：记录进程启动、首窗口渲染、首内容渲染等关键耗时。
+		08 主界面与布局系统
+			h_flex / v_flex
+				概念解释：GPUI 中的水平 flex 和垂直 flex 布局容器。
+				示例：h_flex().flex_1().child(...)
+				能力范围：横向或纵向排列子元素，并支持居中、拉伸、换行、间距和固定尺寸。
+			gpui-kit 组件
+				概念解释：一组基于 GPUI 的成品 UI 控件。
+				示例：Button::new(...)
+				能力范围：提供按钮、输入框、表格、菜单、滚动条、进度条、可调整面板等常用能力。
+			theme token
+				概念解释：统一管理颜色、背景、边框、文字和状态色的主题系统。
+				示例：cx.theme().background
+				能力范围：支持明暗主题，保证不同窗口和组件的视觉一致。
+			responsive breakpoint
+				概念解释：根据窗口宽度切换布局的断点规则。
+				示例：window.viewport_size().width < px(RIGHT_PANE_OVERLAY_BREAKPOINT)
+				能力范围：在宽窗口中并排显示预览，在窄窗口中把预览改成覆盖层。
+		09 导航、分栏与文件列表
+			ColumnPane
+				概念解释：表示一个目录栏的状态对象。
+				示例：ColumnPane { path, directory_entries, selected_paths, sort, ... }
+				能力范围：保存目录路径、文件条目、选中项、排序、筛选、分组、搜索和加载状态。
+			DataTable / TableDelegate
+				概念解释：通用数据表格组件，以及把业务数据翻译成行列的适配接口。
+				示例：impl TableDelegate for FileTableDelegate
+				能力范围：处理列定义、排序、行渲染、选择、右键菜单和滚动。
+			history
+				概念解释：记录当前路径访问顺序和历史位置的数据结构。
+				示例：history: Vec<PathBuf>
+				能力范围：支持返回、前进和恢复导航上下文。
+			selection
+				概念解释：文件和目录的单选、多选、范围选择状态。
+				示例：selected_path
+				能力范围：参与批量操作、键盘导航、右键菜单和下一栏加载。
+		10 文件操作、预览与编辑
+			std::fs / fs
+				概念解释：Rust 标准文件系统 API，以及项目封装的目录和文件操作。
+				示例：load_directory(path, sort)
+				能力范围：读取目录、读取文件、创建、重命名、删除、移动、复制和读取元数据。
+			Explorer / Finder clipboard
+				概念解释：Windows 资源管理器和 macOS Finder 使用的系统文件剪贴板格式。
+				示例：FileClipboard
+				能力范围：让 Kite 与其他文件管理器共享复制、剪切和粘贴。
+			OLE drag & drop
+				概念解释：Windows 原生拖放和剪贴板数据传输协议。
+				示例：request_file_drag(window, &paths)
+				能力范围：从资源管理器拖入、向其他应用拖出，并传递真实文件路径。
+			zip / tar
+				概念解释：Rust 的压缩包读写库。
+				示例：ArchiveFormat::{Zip, TarGz}
+				能力范围：创建和解压 ZIP、TAR.GZ，检查路径安全并统计进度。
+			TextView / Editor
+				概念解释：GPUI Kit 的文本展示和编辑组件。
+				示例：read_text_preview
+				能力范围：显示代码、日志、Markdown 和普通文本，支持编辑、保存和语法高亮。
+		11 搜索与索引
+			Tantivy
+				概念解释：Rust 实现的全文搜索索引库，思路类似 Lucene。
+				示例：IndexWriter
+				能力范围：建立索引，执行词项、短语、正则和范围查询，快速找候选文件。
+			grep-searcher
+				概念解释：高性能文本搜索库，用于在文件中精确查找内容。
+				示例：RegexMatcherBuilder
+				能力范围：读取候选文件，返回匹配行、行号和匹配片段，并跳过二进制内容。
+			notify
+				概念解释：跨平台文件变化监听库。
+				示例：RecommendedWatcher
+				能力范围：监听创建、删除、重命名和修改事件，触发界面刷新或索引增量更新。
+			USN Journal
+				概念解释：Windows NTFS 文件系统的变更日志。
+				示例：DeviceIoControl
+				能力范围：增量读取卷上发生的文件变化，避免每次重新扫描整个磁盘。
+			DeviceIoControl
+				概念解释：Windows 用来向设备发送控制命令的原生 API。
+				示例：DeviceIoControl(...)
+				能力范围：读取 USN 记录、卷信息和底层文件系统状态。
+		12 VCS、Git 与 Diff
+			git CLI
+				概念解释：调用用户本机安装的 `git` 命令，而不是链接 libgit2。
+				示例：GitExecutor
+				能力范围：执行 status、diff、log、commit、fetch、pull、push、clone、rebase 等操作。
+			GitService
+				概念解释：对 UI 暴露的统一 Git 能力入口。
+				示例：GitService
+				能力范围：读取仓库状态、执行同步操作、启动后台任务、监听 `.git` 变化和返回结构化错误。
+			similar
+				概念解释：Rust 文本差异计算库。
+				示例：TextDiff::from_lines
+				能力范围：比较文本并生成行级或词级增删结果。
+			Askpass Bridge
+				概念解释：桥接 Git/SSH 凭据提示和 UI 输入框。
+				示例：AskpassBridge
+				能力范围：把 Git 的密码、口令或认证请求转换成界面对话框，再把用户输入写回命令。
+		13 Agent 集成
+			ACP
+				概念解释：Agent Client Protocol，客户端与 Agent 之间的通信协议。
+				示例：AcpStdioTransport
+				能力范围：完成初始化、会话创建、提示词发送、流式事件接收和权限请求。
+			JSON-RPC over stdio
+				概念解释：用 JSON 表示请求、响应和通知，并通过标准输入输出传输。
+				示例：serde_json::Value
+				能力范围：让 Kite 与子进程 Agent 双向通信，不需要额外网络端口。
+			AgentSession
+				概念解释：一次 Agent 进程会话的状态机。
+				示例：AgentSession
+				能力范围：管理 Idle、Starting、Ready、Running、Cancelling、Failed、Closed 等状态。
+			keyring
+				概念解释：系统凭据存储库。
+				示例：keyring::Entry
+				能力范围：把密钥、token 或密码存入 Windows Credential Manager 或 macOS Keychain。
+			diff 审核
+				概念解释：Agent 修改文件前的只读审核流程。
+				示例：build_review(...)
+				能力范围：展示目标路径、增删行数、覆盖风险和 unified diff；应用前再次校验哈希。
+		14 Windows 平台集成
+			Win32
+				概念解释：Windows 最底层的原生 API 集合。
+				示例：windows::Win32::*
+				能力范围：访问窗口、消息、文件、线程、设备、剪贴板和系统设置。
+			COM
+				概念解释：Windows 组件对象模型，用统一接口调用系统对象。
+				示例：CoInitializeEx(...)
+				能力范围：访问 Shell、剪贴板、拖放、上下文菜单和系统服务。
+			Shell namespace
+				概念解释：Windows 资源管理器的对象体系，不只包含普通文件路径。
+				示例：IShellItem
+				能力范围：表示文件、文件夹、磁盘、WPD/MTP 设备和其他虚拟项目。
+			WPD / MTP
+				概念解释：Windows Portable Devices / Media Transfer Protocol。
+				示例：PortableDevice
+				能力范围：浏览手机、相机等便携设备中的文件和目录。
+			OLE DataExchange
+				概念解释：Windows 剪贴板和拖放使用的数据对象格式。
+				示例：CF_HDROP
+				能力范围：实现 `CF_HDROP` 文件拖放、拖动源和剪贴板传输。
+		15 共享 Rust Core 与跨语言边界
+			UniFFI Record
+				概念解释：跨语言传输用的 Rust 结构体。
+				示例：#[derive(uniffi::Record)]
+				能力范围：传输目录列表、文件条目、Git 结果、Agent 状态等数据。
+			UniFFI Enum
+				概念解释：跨语言传输的固定选项类型。
+				示例：#[derive(uniffi::Enum)]
+				能力范围：稳定表达状态、错误类型、操作类型和权限决策。
+			UniFFI Object
+				概念解释：可以由调用方长期持有的跨语言 Rust 对象。
+				示例：#[derive(uniffi::Object)]
+				能力范围：持有服务、会话、进度监视器、Git 任务和监听句柄。
+			Core API
+				概念解释：业务能力的统一分发层。
+				示例：CoreApi::invoke(...)
+				能力范围：做参数校验、只读/确认检查、幂等、超时、错误映射和统一结果封装。
+			MCP
+				概念解释：Model Context Protocol，向外部 AI 客户端暴露工具、资源和提示词。
+				示例：tools/list
+				能力范围：让外部 Agent 通过标准协议发现并调用 Kite Core 能力。
+		16 工程化、验证与复用结论
+			feature / cfg
+				概念解释：Rust 的条件编译开关。
+				示例：#[cfg(windows)]
+				能力范围：只在 Windows 编译 GPUI，只在测试时编译 Agent fixture，只在性能模式编译测试工具。
+			Clippy
+				概念解释：Rust 官方静态代码检查工具。
+				示例：cargo clippy --locked --all-targets --features windows-ui -- -D warnings
+				能力范围：发现常见错误、代码风格问题、潜在性能和可维护性风险。
+			test pyramid
+				概念解释：单元测试、集成测试和端到端验证的分层测试策略。
+				示例：#[test]
+				能力范围：快速测试业务逻辑，完整测试协议和窗口，最后用真机验证关键交互。
+			perf_trace / performance baseline
+				概念解释：记录关键性能时间点并与历史基线比较的工具和流程。
+				示例：perf_trace::mark_once(...)
+				能力范围：发现启动、目录加载、搜索、Git 和 Agent 路径的性能回归。
+			generation token pattern
+				概念解释：用一个递增编号识别异步任务的新旧。
+				示例：*_generation.wrapping_add(1)
+				能力范围：防止旧请求晚返回后覆盖新界面状态。
+			Task lifecycle
+				概念解释：管理异步任务何时存活、取消和继续运行。
+				示例：_task: Task<()>
+				能力范围：把 Task 存入字段保持任务；替换字段取消旧任务；需要脱离时调用 detach。
