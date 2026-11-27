@@ -4,10 +4,17 @@
 //! first compatibility slice. Every other entry is copied through the ZIP writer
 //! without decoding so that future XMind features and attachments survive a save.
 
+pub mod date;
 pub mod graph_style;
 pub mod topic_markers;
+pub mod topic_style;
 pub mod topic_todo;
 
+pub use date::{
+    DateDisplayFormat, DateFormatError, DateInsertionError, DateInsertionPlacement,
+    DateInsertionRequest, DateInsertionResult, DateInsertionTarget, DateLocale, DatePartOrder,
+    DatePrecision, DateStyle, StaticDateValue, SystemDatePattern, insert_date_into_topic,
+};
 pub use graph_style::{
     ConnectorColor, ConnectorCornerRadius, ConnectorKind, ConnectorLinePattern, ConnectorStyle,
     ConnectorStylePatch, ConnectorWidth, DocumentGraphStyle, DocumentGraphStylePatch,
@@ -20,9 +27,17 @@ pub use topic_markers::{
     TopicMarkerPatch, TopicMarkerSet, apply_topic_markers as apply_topic_markers_to_content,
     read_topic_markers as read_topic_markers_from_content,
 };
+pub use topic_style::{
+    BorderLinePattern, FontFamily, FontSize, FontStyle, FontWeight, MissingFontAction,
+    MissingFontPolicy, MissingFontResolution, MissingFontWarning, NodeCornerRadius, NodeStylePatch,
+    StyleColor, StyleMeasurement, StyleUnit, TextAlignment, TextDecoration, TextStylePatch,
+    TopicNodeStyle, TopicStyle, TopicStyleError, TopicStylePatch, TopicTextStyle,
+    apply_topic_style, read_topic_style,
+};
 pub use topic_todo::{
-    CompletionRendering, OpacitySemantics, TextDecoration, TodoStatus, TodoUpdate, TopicTodoError,
-    TopicTodoPatch, TopicTodoState, VisualTone, apply_topic_todo as apply_topic_todo_to_content,
+    CompletionRendering, OpacitySemantics, TextDecoration as TodoTextDecoration, TodoStatus,
+    TodoUpdate, TopicTodoError, TopicTodoPatch, TopicTodoState, VisualTone,
+    apply_topic_todo as apply_topic_todo_to_content,
     read_topic_todo as read_topic_todo_from_content,
 };
 

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use kite_core::mindmap::{
     MarkerEntry, MarkerFamily, MarkerKind, OpacitySemantics, PriorityMarker, SlotUpdate,
-    TaskProgress, TextDecoration, TodoStatus, TodoUpdate, TopicMarkerError, TopicMarkerPatch,
+    TaskProgress, TodoStatus, TodoTextDecoration, TodoUpdate, TopicMarkerError, TopicMarkerPatch,
     TopicTodoPatch, TopicTodoState, VisualTone, XmindPackage,
 };
 use serde_json::{Value, json};
@@ -223,7 +223,7 @@ fn todo_toggle_sets_completion_rendering_and_preserves_unknown_task_fields() {
         .expect("read initial todo");
     assert_eq!(initial.status, TodoStatus::InProgress { eighths: 4 });
     assert_eq!(initial.progress, Some(TaskProgress::Half));
-    assert_eq!(initial.rendering.text_decoration, TextDecoration::None);
+    assert_eq!(initial.rendering.text_decoration, TodoTextDecoration::None);
     assert_eq!(initial.rendering.tone, VisualTone::Normal);
     assert_eq!(initial.rendering.text_opacity, OpacitySemantics::Full);
     assert_eq!(initial.rendering.connector_opacity, OpacitySemantics::Full);
@@ -241,7 +241,7 @@ fn todo_toggle_sets_completion_rendering_and_preserves_unknown_task_fields() {
     assert_eq!(completed.progress, Some(TaskProgress::Done));
     assert_eq!(
         completed.rendering.text_decoration,
-        TextDecoration::LineThrough
+        TodoTextDecoration::LineThrough
     );
     assert_eq!(completed.rendering.tone, VisualTone::Muted);
     assert_eq!(completed.rendering.text_opacity, OpacitySemantics::Reduced);
@@ -271,7 +271,7 @@ fn todo_toggle_sets_completion_rendering_and_preserves_unknown_task_fields() {
     assert_eq!(saved_todo.status, TodoStatus::Done);
     assert_eq!(
         saved_todo.rendering.text_decoration,
-        TextDecoration::LineThrough
+        TodoTextDecoration::LineThrough
     );
     assert_eq!(
         find_topic(saved.content(), "topic-markers")["task"]["unknown"],
@@ -290,7 +290,7 @@ fn todo_toggle_sets_completion_rendering_and_preserves_unknown_task_fields() {
         .expect("restore todo");
     assert_eq!(restored.status, TodoStatus::NotStarted);
     assert_eq!(restored.progress, Some(TaskProgress::Start));
-    assert_eq!(restored.rendering.text_decoration, TextDecoration::None);
+    assert_eq!(restored.rendering.text_decoration, TodoTextDecoration::None);
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn paused_progress_has_a_distinct_status_and_no_completion_style() {
     assert_eq!(state.status, TodoStatus::Paused);
     assert_eq!(state.progress, Some(TaskProgress::Paused));
     assert_eq!(state.rendering.tone, VisualTone::Normal);
-    assert_eq!(state.rendering.text_decoration, TextDecoration::None);
+    assert_eq!(state.rendering.text_decoration, TodoTextDecoration::None);
 }
 
 #[test]
