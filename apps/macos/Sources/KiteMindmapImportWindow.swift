@@ -143,6 +143,7 @@ private final class KiteMindmapImportModel: ObservableObject {
     @Published var errorMessage: String?
 
     private var previewTask: Task<Void, Never>?
+    private var conversionTask: Task<Void, Never>?
     private var overwriteApprovedPath: String?
 
     init(source: MindmapImportSourceDto) {
@@ -154,6 +155,13 @@ private final class KiteMindmapImportModel: ObservableObject {
 
     deinit {
         previewTask?.cancel()
+        conversionTask?.cancel()
+    }
+
+    func cancelPendingWork() {
+        previewTask?.cancel()
+        conversionTask?.cancel()
+        isConverting = false
     }
 
     var canConvert: Bool {
@@ -269,7 +277,8 @@ private final class KiteMindmapImportModel: ObservableObject {
         isConverting = true
         errorMessage = nil
         status = "正在生成 XMind…"
-        Task { [weak self] in
+        conversionTask?.cancel()
+        conversionTask = Task { [weak self] in
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
                     try convertMindmapFile(
@@ -280,7 +289,7 @@ private final class KiteMindmapImportModel: ObservableObject {
                         options: options
                     )
                 }.value
-                guard let self else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.isConverting = false
                 if !result.sourceUnchanged {
                     self.errorMessage = "转换期间源文件发生了变化；生成结果仍保留，但请检查内容。"
@@ -288,7 +297,7 @@ private final class KiteMindmapImportModel: ObservableObject {
                 KiteMindmapWindowController.open(path: result.outputPath)
                 KiteMindmapImportWindowController.close(sourcePath: self.source.path)
             } catch {
-                guard let self else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.isConverting = false
                 self.errorMessage = error.localizedDescription
                 self.status = "转换失败"
@@ -423,6 +432,7 @@ final class KiteMindmapImportWindowController: NSWindowController, NSWindowDeleg
     }
 
     func windowWillClose(_ notification: Notification) {
+        model.cancelPendingWork()
         let normalized = URL(fileURLWithPath: model.source.path).standardizedFileURL.path
         Self.controllers.removeValue(forKey: normalized)
     }
@@ -680,12 +690,41 @@ private struct KiteMindmapImportView: View {
                 }
             }
 
+            structureConfidenceBanner
             statsGrid
             warningsView
             treePreview
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(18)
+    }
+
+    @ViewBuilder
+    private var structureConfidenceBanner: some View {
+        if let preview = model.preview, preview.structureConfidence == "low" {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("TXT 结构置信度低")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                }
+                Text(
+                    "推断标题 \(preview.inferredHeadingCount) 个，模糊短行 " +
+                    "\(preview.ambiguousShortLineCount) 行。请先核对样本树和全部警告。"
+                )
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(Color.orange.opacity(0.28), lineWidth: 0.8)
+            }
+        }
     }
 
     private var statsGrid: some View {
@@ -695,6 +734,23 @@ private struct KiteMindmapImportView: View {
                 statCell("最大层级", value: "\(model.preview?.maxDepth ?? 0)", icon: "arrow.down.right")
                 statCell("备注", value: "\(model.preview?.noteCount ?? 0)", icon: "note.text")
                 statCell("警告", value: "\(model.preview?.warnings.count ?? 0)", icon: "exclamationmark.triangle")
+            }
+            Divider().overlay(Color.primary.opacity(0.06))
+            GridRow {
+                statCell("拆句", value: "\(model.preview?.splitFragments ?? 0)", icon: "text.append")
+                statCell("合并", value: "\(model.preview?.mergedFragments ?? 0)", icon: "arrow.triangle.merge")
+                statCell("标题截断", value: "\(model.preview?.truncatedTitles ?? 0)", icon: "textformat.size")
+                statCell("跳过内容", value: "\(model.preview?.skippedItems ?? 0)", icon: "xmark.bin")
+            }
+            Divider().overlay(Color.primary.opacity(0.06))
+            GridRow {
+                statCell(
+                    "结构置信度",
+                    value: structureConfidenceLabel(model.preview?.structureConfidence ?? "unknown"),
+                    icon: "waveform.path.ecg"
+                )
+                statCell("推断标题", value: "\(model.preview?.inferredHeadingCount ?? 0)", icon: "text.badge.checkmark")
+                statCell("模糊短行", value: "\(model.preview?.ambiguousShortLineCount ?? 0)", icon: "questionmark.text.page")
             }
         }
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
@@ -721,17 +777,14 @@ private struct KiteMindmapImportView: View {
                         .font(.system(size: 10.5, weight: .semibold))
                     Spacer()
                 }
-                ForEach(Array(warnings.prefix(4).enumerated()), id: \.offset) { _, warning in
-                    Text(warning.message)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in
+                            warningRow(warning)
+                        }
+                    }
                 }
-                if warnings.count > 4 {
-                    Text("另有 \(warnings.count - 4) 条提示")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
+                .frame(maxHeight: 180)
             }
             .padding(10)
             .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
@@ -745,6 +798,54 @@ private struct KiteMindmapImportView: View {
                 text: "没有结构降级警告",
                 color: .green
             )
+        }
+    }
+
+    private func warningRow(_ warning: MindmapImportWarningDto) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(warning.code)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(warningColor(warning.severity))
+                Text(warning.severity.uppercased())
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(warningColor(warning.severity))
+                if let location = warning.location, !location.isEmpty {
+                    Text(location)
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text("文档级")
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+            }
+            Text(warning.message)
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(7)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func warningColor(_ severity: String) -> Color {
+        switch severity {
+        case "error": .red
+        case "warning": .orange
+        default: .secondary
+        }
+    }
+
+    private func structureConfidenceLabel(_ value: String) -> String {
+        switch value {
+        case "low": "低"
+        case "medium": "中"
+        case "high": "高"
+        default: "未知"
         }
     }
 

@@ -13,9 +13,10 @@ use sha2::{Digest, Sha256};
 
 use crate::mindmap::XmindPackage;
 use crate::mindmap_import::{
-    ConversionOptions, ConversionReport, ConversionWarning, ConversionWarningCode, DocxAdapter,
-    HtmlAdapter, MarkdownAdapter, OpmlAdapter, OutlineAdapter, OutlineDocument, OutlineNode,
-    OutlineNodeKind, SourceFormat, SourceInput, TextAdapter, write_xmind_bytes, write_xmind_file,
+    ConversionOptions, ConversionReport, ConversionStats, ConversionWarning, ConversionWarningCode,
+    DocxAdapter, HtmlAdapter, MarkdownAdapter, OpmlAdapter, OutlineAdapter, OutlineDocument,
+    OutlineNode, OutlineNodeKind, SourceFormat, SourceInput, TextAdapter, write_xmind_bytes,
+    write_xmind_file,
 };
 
 const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
@@ -87,6 +88,10 @@ pub struct ConversionPreview {
     pub document_title: String,
     pub source_sha256: String,
     pub report: ConversionReport,
+    pub stats: ConversionStats,
+    pub structure_confidence: String,
+    pub inferred_heading_count: usize,
+    pub ambiguous_short_line_count: usize,
     pub sample_tree_json: String,
     pub sampled_node_count: usize,
 }
@@ -170,12 +175,20 @@ pub fn preview(
     let document = extract_document(&source, &bytes, options, strategies)?;
     let written = write_xmind_bytes(&document, options)?;
     let sample = sample_tree(&document)?;
+    let stats = document.stats.clone();
+    let structure_confidence = preview_structure_confidence(&document);
+    let inferred_heading_count = original_format_count(&document, "inferred_heading_count");
+    let ambiguous_short_line_count = original_format_count(&document, "ambiguous_short_line_count");
     Ok(ConversionPreview {
         source,
         output_path: unique_output_path(source_path),
         document_title: document.title,
         source_sha256,
         report: written.report,
+        stats,
+        structure_confidence,
+        inferred_heading_count,
+        ambiguous_short_line_count,
         sample_tree_json: sample.json,
         sampled_node_count: sample.node_count,
     })
@@ -277,6 +290,16 @@ fn extract_document(
         }
     };
     apply_content_strategies(&mut document, strategies);
+    document.stats.skipped_items = document
+        .warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning.code,
+                ConversionWarningCode::ContentSkipped | ConversionWarningCode::EmptyInput
+            )
+        })
+        .count();
     Ok(document)
 }
 
@@ -479,6 +502,9 @@ fn sample_tree(
         "title": truncate_preview_title(&document.title),
         "kind": "document",
         "noteCount": document.notes.len(),
+        "structureConfidence": preview_structure_confidence(document),
+        "inferredHeadingCount": original_format_count(document, "inferred_heading_count"),
+        "ambiguousShortLineCount": original_format_count(document, "ambiguous_short_line_count"),
         "children": root_children,
     });
     Ok(SampleTree {
@@ -537,6 +563,27 @@ fn truncate_preview_title(title: &str) -> String {
     } else {
         truncated
     }
+}
+
+fn preview_structure_confidence(document: &OutlineDocument) -> String {
+    document
+        .source
+        .original_format
+        .get("structure_confidence")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .filter(|value| matches!(value.as_str(), "low" | "medium" | "high"))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn original_format_count(document: &OutlineDocument, key: &str) -> usize {
+    document
+        .source
+        .original_format
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0)
 }
 
 fn validated_output_path(
