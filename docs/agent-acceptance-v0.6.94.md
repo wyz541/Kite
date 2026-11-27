@@ -2,16 +2,16 @@
 
 ## 状态
 
-该记录用于 #157 的双平台产品化验收。**2026-11-27 决定：将下列两项作为已知限制接受，并关闭 #157；它们不记为已通过。**
+该记录用于 #157 的双平台产品化验收。#157 已于 2026-11-27 关闭。关闭时 Windows 自动跟随/手动滚动暂停与 Windows 完整键盘序列作为已知限制保留；macOS 键盘焦点序列随后完成修复和实机复验。
 
 Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11-26 已在 macOS Apple Silicon 与 Windows x64 上使用真实 Claude Code ACP 和真实 Codex ACP 完成主要 UI 闭环；Codex 通过现有 DeepSeek 配置运行，Kite 未复制或保存该提供方的 token。
 
-已接受为已知限制：
+仍作为已知限制保留：
 
-- Windows 自动跟随/手动滚动暂停验证；该项属于 UI-only 交互，不能由 CLI/MCP 替代，保留为后续 UI 验收项。
-- Windows 与 macOS 的完整键盘焦点序列，重点是权限按钮和上下文 chip；该项属于 UI-only 无障碍验收，保留为后续 UI 验收项。
+- Windows 自动跟随/手动滚动暂停验证；该项属于 UI-only 交互，不能由 CLI/MCP 替代。
+- Windows 完整键盘焦点序列；该项属于 UI-only 无障碍验收。
 
-关闭 #157 不代表上述两项已通过，只表示它们不再阻塞当前版本发布。
+macOS 的完整键盘焦点序列已完成，不再列为已知限制。
 
 ## macOS 实机验收（2026-11-26）
 
@@ -47,12 +47,15 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11
 - `Command+.` 可停止正在运行的 Agent。
 - 设置页 Tab 顺序覆盖“通用、外观、布局、文件处理、Agent、更新、关于”，并可继续进入 Agent 配置按钮。
 - 权限请求的呈现顺序固定为允许一次、始终允许、拒绝一次、始终拒绝、取消任务。
+- 从 Agent 输入框按 `Shift+Tab` 可进入权限按钮，并继续按反向顺序经过允许一次、始终允许、拒绝一次、取消任务；禁用项会被跳过。
+- 权限按钮获得焦点时显示明确焦点环，`Return` 可执行当前权限决策。
+- 从 Agent 输入框按 `Tab`/`Shift+Tab` 可到达上下文 chip；`Return` 可定位或移除上下文，移除后空状态正确更新。
+- 键盘焦点监控只拦截 Agent 面板内的 Tab/Return，不改变系统“全键盘控制”设置。
 
-已知限制（已接受，不记为通过）：
+Windows 仍待完成：
 
-- 从 Agent 输入框完整 Tab/Shift+Tab 到权限按钮与上下文 chip 的环形焦点序列。
-- 上下文 chip 的键盘移除与定位动作。
-- Windows 全键盘序列。
+- Windows 自动跟随/手动滚动暂停。
+- Windows 完整键盘焦点序列。
 
 ## Windows 实机验收（2026-11-25）
 
@@ -147,7 +150,9 @@ macOS 额外证据：
 [取消态](images/agent-acceptance-v0.6.94/macos-agent-cancelled.png)、
 [独立窗口](images/agent-acceptance-v0.6.94/macos-agent-popout.png)、
 [Agent 设置](images/agent-acceptance-v0.6.94/macos-agent-settings.png)、
-[连接测试](images/agent-acceptance-v0.6.94/macos-agent-connection-test.png)。
+[连接测试](images/agent-acceptance-v0.6.94/macos-agent-connection-test.png)、
+[权限按钮键盘焦点](images/agent-acceptance-v0.6.94/macos-agent-keyboard-permission.png)、
+[上下文 chip 键盘焦点](images/agent-acceptance-v0.6.94/macos-agent-keyboard-context.png)。
 
 Windows 额外证据：
 [完成态](images/agent-acceptance-v0.6.94/windows-agent-completed.png)、
@@ -185,5 +190,5 @@ Windows 与 macOS 必须显示相同的 Agent、模型、工作目录、权限�
 
 - Codex ACP 会声明 ChatGPT / API key 认证方法；连接测试因此显示“需要认证”。但 CC Switch 自定义 provider 的 profile 可继续完成真实会话，Kite 只做诊断展示，不改变 Agent 原生认证。
 - Claude Code ACP 在用户拒绝写入权限时可能返回上游 `Internal error`；Kite 现在将该终态归一化为“权限请求已拒绝”，原始细节仍保留在脱敏诊断日志。
-- 完整键盘焦点序列作为已知限制接受；保留为后续 UI 验收项，不阻塞 #157 关闭。
+- Windows 自动跟随/手动滚动暂停和 Windows 完整键盘焦点序列仍作为已知限制保留；macOS 键盘焦点序列已完成。
 - 旧 `@zed-industries/codex-acp 0.16.0` 已弃用；Windows 新验收使用 `@agentclientprotocol/codex-acp 2.12.1`。macOS 的 `0.16.0` 记录保留为历史实机证据，不代表当前预设。

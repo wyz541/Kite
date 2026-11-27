@@ -52,6 +52,8 @@ ALLOWED_IMAGES = {
     "docs/images/agent-acceptance-v0.6.94/macos-agent-connection-test.png",
     "docs/images/agent-acceptance-v0.6.94/macos-agent-unconfigured.png",
     "docs/images/agent-acceptance-v0.6.94/macos-agent-codex-completed.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-keyboard-context.png",
+    "docs/images/agent-acceptance-v0.6.94/macos-agent-keyboard-permission.png",
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ALLOWED_WINDOWS_USERS = {"Example", "Kite", "Public", "runner", "runneradmin", "<name>"}

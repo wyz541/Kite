@@ -52,6 +52,8 @@ actions!(
         OpenSettings,
         OpenWorkspaceEditor,
         OpenAgentReview,
+        AgentPromptFocusNext,
+        AgentPromptFocusPrev,
         GitClientRefresh,
         GitClientFetch,
         GitClientPull,

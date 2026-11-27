@@ -1940,6 +1940,12 @@ impl KiteApp {
             KeyBinding::new("secondary-shift-f", OpenGlobalSearch, Some("Kite")),
             KeyBinding::new("secondary-shift-g", OpenGitClient, Some("Kite")),
             KeyBinding::new("secondary-shift-a", OpenAgentReview, Some("Kite")),
+            KeyBinding::new("tab", AgentPromptFocusNext, Some("AgentPrompt > Input")),
+            KeyBinding::new(
+                "shift-tab",
+                AgentPromptFocusPrev,
+                Some("AgentPrompt > Input"),
+            ),
             KeyBinding::new("secondary-1", ShowListView, Some("Kite")),
             KeyBinding::new("secondary-2", ShowColumnsView, Some("Kite")),
             KeyBinding::new("secondary-t", NewTab, Some("Kite")),
