@@ -21,6 +21,8 @@ ALLOWED_IMAGES = {
     "assets/kite-icon-master.png",
     "assets/kite-icon-preview.png",
     "docs/images/kite-product-preview-sidebar.png",
+    "docs/images/git-graph-acceptance-v0.6.97/macos-git-graph-1440x900.png",
+    "docs/images/git-graph-acceptance-v0.6.97/macos-git-graph-narrow-900x700.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-empty.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-ready.png",
     "docs/images/agent-acceptance-v0.6.94/windows-agent-streaming.png",

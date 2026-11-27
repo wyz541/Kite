@@ -34,6 +34,27 @@ cargo test --lib git::log::tests::benchmark_graph_scope_history -- --ignored --n
 | 100,000 提交，Directory `.` + `--full-history` | 93 ms | 52 ms | < 1 ms | < 1 ms | 200 | 1 |
 | 10,000 文件，Directory `src/git` | 91 ms | 48 ms | < 1 ms | < 1 ms | 1 | 0 |
 
+
+## macOS arm64 复核
+
+- 日期：2026-11-27
+- 系统：macOS（Apple Silicon）
+- 构建：`cargo test` 的 `test` profile
+- 缓存：未清理操作系统缓存；热缓存基准
+- 隐私：按截图策略不记录具体设备型号、内存或磁盘容量
+
+```bash
+cargo test --locked --lib git::log::tests::benchmark_graph_scope_history -- --ignored --nocapture
+```
+
+| 场景 | Core 总耗时 | Git 子进程 | 解析 | 图布局 | 返回提交 | 活跃泳道 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100,000 提交，Repository | 82 ms | 44 ms | < 1 ms | < 1 ms | 200 | 1 |
+| 100,000 提交，Directory `.` + `--full-history` | 67 ms | 33 ms | < 1 ms | < 1 ms | 200 | 1 |
+| 10,000 文件，Directory `src/git` | 51 ms | 25 ms | < 1 ms | < 1 ms | 1 | 0 |
+
+macOS 复核同样低于 500 ms 首屏预算。`--full-history` 的耗时小于仓库级 Graph 的本次测量值，说明该夹具下额外历史简化开销没有形成可见回归；不同仓库仍需持续采样。
+
 ## 边界
 
 - 这是 Core 数据路径基准，不包含 GPUI 或 SwiftUI 的合成耗时。

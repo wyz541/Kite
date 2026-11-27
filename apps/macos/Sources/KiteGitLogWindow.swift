@@ -127,9 +127,9 @@ final class KiteGitLogViewModel: ObservableObject {
         }
         switch scope {
         case .directory(_):
-            return "Directory · \(path)"
+            return "Directory: \(path)"
         case .file(_):
-            return "File · \(path)"
+            return "File: \(path)"
         case .repository:
             return "Repository"
         }
@@ -495,6 +495,7 @@ final class KiteGitLogWindowController: NSWindowController, NSWindowDelegate {
 
 private struct KiteGitLogWindowView: View {
     @StateObject private var viewModel: KiteGitLogViewModel
+    @State private var sidebarCollapsed = false
     @FocusState private var searchFocused: Bool
 
     init(viewModel: KiteGitLogViewModel) {
@@ -511,23 +512,27 @@ private struct KiteGitLogWindowView: View {
                     .fill(Color.primary.opacity(0.08))
                     .frame(height: 0.5)
                 HSplitView {
-                    sidebar
-                        .frame(minWidth: 210, idealWidth: 224, maxWidth: 260)
+                    if !sidebarCollapsed {
+                        sidebar
+                            .frame(minWidth: 190, idealWidth: 224, maxWidth: 260)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
                     VSplitView {
                         graphPane
-                            .frame(minHeight: 280)
+                            .frame(minHeight: 240)
                         detailPane
                             .frame(minHeight: 230)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .animation(.easeInOut(duration: 0.16), value: sidebarCollapsed)
                 Rectangle()
                     .fill(Color.primary.opacity(0.08))
                     .frame(height: 0.5)
                 statusBar
             }
         }
-        .frame(minWidth: 1040, minHeight: 680)
+        .frame(minWidth: 900, minHeight: 640)
         .task {
             await viewModel.reload()
         }
@@ -541,6 +546,18 @@ private struct KiteGitLogWindowView: View {
     private var toolbar: some View {
         VStack(spacing: 9) {
             HStack(spacing: 10) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        sidebarCollapsed.toggle()
+                    }
+                } label: {
+                    Image(systemName: sidebarCollapsed ? "sidebar.left" : "sidebar.leading")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.borderless)
+                .help(sidebarCollapsed ? "显示 Git 导航" : "折叠 Git 导航")
+
                 Image(systemName: "point.3.connected.trianglepath.dotted")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
@@ -572,14 +589,14 @@ private struct KiteGitLogWindowView: View {
 
                 Spacer(minLength: 8)
 
-                if viewModel.isScoped {
-                    HStack(spacing: 6) {
-                        Image(systemName: viewModel.scopeChipIcon)
-                            .font(.system(size: 9.5, weight: .semibold))
-                        Text(viewModel.scopeChipTitle)
-                            .font(.system(size: 10.5, weight: .medium))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                HStack(spacing: 6) {
+                    Image(systemName: viewModel.scopeChipIcon)
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text(viewModel.scopeChipTitle)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if viewModel.isScoped {
                         Button {
                             Task { await viewModel.clearScope() }
                         } label: {
@@ -587,14 +604,18 @@ private struct KiteGitLogWindowView: View {
                                 .font(.system(size: 10))
                         }
                         .buttonStyle(.plain)
-                        .help("清除范围，回到仓库级 Graph")
+                        .help("清除范围，回到 Repository Graph")
                     }
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule())
-                    .frame(maxWidth: 360)
                 }
+                .foregroundStyle(viewModel.isScoped ? Color.accentColor : Color.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    (viewModel.isScoped ? Color.accentColor : Color.secondary).opacity(0.12),
+                    in: Capsule()
+                )
+                .frame(maxWidth: 360)
+                .accessibilityLabel("当前 Git scope：\(viewModel.scopeChipTitle)")
 
                 Button {
                     Task { await viewModel.reload() }
@@ -1627,7 +1648,7 @@ private extension KiteGitLogWindowView {
 
                 Divider()
 
-                KiteDiffViewerView(model: viewModel.embeddedDiffModel)
+                KiteDiffViewerView(model: viewModel.embeddedDiffModel, embedded: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .padding(16)

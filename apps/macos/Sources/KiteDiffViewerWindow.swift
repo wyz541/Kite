@@ -317,10 +317,13 @@ final class KiteDiffViewerWindowController: NSWindowController, NSWindowDelegate
 
 struct KiteDiffViewerView: View {
     @ObservedObject var model: KiteDiffViewerModel
+    var embedded = false
 
     var body: some View {
         ZStack {
-            KiteGlassBackdrop()
+            if !embedded {
+                KiteGlassBackdrop()
+            }
 
             VStack(spacing: 0) {
                 toolbar
@@ -328,41 +331,45 @@ struct KiteDiffViewerView: View {
                 content
             }
         }
-        .frame(minWidth: 820, minHeight: 540)
+        .frame(minWidth: embedded ? 0 : 820, minHeight: embedded ? 0 : 540)
         .onChange(of: model.preset) { _ in
             model.reload()
         }
         .onExitCommand {
-            NSApp.keyWindow?.performClose(nil)
+            if !embedded {
+                NSApp.keyWindow?.performClose(nil)
+            }
         }
     }
 
     private var toolbar: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 10) {
+        VStack(spacing: embedded ? 5 : 8) {
+            HStack(spacing: embedded ? 7 : 10) {
                 Image(systemName: "square.split.2x1")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                Picker("比较", selection: $model.preset) {
-                    ForEach(DiffComparisonPreset.allCases) { preset in
-                        Text(preset.title).tag(preset)
+                if !embedded {
+                    Picker("比较", selection: $model.preset) {
+                        ForEach(DiffComparisonPreset.allCases) { preset in
+                            Text(preset.title).tag(preset)
+                        }
                     }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .controlSize(.small)
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
 
-                Button {
-                    model.openGitLog()
-                } label: {
-                    Label("打开 Git Log", systemImage: "arrow.triangle.branch")
+                    Button {
+                        model.openGitLog()
+                    } label: {
+                        Label("打开 Git Log", systemImage: "arrow.triangle.branch")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("在 Git 工作台中打开当前文件或目录历史")
                 }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .help("在 Git 工作台中打开当前文件或目录历史")
 
-                Spacer(minLength: 12)
+                Spacer(minLength: embedded ? 4 : 12)
 
                 Picker("显示模式", selection: $model.displayMode) {
                     ForEach(DiffDisplayMode.allCases) { mode in
@@ -382,7 +389,7 @@ struct KiteDiffViewerView: View {
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
 
-                Spacer(minLength: 8)
+                Spacer(minLength: embedded ? 2 : 8)
 
                 Button {
                     model.moveToPreviousChange()
@@ -406,7 +413,7 @@ struct KiteDiffViewerView: View {
                 .help("下一处改动 (F7)")
             }
 
-            if model.preset == .custom {
+            if model.preset == .custom && !embedded {
                 HStack(spacing: 8) {
                     TextField("旧端点，例如 HEAD~1、main 或暂存区", text: $model.oldRevision)
                         .textFieldStyle(.roundedBorder)
@@ -513,8 +520,8 @@ struct KiteDiffViewerView: View {
             }
         }
         .font(.system(size: 10.5, design: .monospaced))
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
+        .padding(.horizontal, embedded ? 9 : 14)
+        .padding(.vertical, embedded ? 4 : 7)
     }
 
     private func diffScrollView(_ document: GitDiffDocumentDto) -> some View {
