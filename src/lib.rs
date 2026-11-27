@@ -27,6 +27,7 @@ pub mod indexed_search;
 pub mod mindmap;
 pub mod mindmap_ffi;
 pub mod mindmap_import;
+pub mod mindmap_ui_model;
 pub mod name_index;
 pub mod perf_trace;
 pub mod platform;
