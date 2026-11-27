@@ -11,7 +11,17 @@ enum KitePlatform {
     static let fileDragContentType = KiteFileDragProvider.contentType
 
     static func open(_ path: String) {
+        if isMindmapFile(path) {
+            Task { @MainActor in
+                KiteMindmapWindowController.open(path: path)
+            }
+            return
+        }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    static func isMindmapFile(_ path: String) -> Bool {
+        URL(fileURLWithPath: path).pathExtension.lowercased() == "xmind"
     }
 
     @MainActor

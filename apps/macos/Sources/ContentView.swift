@@ -322,6 +322,13 @@ struct ContentView: View {
                 KiteGlobalSearchWindowController.shared.show(model: model)
             }
 
+            KiteToolbarIconButton(
+                systemName: "point.3.connected.trianglepath.dotted",
+                title: "打开 Mindmap (⌘⇧M)"
+            ) {
+                KiteMindmapWindowController.chooseAndOpen()
+            }
+
             if model.columns.last?.gitAvailable == true {
                 KiteToolbarIconButton(
                     systemName: "arrow.triangle.branch",

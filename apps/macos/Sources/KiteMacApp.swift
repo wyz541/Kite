@@ -163,6 +163,12 @@ struct KiteMacApp: App {
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1240, height: 800)
         .commands {
+            CommandGroup(after: .newItem) {
+                Button("打开 Mindmap…") {
+                    KiteMindmapWindowController.chooseAndOpen()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+            }
             CommandGroup(replacing: .saveItem) {
                 Button("保存") {
                     TextEditorWindowController.saveKeyWindow()
@@ -190,7 +196,6 @@ struct KiteMacApp: App {
                 Button("打开 XMind…") {
                     KiteMindmapWindowController.chooseAndOpen()
                 }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
 
                 Button("打开示例") {
                     KiteMindmapWindowController.openSample()

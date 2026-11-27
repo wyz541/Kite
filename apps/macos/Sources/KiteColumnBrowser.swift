@@ -1805,6 +1805,13 @@ struct KiteGlobalSearchResults: View {
                     KitePlatform.open(entry.path)
                 }
             }
+            if KitePlatform.isMindmapFile(entry.path) {
+                Button {
+                    KiteMindmapWindowController.open(path: entry.path)
+                } label: {
+                    Label("使用 Mindmap 编辑", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+            }
             Button("在 Finder 中显示") {
                 KitePlatform.revealInFinder(entry.path)
             }
@@ -1917,6 +1924,14 @@ private struct KiteEntryMenu: View {
             KitePlatform.open(entry.path)
         } label: {
             Label("打开", systemImage: "arrow.up.forward.app")
+        }
+
+        if KitePlatform.isMindmapFile(entry.path) {
+            Button {
+                KiteMindmapWindowController.open(path: entry.path)
+            } label: {
+                Label("使用 Mindmap 编辑", systemImage: "point.3.connected.trianglepath.dotted")
+            }
         }
 
         if model.isGitAvailable(forEntryPath: entry.path) {
