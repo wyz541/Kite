@@ -11,7 +11,9 @@ struct ContextMenuPlanSmoke {
                 ContextMenuTargetDto(
                     path: "/tmp/main.rs",
                     displayName: "main.rs",
-                    kind: "file"
+                    kind: "file",
+                    exists: true,
+                    readable: true
                 )
             ],
             workingDirectory: "/tmp",
@@ -38,6 +40,10 @@ struct ContextMenuPlanSmoke {
             mindmapImportAvailable: false,
             isShellNamespace: false,
             nativePlaneAvailable: false,
+            openWith: OpenWithCatalogDto(
+                status: .loading,
+                applications: []
+            ),
             compact: true,
             hideUnavailable: true,
             confirmHighRisk: true
@@ -50,6 +56,7 @@ struct ContextMenuPlanSmoke {
         precondition(plan.submenus.contains { $0.id == "file-actions" })
         precondition(plan.submenus.contains { $0.id == "git" })
         precondition(plan.submenus.contains { $0.id == "svn" })
+        precondition(plan.submenus.contains { $0.id == "open-with" })
 
         let native = plan.groups.last?.entries.last?.action
         precondition(native?.actionId == "system.native-menu")

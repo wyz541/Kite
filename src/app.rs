@@ -12,8 +12,8 @@ use crate::agent_panel::AgentPanel;
 use crate::archive::{self, ArchiveFormat};
 use crate::archive_progress_window;
 use crate::context_menu::{
-    ContextMenuCapabilities, ContextMenuTarget, render_context_menu, request_system_menu,
-    show_properties,
+    ContextMenuCapabilities, ContextMenuTarget, open_with, render_context_menu,
+    request_open_with_dialog, request_system_menu, show_properties,
 };
 use crate::devices::{DeviceSnapshot, PortableDevice, StorageVolume, VolumeKind};
 use crate::diff_viewer_window;
@@ -3524,6 +3524,28 @@ impl KiteApp {
     ) {
         match action.command {
             ContextMenuCommand::Open => self.open_path(action.target.clone(), window, cx),
+            ContextMenuCommand::OpenWithApplication => {
+                let ContextMenuActionPayload::Application(application_id) = &action.payload else {
+                    self.notice = None;
+                    self.error = Some("打开方式缺少应用标识".into());
+                    cx.notify();
+                    return;
+                };
+                match open_with::launch(&action.target, application_id) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.notice = None;
+                    }
+                    Err(error) => {
+                        self.notice = None;
+                        self.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            }
+            ContextMenuCommand::OpenWithChooseOther => {
+                self.open_with_dialog(action.target.clone(), window, cx)
+            }
             ContextMenuCommand::Agent(command) => {
                 self.open_agent_context(command, action, window, cx)
             }
@@ -3599,6 +3621,39 @@ impl KiteApp {
             }
             ContextMenuCommand::Refresh => self.refresh(window, cx),
         }
+    }
+
+    fn open_with_dialog(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = match request_open_with_dialog(window, &path) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+        self.notice = None;
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = receiver.await;
+            let _ = this.update_in(cx, |this, _, cx| match result {
+                Ok(Ok(true)) => {
+                    this.notice = None;
+                    this.error = None;
+                }
+                Ok(Ok(false)) => {}
+                Ok(Err(error)) => {
+                    this.notice = None;
+                    this.error = Some(error.into());
+                }
+                Err(error) => {
+                    this.notice = None;
+                    this.error = Some(format!("无法读取 Windows 打开方式结果：{error}").into());
+                }
+            });
+        })
+        .detach();
     }
 
     fn open_system_menu(
@@ -6194,6 +6249,7 @@ impl KiteApp {
             command: ContextMenuCommand::Open,
             action_id: "open.default".to_string(),
             variant_key: None,
+            payload: ContextMenuActionPayload::None,
         };
         let copy_path_action = ContextMenuAction {
             target: path.clone(),
@@ -6202,6 +6258,7 @@ impl KiteApp {
             command: ContextMenuCommand::CopyPath,
             action_id: "clipboard.copy-path".to_string(),
             variant_key: None,
+            payload: ContextMenuActionPayload::None,
         };
         let properties_action = ContextMenuAction {
             target: path.clone(),
@@ -6210,6 +6267,7 @@ impl KiteApp {
             command: ContextMenuCommand::ShowProperties,
             action_id: "system.properties".to_string(),
             variant_key: None,
+            payload: ContextMenuActionPayload::None,
         };
         let remove_action = favorite.then(|| ContextMenuAction {
             target: path.clone(),
@@ -6218,6 +6276,7 @@ impl KiteApp {
             command: ContextMenuCommand::RemoveFavorite,
             action_id: "favorite.remove".to_string(),
             variant_key: None,
+            payload: ContextMenuActionPayload::None,
         });
         let storage_row = storage.is_some();
 
@@ -6436,6 +6495,7 @@ impl KiteApp {
             command: ContextMenuCommand::Open,
             action_id: "open.default".to_string(),
             variant_key: None,
+            payload: ContextMenuActionPayload::None,
         };
         let properties_action = ContextMenuAction {
             paths: vec![path.clone()],
@@ -6444,6 +6504,7 @@ impl KiteApp {
             command: ContextMenuCommand::ShowProperties,
             action_id: "system.properties".to_string(),
             variant_key: None,
+            payload: ContextMenuActionPayload::None,
         };
         let context = self.focus_handle.clone();
         let active = same_path(&self.current_dir, Path::new(&device.shell_path));
@@ -7346,6 +7407,7 @@ impl KiteApp {
                                             command: *command,
                                             action_id: "preview.more".to_string(),
                                             variant_key: Some(format!("preview-more:{index}")),
+                                            payload: ContextMenuActionPayload::None,
                                         }),
                                         !preview_more_supports_local_ops
                                             && *command == ContextMenuCommand::Copy,

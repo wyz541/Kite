@@ -9,19 +9,23 @@ use gpui_kit::prelude::StatefulInteractiveElement as _;
 use gpui_kit::*;
 use kite_core::context_menu_model::{
     ContainerSnapshot, ContextCapabilities, ContextPlatform, ContextPolicy, ContextSnapshot,
-    ContextSurface, ContextTarget, MenuEntryPlan, MenuPlan, ResolvedAction, TargetKind, TargetSet,
-    compose_menu_with_fallback,
+    ContextSurface, ContextTarget, MenuEntryPlan, MenuPlan, OpenWithCatalog, ResolvedAction,
+    TargetKind, TargetSet, compose_menu_with_fallback,
 };
 
-use crate::actions::{ContextMenuAction, ContextMenuCommand};
+use crate::actions::{ContextMenuAction, ContextMenuActionPayload, ContextMenuCommand};
 use crate::archive;
 use crate::platform::HostPlatform;
 
 #[cfg(target_os = "windows")]
+mod open_with_windows;
+#[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub(crate) use windows::{request_system_menu, show_properties};
+pub(crate) use open_with_windows as open_with;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::{request_open_with_dialog, request_system_menu, show_properties};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ContextMenuPolicy {
@@ -202,6 +206,12 @@ impl ContextMenuTarget {
             .iter()
             .map(PathBuf::from)
             .collect::<Vec<_>>();
+        let payload = match &plan_action.payload {
+            kite_core::context_menu_model::ActionPayload::Application { application_id } => {
+                ContextMenuActionPayload::Application(application_id.clone())
+            }
+            _ => ContextMenuActionPayload::None,
+        };
         Some(ContextMenuAction {
             target: paths.first().cloned().unwrap_or_else(|| self.path.clone()),
             paths,
@@ -209,6 +219,7 @@ impl ContextMenuTarget {
             command,
             action_id: plan_action.action_id.clone(),
             variant_key: plan_action.variant_key.clone(),
+            payload,
         })
     }
 
@@ -242,6 +253,11 @@ impl ContextMenuTarget {
             self.container_is_primary_target,
         );
         container.writable = self.supports_transfer_ops && !self.is_shell_namespace;
+        let open_with = if paths.len() == 1 && !self.is_shell_namespace {
+            open_with_windows::catalog(&paths[0])
+        } else {
+            OpenWithCatalog::default()
+        };
         ContextSnapshot {
             schema_version: kite_core::context_menu_model::CONTEXT_MENU_SCHEMA_VERSION,
             snapshot_id: format!("windows-context-menu:{}", self.path.display()),
@@ -278,6 +294,7 @@ impl ContextMenuTarget {
                 is_shell_namespace: self.is_shell_namespace,
                 native_plane_available: true,
             },
+            open_with,
             policy: policy.core_policy(),
         }
     }
@@ -299,7 +316,11 @@ impl ContextMenuTarget {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
         };
-        ContextTarget::new(path.display().to_string(), display_name, kind)
+        let mut target = ContextTarget::new(path.display().to_string(), display_name, kind);
+        target.exists = path.exists();
+        target.readable =
+            !self.is_shell_namespace && (path.is_dir() || std::fs::File::open(path).is_ok());
+        target
     }
 }
 
@@ -311,6 +332,7 @@ fn popup_icon(icon_key: &str) -> IconName {
     match icon_key {
         "refresh" => IconName::RotateCw,
         "open" => IconName::FolderOpen,
+        "open-with" => IconName::AppWindow,
         "quick-look" => IconName::Eye,
         "copy" => IconName::Copy,
         "cut" => IconName::Scissors,

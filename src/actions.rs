@@ -74,6 +74,8 @@ actions!(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextMenuCommand {
     Open,
+    OpenWithApplication,
+    OpenWithChooseOther,
     Agent(AgentMenuCommand),
     Copy,
     CopyTo,
@@ -96,6 +98,13 @@ pub enum ContextMenuCommand {
     Refresh,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ContextMenuActionPayload {
+    #[default]
+    None,
+    Application(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = kite, no_json)]
 pub struct ContextMenuAction {
@@ -105,6 +114,7 @@ pub struct ContextMenuAction {
     pub command: ContextMenuCommand,
     pub action_id: String,
     pub variant_key: Option<String>,
+    pub payload: ContextMenuActionPayload,
 }
 
 impl ContextMenuCommand {
@@ -115,6 +125,8 @@ impl ContextMenuCommand {
         let command = match action_id {
             "navigation.refresh" => Self::Refresh,
             "open.default" => Self::Open,
+            "open.with" => Self::OpenWithApplication,
+            "open.with.choose-other" => Self::OpenWithChooseOther,
             "clipboard.copy" => Self::Copy,
             "clipboard.copy-to" => Self::CopyTo,
             "clipboard.copy-path" => Self::CopyPath,

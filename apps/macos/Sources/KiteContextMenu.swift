@@ -9,10 +9,12 @@ enum KiteContextMenuTarget {
 
 struct KiteContextMenuView: View {
     @ObservedObject var model: KiteModel
+    @ObservedObject private var openWithCatalog = KiteOpenWithCatalogCache.shared
     @EnvironmentObject private var agent: KiteAgentPanelModel
     let target: KiteContextMenuTarget
 
     var body: some View {
+        let _ = openWithCatalog.revision
         let plan = makePlan()
         KiteContextMenuPlanView(groups: plan.groups, submenus: plan.submenus) { action in
             KiteContextMenuRunner(model: model, agent: agent, target: target)
@@ -56,6 +58,7 @@ struct KiteContextMenuView: View {
                 && KitePlatform.isMindmapImportFile(primaryPath),
             isShellNamespace: false,
             nativePlaneAvailable: false,
+            openWith: openWithCatalog.catalog(for: openWithPath).dto,
             compact: true,
             hideUnavailable: true,
             confirmHighRisk: true
@@ -162,7 +165,9 @@ struct KiteContextMenuView: View {
                 ContextMenuTargetDto(
                     path: entry.path,
                     displayName: entry.name,
-                    kind: targetKind(for: entry)
+                    kind: targetKind(for: entry),
+                    exists: FileManager.default.fileExists(atPath: entry.path),
+                    readable: FileManager.default.isReadableFile(atPath: entry.path)
                 )
             }
         case .directory(let column):
@@ -170,10 +175,17 @@ struct KiteContextMenuView: View {
                 ContextMenuTargetDto(
                     path: column.path,
                     displayName: column.title,
-                    kind: "directory"
+                    kind: "directory",
+                    exists: FileManager.default.fileExists(atPath: column.path),
+                    readable: FileManager.default.isReadableFile(atPath: column.path)
                 )
             ]
         }
+    }
+
+    private var openWithPath: String? {
+        guard !isDirectoryContext, menuPaths.count == 1 else { return nil }
+        return menuPaths[0]
     }
 
     private func targetKind(for entry: BrowserEntry) -> String {
@@ -247,6 +259,7 @@ private struct KiteContextMenuEntryView: View {
         switch key {
         case "refresh": return "arrow.clockwise"
         case "open": return "arrow.up.forward.app"
+        case "open-with": return "square.grid.2x2"
         case "quick-look": return "eye"
         case "copy": return "doc.on.doc"
         case "cut": return "scissors"
@@ -286,6 +299,23 @@ private struct KiteContextMenuRunner {
             model.refresh()
         case "open.default":
             openDefault(primaryPath)
+        case "open.with":
+            guard action.payloadKind == "application",
+                  let applicationID = action.payloadValue else {
+                model.errorMessage = "打开方式缺少应用标识。"
+                return
+            }
+            KiteOpenWithLauncher.launch(path: primaryPath, applicationID: applicationID) { error in
+                if let error {
+                    model.errorMessage = error.localizedDescription
+                }
+            }
+        case "open.with.choose-other":
+            KiteOpenWithLauncher.chooseAndLaunch(path: primaryPath) { error in
+                if let error {
+                    model.errorMessage = error.localizedDescription
+                }
+            }
         case "open.quick-look":
             KitePlatform.quickLook(primaryPath)
         case "clipboard.copy":

@@ -18,6 +18,7 @@ pub const AGENT_SUBMENU: &str = "agent";
 pub const GIT_SUBMENU: &str = "git";
 pub const SVN_SUBMENU: &str = "svn";
 pub const SYSTEM_SUBMENU: &str = "system";
+pub const OPEN_WITH_SUBMENU: &str = "open-with";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextPlatform {
@@ -260,6 +261,32 @@ pub struct ContextCapabilities {
     pub native_plane_available: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpenWithCatalogStatus {
+    Ready,
+    Loading,
+    #[default]
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenWithApplication {
+    /// Stable platform identity: bundle ID on macOS, canonical shell-handler
+    /// key on Windows. Never a transient COM object or UI object.
+    pub application_id: String,
+    pub display_name: String,
+    pub is_default: bool,
+    pub is_recent: bool,
+    pub is_available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenWithCatalog {
+    pub status: OpenWithCatalogStatus,
+    pub applications: Vec<OpenWithApplication>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextPolicy {
     pub compact: bool,
@@ -286,6 +313,7 @@ pub struct ContextSnapshot {
     pub target_set: TargetSet,
     pub container: ContainerSnapshot,
     pub capabilities: ContextCapabilities,
+    pub open_with: OpenWithCatalog,
     pub policy: ContextPolicy,
 }
 
@@ -327,6 +355,18 @@ impl ContextSnapshot {
         }
         let path = Path::new(&self.target_set.targets[0].path);
         path.parent().is_some()
+    }
+
+    pub fn single_open_with_target(&self) -> Option<&ContextTarget> {
+        if self.capabilities.is_shell_namespace || self.target_set.targets.len() != 1 {
+            return None;
+        }
+        self.target_set.targets.first().filter(|target| {
+            target.kind.is_file_like()
+                && target.kind != TargetKind::DeviceItem
+                && target.exists
+                && target.readable
+        })
     }
 }
 
@@ -555,6 +595,7 @@ pub enum SubmenuId {
     Agent,
     Git,
     Svn,
+    OpenWith,
     System,
 }
 
@@ -566,6 +607,7 @@ impl SubmenuId {
             Self::Agent => AGENT_SUBMENU,
             Self::Git => GIT_SUBMENU,
             Self::Svn => SVN_SUBMENU,
+            Self::OpenWith => OPEN_WITH_SUBMENU,
             Self::System => SYSTEM_SUBMENU,
         }
     }
@@ -577,6 +619,7 @@ impl SubmenuId {
             AGENT_SUBMENU => Some(Self::Agent),
             GIT_SUBMENU => Some(Self::Git),
             SVN_SUBMENU => Some(Self::Svn),
+            OPEN_WITH_SUBMENU => Some(Self::OpenWith),
             SYSTEM_SUBMENU => Some(Self::System),
             _ => None,
         }
@@ -589,6 +632,7 @@ impl SubmenuId {
             Self::Agent => "使用 Agent",
             Self::Git => "Git",
             Self::Svn => "SVN",
+            Self::OpenWith => "打开方式",
             Self::System if platform.is_macos() => "系统",
             Self::System if platform.is_windows() => "更多系统操作",
             Self::System => "系统",
@@ -601,6 +645,7 @@ impl SubmenuId {
             Self::Archive => "archive",
             Self::Agent => "agent",
             Self::Git | Self::Svn => "vcs",
+            Self::OpenWith => "open-with",
             Self::System => "system",
         }
     }
@@ -611,6 +656,7 @@ impl SubmenuId {
             Self::Archive => RootGroup::Archive,
             Self::Agent => RootGroup::AgentAndTools,
             Self::Git | Self::Svn => RootGroup::Vcs,
+            Self::OpenWith => RootGroup::OpenAndLaunch,
             Self::System => RootGroup::System,
         }
     }
@@ -684,6 +730,12 @@ pub struct ActionCandidate {
     pub action_id: String,
     pub variant_key: Option<String>,
     pub availability: CandidateAvailability,
+    /// Optional provider-owned presentation for dynamic variants.
+    pub label: Option<String>,
+    pub icon_key: Option<String>,
+    /// Optional submenu-local ordering for dynamic variants. Static actions use
+    /// the canonical descriptor order.
+    pub order: Option<u16>,
     /// Higher values win duplicate resolution. Providers should use this only
     /// to express evidence specificity, never to express layout.
     pub precedence: u8,
@@ -696,6 +748,9 @@ impl ActionCandidate {
             action_id: action_id.to_string(),
             variant_key: None,
             availability: CandidateAvailability::Available,
+            label: None,
+            icon_key: None,
+            order: None,
             precedence: 0,
             payload: ActionPayload::None,
         }
@@ -706,6 +761,9 @@ impl ActionCandidate {
             action_id: action_id.to_string(),
             variant_key: None,
             availability,
+            label: None,
+            icon_key: None,
+            order: None,
             precedence: 0,
             payload: ActionPayload::None,
         }
@@ -718,6 +776,21 @@ impl ActionCandidate {
 
     pub fn precedence(mut self, precedence: u8) -> Self {
         self.precedence = precedence;
+        self
+    }
+
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn icon_key(mut self, icon_key: impl Into<String>) -> Self {
+        self.icon_key = Some(icon_key.into());
+        self
+    }
+
+    pub fn order(mut self, order: u16) -> Self {
+        self.order = Some(order);
         self
     }
 
@@ -899,7 +972,10 @@ impl ContextMenuComposer {
                 };
                 if !enabled
                     && context.policy.hide_unavailable
-                    && candidate.action_id != "system.native-menu"
+                    && !matches!(
+                        candidate.action_id.as_str(),
+                        "system.native-menu" | "open.with" | "open.with.choose-other"
+                    )
                 {
                     continue;
                 }
@@ -926,11 +1002,14 @@ impl ContextMenuComposer {
                         RootGroup::Destructive
                     };
                 }
+                let label = candidate.label.unwrap_or(descriptor.label);
+                let icon_key = candidate.icon_key.unwrap_or(descriptor.icon_key);
+                let order = candidate.order.unwrap_or(descriptor.order);
                 resolved.push(ResolvedAction {
                     action_id: descriptor.action_id,
                     variant_key: candidate.variant_key,
-                    label: descriptor.label,
-                    icon_key: descriptor.icon_key,
+                    label,
+                    icon_key,
                     scope: descriptor.scope,
                     plane: descriptor.plane,
                     owner: descriptor.owner,
@@ -942,7 +1021,7 @@ impl ContextMenuComposer {
                     feedback: descriptor.feedback,
                     root_group,
                     section: descriptor.section,
-                    order: descriptor.order,
+                    order,
                     targets,
                     enabled,
                     disabled_reason_code: reason_code,
@@ -1081,6 +1160,9 @@ impl ContextMenuComposer {
 }
 
 fn submenu_for_action(action_id: &str) -> Option<SubmenuId> {
+    if action_id == "open.with" || action_id == "open.with.choose-other" {
+        return Some(SubmenuId::OpenWith);
+    }
     if action_id.starts_with("git.") {
         return Some(SubmenuId::Git);
     }
@@ -1390,6 +1472,7 @@ fn default_providers() -> Vec<Box<dyn ActionProvider>> {
     vec![
         Box::new(RefreshActionProvider),
         Box::new(CoreActionProvider),
+        Box::new(OpenWithActionProvider),
         Box::new(ArchiveActionProvider),
         Box::new(AgentActionProvider),
         Box::new(VcsActionProvider),
@@ -1399,6 +1482,7 @@ fn default_providers() -> Vec<Box<dyn ActionProvider>> {
 
 struct RefreshActionProvider;
 struct CoreActionProvider;
+struct OpenWithActionProvider;
 struct ArchiveActionProvider;
 struct AgentActionProvider;
 struct VcsActionProvider;
@@ -1543,6 +1627,159 @@ impl ActionProvider for CoreActionProvider {
         }
         candidates
     }
+}
+
+impl ActionProvider for OpenWithActionProvider {
+    fn candidates(&self, context: &ContextSnapshot) -> Vec<ActionCandidate> {
+        if context.single_open_with_target().is_none() {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::new();
+        match context.open_with.status {
+            OpenWithCatalogStatus::Loading => {
+                candidates.push(
+                    ActionCandidate::with_availability(
+                        "open.with",
+                        CandidateAvailability::disabled(
+                            "OPEN_WITH_LOADING",
+                            "正在查找可用于打开此文件的应用",
+                        ),
+                    )
+                    .variant("status:loading")
+                    .label("正在查找兼容应用…")
+                    .icon_key("open-with")
+                    .order(10),
+                );
+            }
+            OpenWithCatalogStatus::Unavailable => {
+                candidates.push(
+                    ActionCandidate::with_availability(
+                        "open.with",
+                        CandidateAvailability::disabled(
+                            "OPEN_WITH_NO_CANDIDATES",
+                            "当前文件类型没有已发现的兼容应用",
+                        ),
+                    )
+                    .variant("status:unavailable")
+                    .label("没有可用的兼容应用")
+                    .icon_key("open-with")
+                    .order(10),
+                );
+            }
+            OpenWithCatalogStatus::Ready => {
+                let applications =
+                    normalized_open_with_applications(&context.open_with.applications);
+                if applications.is_empty() {
+                    candidates.push(
+                        ActionCandidate::with_availability(
+                            "open.with",
+                            CandidateAvailability::disabled(
+                                "OPEN_WITH_NO_CANDIDATES",
+                                "当前文件类型没有已发现的兼容应用",
+                            ),
+                        )
+                        .variant("status:unavailable")
+                        .label("没有可用的兼容应用")
+                        .icon_key("open-with")
+                        .order(10),
+                    );
+                } else {
+                    for (index, application) in applications.into_iter().enumerate() {
+                        let label = if application.is_default {
+                            format!("默认应用 — {}", application.display_name)
+                        } else {
+                            application.display_name.clone()
+                        };
+                        let order = 10u16.saturating_add(
+                            u16::try_from(index).unwrap_or(u16::MAX).saturating_mul(10),
+                        );
+                        candidates.push(
+                            ActionCandidate::available("open.with")
+                                .variant(format!("application:{}", application.application_id))
+                                .label(label)
+                                .icon_key("open-with")
+                                .order(order)
+                                .payload(ActionPayload::Application {
+                                    application_id: application.application_id,
+                                }),
+                        );
+                    }
+                }
+            }
+        }
+
+        candidates.push(
+            ActionCandidate::available("open.with.choose-other")
+                .label("选择其他应用…")
+                .icon_key("open-with")
+                .order(10_000),
+        );
+        candidates
+    }
+}
+
+fn normalized_open_with_applications(
+    applications: &[OpenWithApplication],
+) -> Vec<OpenWithApplication> {
+    let mut unique = Vec::<OpenWithApplication>::new();
+    for application in applications {
+        let application_id = application.application_id.trim();
+        let display_name = application.display_name.trim();
+        if application_id.is_empty() || display_name.is_empty() || !application.is_available {
+            continue;
+        }
+        if let Some(existing) = unique
+            .iter_mut()
+            .find(|existing| existing.application_id.eq_ignore_ascii_case(application_id))
+        {
+            existing.is_default |= application.is_default;
+            existing.is_recent |= application.is_recent;
+            continue;
+        }
+        unique.push(OpenWithApplication {
+            application_id: application_id.to_string(),
+            display_name: display_name.to_string(),
+            is_default: application.is_default,
+            is_recent: application.is_recent,
+            is_available: true,
+            unavailable_reason: None,
+        });
+    }
+
+    let default_index = unique.iter().position(|application| application.is_default);
+    let default = default_index.map(|index| unique.remove(index));
+    let recent_limit = 5usize;
+    let mut recent_indexes = Vec::new();
+    for (index, application) in unique.iter().enumerate() {
+        if application.is_recent && recent_indexes.len() < recent_limit {
+            recent_indexes.push(index);
+        }
+    }
+    let recent_ids = recent_indexes
+        .iter()
+        .map(|index| unique[*index].application_id.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut ordered = Vec::with_capacity(unique.len() + usize::from(default.is_some()));
+    if let Some(mut default) = default {
+        default.is_default = true;
+        default.is_recent = false;
+        ordered.push(default);
+    }
+    for index in recent_indexes {
+        let mut application = unique[index].clone();
+        application.is_recent = true;
+        ordered.push(application);
+    }
+    for application in unique {
+        if recent_ids.contains(&application.application_id.to_ascii_lowercase()) {
+            continue;
+        }
+        let mut application = application;
+        application.is_recent = false;
+        ordered.push(application);
+    }
+    ordered
 }
 
 impl ActionProvider for ArchiveActionProvider {
@@ -1787,6 +2024,38 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             None,
             0,
             "open",
+        ),
+        "open.with" => d(
+            action_id,
+            "打开方式",
+            ActionScope::Entity,
+            ActionEffect::ProcessLaunch,
+            ActionRisk::Low,
+            TargetRule::new(
+                &[TargetKind::File, TargetKind::Archive],
+                TargetCardinality::One,
+            ),
+            RootGroup::OpenAndLaunch,
+            MenuSection::Primary,
+            Some(SubmenuId::OpenWith),
+            10,
+            "open-with",
+        ),
+        "open.with.choose-other" => d(
+            action_id,
+            "选择其他应用…",
+            ActionScope::Entity,
+            ActionEffect::SystemUi,
+            ActionRisk::Low,
+            TargetRule::new(
+                &[TargetKind::File, TargetKind::Archive],
+                TargetCardinality::One,
+            ),
+            RootGroup::OpenAndLaunch,
+            MenuSection::Primary,
+            Some(SubmenuId::OpenWith),
+            10_000,
+            "open-with",
         ),
         "open.quick-look" => d(
             action_id,
@@ -2617,6 +2886,7 @@ mod tests {
                 native_plane_available: true,
                 ..ContextCapabilities::default()
             },
+            open_with: OpenWithCatalog::default(),
             policy: ContextPolicy {
                 hide_unavailable: true,
                 ..ContextPolicy::default()
@@ -2626,7 +2896,13 @@ mod tests {
 
     fn context_snapshot_targets(kinds: &[TargetKind], path_count: usize) -> Vec<ContextTarget> {
         (0..path_count)
-            .map(|index| ContextTarget::new(format!("/tmp/item-{index}"), "item", kinds[index]))
+            .map(|index| {
+                ContextTarget::new(
+                    format!("/tmp/item-{index}"),
+                    "item",
+                    kinds.get(index).copied().unwrap_or(kinds[0]),
+                )
+            })
             .collect()
     }
 
@@ -2881,6 +3157,229 @@ mod tests {
         ] {
             assert!(ids.contains(&id), "missing stable action id {id}: {ids:?}");
         }
+    }
+
+    fn open_with_actions(plan: &MenuPlan) -> Vec<&ResolvedAction> {
+        plan.find_submenu(OPEN_WITH_SUBMENU)
+            .map(|submenu| {
+                submenu
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.entries)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn open_with_is_limited_to_one_existing_readable_file() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 2);
+        context.open_with.status = OpenWithCatalogStatus::Ready;
+        assert!(
+            !compose_default_menu(&context)
+                .expect("multi-file plan")
+                .visible_action_ids()
+                .iter()
+                .any(|id| id.starts_with("open.with"))
+        );
+
+        let context = snapshot(ContextSurface::BrowserList, &[TargetKind::Directory], 1);
+        assert!(
+            !compose_default_menu(&context)
+                .expect("directory plan")
+                .visible_action_ids()
+                .iter()
+                .any(|id| id.starts_with("open.with"))
+        );
+
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.target_set.targets[0].exists = false;
+        assert!(
+            !compose_default_menu(&context)
+                .expect("missing file plan")
+                .visible_action_ids()
+                .iter()
+                .any(|id| id.starts_with("open.with"))
+        );
+
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.target_set.targets[0].readable = false;
+        assert!(
+            !compose_default_menu(&context)
+                .expect("unreadable file plan")
+                .visible_action_ids()
+                .iter()
+                .any(|id| id.starts_with("open.with"))
+        );
+
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.capabilities.is_shell_namespace = true;
+        assert!(
+            !compose_default_menu(&context)
+                .expect("shell namespace plan")
+                .visible_action_ids()
+                .iter()
+                .any(|id| id.starts_with("open.with"))
+        );
+    }
+
+    #[test]
+    fn open_with_orders_default_recent_then_system_and_filters_stale_duplicates() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.open_with = OpenWithCatalog {
+            status: OpenWithCatalogStatus::Ready,
+            applications: vec![
+                OpenWithApplication {
+                    application_id: "com.example.recent-b".to_string(),
+                    display_name: "Recent B".to_string(),
+                    is_default: false,
+                    is_recent: true,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+                OpenWithApplication {
+                    application_id: "com.example.default".to_string(),
+                    display_name: "Default".to_string(),
+                    is_default: true,
+                    is_recent: true,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+                OpenWithApplication {
+                    application_id: "com.example.recent-a".to_string(),
+                    display_name: "Recent A".to_string(),
+                    is_default: false,
+                    is_recent: true,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+                OpenWithApplication {
+                    application_id: "com.example.recent-b".to_string(),
+                    display_name: "Recent B Duplicate".to_string(),
+                    is_default: false,
+                    is_recent: true,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+                OpenWithApplication {
+                    application_id: "com.example.stale".to_string(),
+                    display_name: "Stale".to_string(),
+                    is_default: false,
+                    is_recent: true,
+                    is_available: false,
+                    unavailable_reason: Some("application is no longer installed".to_string()),
+                },
+                OpenWithApplication {
+                    application_id: "com.example.recent-c".to_string(),
+                    display_name: "Recent C".to_string(),
+                    is_default: false,
+                    is_recent: true,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+                OpenWithApplication {
+                    application_id: "com.example.recent-d".to_string(),
+                    display_name: "Recent D".to_string(),
+                    is_default: false,
+                    is_recent: true,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+                OpenWithApplication {
+                    application_id: "com.example.recent-e".to_string(),
+                    display_name: "Recent E".to_string(),
+                    is_default: false,
+                    is_recent: true,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+                OpenWithApplication {
+                    application_id: "com.example.remaining".to_string(),
+                    display_name: "Remaining".to_string(),
+                    is_default: false,
+                    is_recent: false,
+                    is_available: true,
+                    unavailable_reason: None,
+                },
+            ],
+        };
+
+        let plan = compose_default_menu(&context).expect("open with plan");
+        let actions = open_with_actions(&plan);
+        let labels = actions
+            .iter()
+            .map(|action| action.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "默认应用 — Default",
+                "Recent B",
+                "Recent A",
+                "Recent C",
+                "Recent D",
+                "Recent E",
+                "Remaining",
+                "选择其他应用…",
+            ]
+        );
+        assert_eq!(
+            actions[0].variant_key.as_deref(),
+            Some("application:com.example.default")
+        );
+        assert_eq!(
+            actions[0].payload,
+            ActionPayload::Application {
+                application_id: "com.example.default".to_string()
+            }
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.variant_key.as_deref()
+                    == Some("application:com.example.recent-b"))
+                .count(),
+            1
+        );
+        assert!(!actions.iter().any(|action| action.label.contains("Stale")));
+    }
+
+    #[test]
+    fn open_with_loading_keeps_chooser_usable_and_variant_identity_stable() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.open_with.status = OpenWithCatalogStatus::Loading;
+        let plan = compose_default_menu(&context).expect("loading plan");
+        let actions = open_with_actions(&plan);
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].action_id, "open.with");
+        assert_eq!(actions[0].variant_key.as_deref(), Some("status:loading"));
+        assert!(!actions[0].enabled);
+        assert_eq!(actions[1].action_id, "open.with.choose-other");
+        assert!(actions[1].enabled);
+    }
+
+    #[test]
+    fn unknown_action_candidates_are_reported_without_breaking_the_plan() {
+        struct UnknownProvider;
+        impl ActionProvider for UnknownProvider {
+            fn candidates(&self, _: &ContextSnapshot) -> Vec<ActionCandidate> {
+                vec![
+                    ActionCandidate::available("open.with"),
+                    ActionCandidate::available("not.a.real.action"),
+                    ActionCandidate::available("system.native-menu"),
+                ]
+            }
+        }
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.open_with.status = OpenWithCatalogStatus::Loading;
+        let plan = ContextMenuComposer::new(vec![Box::new(UnknownProvider)])
+            .compose(&context)
+            .expect("plan with unknown candidate");
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("not.a.real.action"))
+        );
     }
 
     #[test]

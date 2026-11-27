@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::archive;
 use crate::context_menu_model::{
     ContainerSnapshot, ContextCapabilities, ContextPlatform, ContextPolicy, ContextSnapshot,
-    ContextSurface, ContextTarget, MenuEntryPlan, MenuPlan, TargetKind, TargetSet,
-    compose_menu_with_fallback,
+    ContextSurface, ContextTarget, MenuEntryPlan, MenuPlan, OpenWithApplication, OpenWithCatalog,
+    OpenWithCatalogStatus, TargetKind, TargetSet, compose_menu_with_fallback,
 };
 
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
@@ -22,6 +22,31 @@ pub struct ContextMenuTargetDto {
     pub path: String,
     pub display_name: String,
     pub kind: String,
+    pub exists: bool,
+    pub readable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum OpenWithCatalogStatusDto {
+    Ready,
+    Loading,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct OpenWithApplicationDto {
+    pub application_id: String,
+    pub display_name: String,
+    pub is_default: bool,
+    pub is_recent: bool,
+    pub is_available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct OpenWithCatalogDto {
+    pub status: OpenWithCatalogStatusDto,
+    pub applications: Vec<OpenWithApplicationDto>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -54,6 +79,7 @@ pub struct ContextMenuRequestDto {
     pub mindmap_import_available: bool,
     pub is_shell_namespace: bool,
     pub native_plane_available: bool,
+    pub open_with: OpenWithCatalogDto,
     pub compact: bool,
     pub hide_unavailable: bool,
     pub confirm_high_risk: bool,
@@ -125,7 +151,11 @@ fn snapshot_from_request(request: ContextMenuRequestDto) -> ContextSnapshot {
             } else {
                 TargetKind::parse(&target.kind)
             };
-            ContextTarget::new(target.path, target.display_name, path_kind)
+            let mut context_target =
+                ContextTarget::new(target.path, target.display_name, path_kind);
+            context_target.exists = target.exists;
+            context_target.readable = target.readable;
+            context_target
         })
         .collect::<Vec<_>>();
     let primary = request
@@ -164,6 +194,26 @@ fn snapshot_from_request(request: ContextMenuRequestDto) -> ContextSnapshot {
             mindmap_import_available: request.mindmap_import_available,
             is_shell_namespace: request.is_shell_namespace,
             native_plane_available: request.native_plane_available,
+        },
+        open_with: OpenWithCatalog {
+            status: match request.open_with.status {
+                OpenWithCatalogStatusDto::Ready => OpenWithCatalogStatus::Ready,
+                OpenWithCatalogStatusDto::Loading => OpenWithCatalogStatus::Loading,
+                OpenWithCatalogStatusDto::Unavailable => OpenWithCatalogStatus::Unavailable,
+            },
+            applications: request
+                .open_with
+                .applications
+                .into_iter()
+                .map(|application| OpenWithApplication {
+                    application_id: application.application_id,
+                    display_name: application.display_name,
+                    is_default: application.is_default,
+                    is_recent: application.is_recent,
+                    is_available: application.is_available,
+                    unavailable_reason: application.unavailable_reason,
+                })
+                .collect(),
         },
         policy: ContextPolicy {
             compact: request.compact,
@@ -287,6 +337,8 @@ mod tests {
                 path: "/tmp/file.txt".to_string(),
                 display_name: "file.txt".to_string(),
                 kind: "file".to_string(),
+                exists: true,
+                readable: true,
             }],
             working_directory: "/tmp".to_string(),
             container_path: "/tmp".to_string(),
@@ -312,6 +364,10 @@ mod tests {
             mindmap_import_available: false,
             is_shell_namespace: false,
             native_plane_available: false,
+            open_with: OpenWithCatalogDto {
+                status: OpenWithCatalogStatusDto::Loading,
+                applications: Vec::new(),
+            },
             compact: true,
             hide_unavailable: true,
             confirm_high_risk: true,
