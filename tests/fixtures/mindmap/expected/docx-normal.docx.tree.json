@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "title": "DOCX Import Corpus",
+  "children": [
+    {
+      "title": "Architecture",
+      "kind": {
+        "role": "structure",
+        "kind": {
+          "heading": {
+            "level": 1
+          }
+        }
+      },
+      "task": null,
+      "children": [
+        {
+          "title": "Storage sentence one is long enough.",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Storage sentence two is long enough;",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Storage sentence three is long enough.",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Indexes",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "heading": {
+                "level": 2
+              }
+            }
+          },
+          "task": null,
+          "children": [
+            {
+              "title": "Index sentence one is long enough.",
+              "kind": {
+                "role": "content",
+                "kind": "sentence",
+                "split_from_paragraph": true
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            }
+          ],
+          "notes": [
+            {
+              "text": "Index sentence one is long enough.",
+              "format": "plain",
+              "label": "Original paragraph"
+            }
+          ],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        }
+      ],
+      "notes": [
+        {
+          "text": "Storage sentence one is long enough. Storage sentence two is long enough; Storage sentence three is long enough.",
+          "format": "plain",
+          "label": "Original paragraph"
+        }
+      ],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    }
+  ],
+  "notes": [],
+  "links": [],
+  "attachments": [],
+  "tables": [],
+  "warnings": [],
+  "stats": {
+    "split_fragments": 4,
+    "merged_fragments": 0,
+    "truncated_titles": 0,
+    "skipped_items": 0
+  }
+}

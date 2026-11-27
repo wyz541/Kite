@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "title": "OPML Import Corpus",
+  "children": [
+    {
+      "title": "Platforms",
+      "kind": {
+        "role": "structure",
+        "kind": "outline_item"
+      },
+      "task": "todo",
+      "children": [
+        {
+          "title": "Rust Core",
+          "kind": {
+            "role": "structure",
+            "kind": "outline_item"
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [
+            {
+              "label": "OPML url",
+              "target": "https://example.com/rust",
+              "kind": "hyperlink"
+            }
+          ],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "macOS",
+          "kind": {
+            "role": "structure",
+            "kind": "outline_item"
+          },
+          "task": "done",
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Windows",
+          "kind": {
+            "role": "structure",
+            "kind": "outline_item"
+          },
+          "task": "todo",
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        }
+      ],
+      "notes": [
+        {
+          "text": "Shared Rust Core.",
+          "format": "plain",
+          "label": "_note"
+        }
+      ],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    },
+    {
+      "title": "Delivery",
+      "kind": {
+        "role": "structure",
+        "kind": "outline_item"
+      },
+      "task": null,
+      "children": [],
+      "notes": [
+        {
+          "text": "One deterministic pipeline.",
+          "format": "plain",
+          "label": "description"
+        }
+      ],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    }
+  ],
+  "notes": [],
+  "links": [],
+  "attachments": [],
+  "tables": [],
+  "warnings": [],
+  "stats": {
+    "split_fragments": 0,
+    "merged_fragments": 0,
+    "truncated_titles": 0,
+    "skipped_items": 0
+  }
+}

@@ -1,0 +1,79 @@
+name: Mindmap macOS parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - build.rs
+      - src/mindmap.rs
+      - src/mindmap/**
+      - src/mindmap_ffi.rs
+      - src/mindmap_import/**
+      - src/mindmap_import_window.rs
+      - src/mindmap_ui_model.rs
+      - src/mindmap_window.rs
+      - tests/fixtures/mindmap/**
+      - tests/mindmap_*.rs
+      - .gitattributes
+      - .github/workflows/mindmap-macos.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - build.rs
+      - src/mindmap.rs
+      - src/mindmap/**
+      - src/mindmap_ffi.rs
+      - src/mindmap_import/**
+      - src/mindmap_import_window.rs
+      - src/mindmap_ui_model.rs
+      - src/mindmap_window.rs
+      - tests/fixtures/mindmap/**
+      - tests/mindmap_*.rs
+      - .gitattributes
+      - .github/workflows/mindmap-macos.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mindmap-macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mindmap-macos:
+    name: Mindmap macOS/Rust parity
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Mindmap import and format tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib mindmap -- --test-threads=1
+          for test in             mindmap_ffi_format             mindmap_graph_style             mindmap_import             mindmap_import_adapters             mindmap_import_corpus             mindmap_import_docx_txt             mindmap_import_service_ffi             mindmap_markers_todo             mindmap_topic_style_date             mindmap_windows_model             mindmap_xmind
+          do
+            cargo test --locked --test "$test" -- --test-threads=1
+          done

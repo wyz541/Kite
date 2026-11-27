@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "title": "text-normal",
+  "children": [
+    {
+      "title": "Kite Import Corpus",
+      "kind": {
+        "role": "structure",
+        "kind": {
+          "heading": {
+            "level": 1
+          }
+        }
+      },
+      "task": null,
+      "children": [],
+      "notes": [],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    },
+    {
+      "title": "性能治理",
+      "kind": {
+        "role": "structure",
+        "kind": {
+          "heading": {
+            "level": 1
+          }
+        }
+      },
+      "task": null,
+      "children": [
+        {
+          "title": "接口响应时间过长。",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "主要瓶颈在索引缺失；",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "其次是重复查询。",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "版本 v1.2.3 保持不变。",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        }
+      ],
+      "notes": [
+        {
+          "text": "接口响应时间过长。主要瓶颈在索引缺失；其次是重复查询。版本 v1.2.3 保持不变。",
+          "format": "plain",
+          "label": "Original paragraph"
+        }
+      ],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    },
+    {
+      "title": "文档转换",
+      "kind": {
+        "role": "structure",
+        "kind": {
+          "heading": {
+            "level": 1
+          }
+        }
+      },
+      "task": null,
+      "children": [
+        {
+          "title": "Markdown",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "list_item": {
+                "ordered": false,
+                "level": 1
+              }
+            }
+          },
+          "task": null,
+          "children": [],
+          "notes": [
+            {
+              "text": "- Markdown",
+              "format": "plain",
+              "label": "Original list item"
+            }
+          ],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "标题与列表",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "list_item": {
+                "ordered": false,
+                "level": 1
+              }
+            }
+          },
+          "task": null,
+          "children": [],
+          "notes": [
+            {
+              "text": "- 标题与列表",
+              "format": "plain",
+              "label": "Original list item"
+            }
+          ],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "DOCX",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "list_item": {
+                "ordered": false,
+                "level": 1
+              }
+            }
+          },
+          "task": null,
+          "children": [],
+          "notes": [
+            {
+              "text": "- DOCX",
+              "format": "plain",
+              "label": "Original list item"
+            }
+          ],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        }
+      ],
+      "notes": [],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    }
+  ],
+  "notes": [],
+  "links": [],
+  "attachments": [],
+  "tables": [],
+  "warnings": [],
+  "stats": {
+    "split_fragments": 4,
+    "merged_fragments": 0,
+    "truncated_titles": 0,
+    "skipped_items": 0
+  }
+}

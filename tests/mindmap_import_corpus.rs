@@ -403,6 +403,43 @@ fn normal_corpus_has_expected_hierarchy_notes_warnings_and_round_trips() {
 }
 
 #[test]
+fn normal_corpus_tree_projection_matches_cross_platform_golden() {
+    let manifest = load_manifest();
+    let expected_dir = corpus_root()
+        .parent()
+        .expect("corpus parent")
+        .join("expected");
+    fs::create_dir_all(&expected_dir).expect("create golden directory");
+    let update = std::env::var_os("UPDATE_MINDMAP_TREE_GOLDENS").is_some();
+
+    for entry in &manifest.fixtures {
+        if entry.role != "normal" {
+            continue;
+        }
+        let document = document(&manifest, &entry.path);
+        let mut projection = serde_json::to_value(&document).expect("serialize tree projection");
+        strip_source_locations(&mut projection);
+        let mut expected =
+            serde_json::to_vec_pretty(&projection).expect("serialize pretty tree projection");
+        expected.push(b'\n');
+        let golden_path = expected_dir.join(format!("{}.tree.json", entry.path));
+
+        if update {
+            fs::write(&golden_path, &expected).expect("write tree golden");
+            continue;
+        }
+
+        let actual = fs::read(&golden_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", golden_path.display()));
+        assert_eq!(
+            actual, expected,
+            "cross-platform tree drift for {}; rerun with UPDATE_MINDMAP_TREE_GOLDENS=1 only after reviewing the change",
+            entry.path
+        );
+    }
+}
+
+#[test]
 fn edge_corpus_reports_degradation_and_still_produces_valid_xmind() {
     let manifest = load_manifest();
     let options = corpus_options();
@@ -626,6 +663,23 @@ fn synthetic_markdown(topic_count: usize) -> String {
         ));
     }
     output
+}
+
+fn strip_source_locations(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("source");
+            for child in object.values_mut() {
+                strip_source_locations(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                strip_source_locations(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn add_unknown_fields_and_entry(bytes: &[u8]) -> Vec<u8> {
