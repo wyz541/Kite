@@ -180,6 +180,7 @@ struct SidebarItem {
     active: bool,
     is_directory: bool,
     favorite: bool,
+    surface: kite_core::context_menu_model::ContextSurface,
 }
 
 #[derive(Clone)]
@@ -3538,6 +3539,12 @@ impl KiteApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) = validate_context_action_targets(action) {
+            self.notice = None;
+            self.error = Some(error.into());
+            cx.notify();
+            return;
+        }
         match action.command {
             ContextMenuCommand::Open => self.open_path(action.target.clone(), window, cx),
             ContextMenuCommand::OpenWithApplication => {
@@ -3616,6 +3623,7 @@ impl KiteApp {
             ContextMenuCommand::Recycle => {
                 self.confirm_recycle_paths(action.paths.clone(), window, cx)
             }
+            ContextMenuCommand::Reveal => self.reveal_agent_path(action.target.clone(), window, cx),
             ContextMenuCommand::CompressZip => {
                 self.compress_path(action.target.clone(), ArchiveFormat::Zip, window, cx)
             }
@@ -3729,7 +3737,7 @@ impl KiteApp {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = receiver.await;
-            let _ = this.update_in(cx, |this, _, cx| match result {
+            let _ = this.update_in(cx, |this, _, _cx| match result {
                 Ok(Ok(true)) => {
                     this.notice = None;
                     this.error = None;
@@ -4796,6 +4804,7 @@ impl KiteApp {
         self.set_clipboard_paths(paths, mode, cx);
     }
 
+    #[allow(dead_code)] // Kept as a single-path convenience under feature-specific builds.
     fn set_clipboard_path(&mut self, path: PathBuf, mode: ClipboardMode, cx: &mut Context<Self>) {
         self.set_clipboard_paths(vec![path], mode, cx);
     }
@@ -5670,6 +5679,7 @@ impl KiteApp {
         self.confirm_recycle_paths(paths, window, cx);
     }
 
+    #[allow(dead_code)] // Kept as a single-path convenience under feature-specific builds.
     fn confirm_recycle_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_recycle_paths(vec![path], window, cx);
     }
@@ -6379,6 +6389,7 @@ impl KiteApp {
             active,
             is_directory,
             favorite,
+            surface,
         } = item;
         let accent = cx.theme().accent;
         let active_fg = cx.theme().accent_foreground;
@@ -6387,42 +6398,22 @@ impl KiteApp {
         let row_id = id.clone();
         let navigation_path = path.clone();
         let context = self.focus_handle.clone();
-        let open_action = ContextMenuAction {
-            target: path.clone(),
-            paths: vec![path.clone()],
-            working_directory: path.clone(),
-            command: ContextMenuCommand::Open,
-            action_id: "open.default".to_string(),
-            variant_key: None,
-            payload: ContextMenuActionPayload::None,
+        let working_directory = if is_directory {
+            path.clone()
+        } else {
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| path.clone())
         };
-        let copy_path_action = ContextMenuAction {
-            target: path.clone(),
-            paths: vec![path.clone()],
-            working_directory: path.clone(),
-            command: ContextMenuCommand::CopyPath,
-            action_id: "clipboard.copy-path".to_string(),
-            variant_key: None,
-            payload: ContextMenuActionPayload::None,
-        };
-        let properties_action = ContextMenuAction {
-            target: path.clone(),
-            paths: vec![path.clone()],
-            working_directory: path.clone(),
-            command: ContextMenuCommand::ShowProperties,
-            action_id: "system.properties".to_string(),
-            variant_key: None,
-            payload: ContextMenuActionPayload::None,
-        };
-        let remove_action = favorite.then(|| ContextMenuAction {
-            target: path.clone(),
-            paths: vec![path.clone()],
-            working_directory: path.clone(),
-            command: ContextMenuCommand::RemoveFavorite,
-            action_id: "favorite.remove".to_string(),
-            variant_key: None,
-            payload: ContextMenuActionPayload::None,
-        });
+        let context_target = ContextMenuTarget::entry(
+            path.clone(),
+            label.to_string(),
+            is_directory,
+            working_directory,
+            ContextMenuCapabilities::for_path(&path, false, false, false, false),
+        )
+        .with_surface(surface)
+        .with_favorite(favorite);
         let storage_row = storage.is_some();
 
         let main_content: AnyElement = if let Some(storage) = storage {
@@ -6569,33 +6560,9 @@ impl KiteApp {
                     this.open_path(navigation_path.clone(), window, cx);
                 }
             }))
-            .context_menu(move |mut menu, window, cx| {
+            .context_menu(move |menu, window, cx| {
                 context.focus(window, cx);
-                menu = menu.menu_with_icon(
-                    "打开",
-                    IconName::FolderOpen,
-                    Box::new(open_action.clone()),
-                );
-                menu = menu.menu_with_icon(
-                    "复制完整路径",
-                    IconName::Link,
-                    Box::new(copy_path_action.clone()),
-                );
-                menu = menu.separator();
-                menu = menu.menu_with_icon(
-                    "属性…",
-                    IconName::Info,
-                    Box::new(properties_action.clone()),
-                );
-                if let Some(remove_action) = remove_action.as_ref() {
-                    menu = menu.separator();
-                    menu = menu.menu_with_icon(
-                        "从收藏移除",
-                        IconName::StarMinus,
-                        Box::new(remove_action.clone()),
-                    );
-                }
-                menu
+                render_context_menu(menu, &context_target, context.clone(), window, cx)
             });
 
         v_flex().w_full().gap_0p5().child(row).into_any_element()
@@ -6623,6 +6590,7 @@ impl KiteApp {
                 active,
                 is_directory: favorite.is_directory,
                 favorite: true,
+                surface: kite_core::context_menu_model::ContextSurface::SidebarFavorites,
             },
             cx,
         )
@@ -6633,24 +6601,14 @@ impl KiteApp {
         let hover_color = muted.opacity(0.12);
         let clicked = device.clone();
         let path = PathBuf::from(&device.shell_path);
-        let open_action = ContextMenuAction {
-            target: path.clone(),
-            paths: vec![path.clone()],
-            working_directory: path.clone(),
-            command: ContextMenuCommand::Open,
-            action_id: "open.default".to_string(),
-            variant_key: None,
-            payload: ContextMenuActionPayload::None,
-        };
-        let properties_action = ContextMenuAction {
-            paths: vec![path.clone()],
-            target: path,
-            working_directory: PathBuf::from(&device.shell_path),
-            command: ContextMenuCommand::ShowProperties,
-            action_id: "system.properties".to_string(),
-            variant_key: None,
-            payload: ContextMenuActionPayload::None,
-        };
+        let context_target = ContextMenuTarget::entry(
+            path.clone(),
+            device.name.clone(),
+            true,
+            path.clone(),
+            ContextMenuCapabilities::for_path(&path, false, false, false, false),
+        )
+        .with_surface(kite_core::context_menu_model::ContextSurface::SidebarVolumes);
         let context = self.focus_handle.clone();
         let active = same_path(&self.current_dir, Path::new(&device.shell_path));
         div()
@@ -6691,20 +6649,9 @@ impl KiteApp {
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.open_portable_device(clicked.clone(), window, cx);
             }))
-            .context_menu(move |mut menu, window, cx| {
+            .context_menu(move |menu, window, cx| {
                 context.focus(window, cx);
-                menu = menu.menu_with_icon(
-                    "打开",
-                    IconName::FolderOpen,
-                    Box::new(open_action.clone()),
-                );
-                menu = menu.separator();
-                menu = menu.menu_with_icon(
-                    "属性…",
-                    IconName::Info,
-                    Box::new(properties_action.clone()),
-                );
-                menu
+                render_context_menu(menu, &context_target, context.clone(), window, cx)
             })
             .into_any_element()
     }
@@ -6748,6 +6695,7 @@ impl KiteApp {
                     active,
                     is_directory: true,
                     favorite: false,
+                    surface: kite_core::context_menu_model::ContextSurface::SidebarLocations,
                 },
                 cx,
             ));
@@ -6802,6 +6750,7 @@ impl KiteApp {
                         active,
                         is_directory: true,
                         favorite: false,
+                        surface: kite_core::context_menu_model::ContextSurface::SidebarVolumes,
                     },
                     cx,
                 ));
@@ -6833,6 +6782,7 @@ impl KiteApp {
                     active,
                     is_directory: true,
                     favorite: false,
+                    surface: kite_core::context_menu_model::ContextSurface::SidebarVolumes,
                 },
                 cx,
             ));
@@ -7193,11 +7143,31 @@ impl KiteApp {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let copy_text = preview_info_text(entry);
-        let preview_more_items = preview_more_menu_items();
-        let preview_more_target = entry.path.clone();
-        let preview_more_working_directory = self.current_dir.clone();
         let preview_window_entry = entry.clone();
-        let preview_more_supports_local_ops = !shell_fs::is_shell_namespace_path(&entry.path);
+        let preview_menu_target = ContextMenuTarget::entry(
+            entry.path.clone(),
+            entry.name.clone(),
+            entry.is_dir(),
+            entry
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.current_dir.clone()),
+            ContextMenuCapabilities::for_path(
+                &entry.path,
+                false,
+                self.clipboard.borrow().is_some() || file_clipboard::has_files(),
+                entry.git_status.is_some() || self.current_git_available(cx),
+                entry.svn_status.is_some()
+                    || self
+                        .column_panes
+                        .last()
+                        .is_some_and(|pane| pane.svn_available),
+            ),
+        )
+        .with_agent_available(self.agent_available())
+        .with_surface(kite_core::context_menu_model::ContextSurface::Preview);
+        let preview_menu_context = self.focus_handle.clone();
         let editor_preview = is_editor_preview_entry(entry);
         let open_label = if editor_preview && text_editor::is_markdown_path(&entry.path) {
             "在窗口中编辑和预览 Markdown"
@@ -7534,32 +7504,18 @@ impl KiteApp {
                             .icon(IconName::Ellipsis)
                             .tooltip("更多预览选项")
                             .accessibility_label("更多预览选项")
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                                for (index, (label, icon, command)) in
-                                    preview_more_items.iter().enumerate()
-                                {
-                                    if matches!(index, 3 | 4) {
-                                        menu = menu.separator();
-                                    }
-                                    menu = menu.menu_with_icon_and_disabled(
-                                        *label,
-                                        *icon,
-                                        Box::new(ContextMenuAction {
-                                            target: preview_more_target.clone(),
-                                            paths: vec![preview_more_target.clone()],
-                                            working_directory: preview_more_working_directory
-                                                .clone(),
-                                            command: *command,
-                                            action_id: "preview.more".to_string(),
-                                            variant_key: Some(format!("preview-more:{index}")),
-                                            payload: ContextMenuActionPayload::None,
-                                        }),
-                                        !preview_more_supports_local_ops
-                                            && *command == ContextMenuCommand::Copy,
-                                    );
-                                }
-                                menu
-                            }),
+                            .dropdown_menu_with_anchor(
+                                Anchor::TopRight,
+                                move |menu, window, cx| {
+                                    render_context_menu(
+                                        menu,
+                                        &preview_menu_target,
+                                        preview_menu_context.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            ),
                     )
                     .child(
                         Button::new("preview-close")
@@ -8416,6 +8372,7 @@ impl KiteApp {
         let display_rows = pane.display_rows();
         let column_path = pane.path.clone();
         let loading = pane.loading;
+        let search_results_surface = pane.search_query.is_some();
         let can_paste = self.clipboard.borrow().is_some() || file_clipboard::has_files();
         let git_available = pane.git_available;
         let svn_available = pane.svn_available;
@@ -8649,7 +8606,12 @@ impl KiteApp {
                         capabilities,
                     )
                     .with_agent_available(agent_available)
-                    .with_paths(menu_paths.clone());
+                    .with_paths(menu_paths.clone())
+                    .with_surface(if search_results_surface {
+                        kite_core::context_menu_model::ContextSurface::SearchResults
+                    } else {
+                        kite_core::context_menu_model::ContextSurface::BrowserColumns
+                    });
                     render_context_menu(menu, &target, row_action_context.clone(), window, cx)
                 })
                 .into_any_element();
@@ -10810,22 +10772,39 @@ where
         .into_any_element()
 }
 
-fn preview_more_menu_items() -> [(&'static str, IconName, ContextMenuCommand); 5] {
-    [
-        ("打开文件", IconName::FolderOpen, ContextMenuCommand::Open),
-        ("复制", IconName::Copy, ContextMenuCommand::Copy),
-        ("复制完整路径", IconName::Link, ContextMenuCommand::CopyPath),
-        (
-            "文件属性…",
-            IconName::Info,
-            ContextMenuCommand::ShowProperties,
-        ),
-        (
-            "显示原生菜单…",
-            IconName::Ellipsis,
-            ContextMenuCommand::SystemMenu,
-        ),
-    ]
+fn validate_context_action_targets(action: &ContextMenuAction) -> Result<(), String> {
+    if action.target_kinds.len() != action.paths.len() {
+        return if action.target_kinds.is_empty() {
+            Ok(())
+        } else {
+            Err("右键目标快照已失效，请重新选择目标。".to_string())
+        };
+    }
+    for (path, expected_kind) in action.paths.iter().zip(action.target_kinds.iter()) {
+        let shell_namespace = shell_fs::is_shell_namespace_path(path);
+        let exists = if shell_namespace {
+            shell_fs::exists(path)
+        } else {
+            path.exists()
+        };
+        if !exists {
+            return Err("右键目标已不存在，请重新选择目标。".to_string());
+        }
+        let is_directory = if shell_namespace {
+            shell_fs::is_directory(path)
+        } else {
+            path.is_dir()
+        };
+        let kind_matches = match expected_kind.as_str() {
+            "directory" | "repository-root" | "workspace-root" | "device-container" => is_directory,
+            "file" | "archive" | "device-item" => !is_directory,
+            _ => true,
+        };
+        if !kind_matches {
+            return Err("右键目标类型已变化，请重新选择目标。".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn preview_info_text(entry: &FileEntry) -> String {
@@ -11237,6 +11216,11 @@ fn column_context_menu_target(pane: &ColumnPane, can_paste: bool) -> ContextMenu
             pane.svn_available,
         ),
     )
+    .with_surface(if pane.search_query.is_some() {
+        kite_core::context_menu_model::ContextSurface::SearchResults
+    } else {
+        kite_core::context_menu_model::ContextSurface::Background
+    })
 }
 
 fn path_segments(path: &Path, final_is_file: bool) -> Vec<PathSegment> {
@@ -12261,6 +12245,11 @@ mod path_bar_tests {
         assert_eq!(target.title, "Documents");
         assert!(target.is_dir);
         assert!(target.git_available);
+        assert!(target.paths.is_empty());
+        assert_eq!(
+            target.surface,
+            kite_core::context_menu_model::ContextSurface::Background
+        );
     }
 
     #[test]
@@ -12299,34 +12288,15 @@ mod path_bar_tests {
 #[cfg(test)]
 mod preview_tests {
     use super::{
-        is_markdown_preview_entry, is_text_preview_entry, preview_info_text,
-        preview_more_menu_items, preview_text_lines, read_log_preview,
+        is_markdown_preview_entry, is_text_preview_entry, preview_info_text, preview_text_lines,
+        read_log_preview,
     };
-    use crate::actions::ContextMenuCommand;
     use crate::fs::{EntryKind, FileEntry, VcsStatus};
     use gpui_kit::SharedString;
     use kite_core::preview::read_text_preview;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn preview_more_menu_contains_file_actions() {
-        let commands = preview_more_menu_items()
-            .iter()
-            .map(|(_, _, command)| *command)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            commands,
-            vec![
-                ContextMenuCommand::Open,
-                ContextMenuCommand::Copy,
-                ContextMenuCommand::CopyPath,
-                ContextMenuCommand::ShowProperties,
-                ContextMenuCommand::SystemMenu,
-            ]
-        );
-    }
 
     #[test]
     fn txt_and_markdown_entries_use_markdown_preview() {

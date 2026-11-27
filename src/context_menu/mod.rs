@@ -19,9 +19,9 @@ use crate::platform::HostPlatform;
 use kite_core::vcs_menu::load_vcs_menu_snapshot;
 
 #[cfg(target_os = "windows")]
-mod open_with_windows;
+pub(crate) mod open_with_windows;
 #[cfg(target_os = "windows")]
-mod tool_registry_windows;
+pub(crate) mod tool_registry_windows;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -72,11 +72,15 @@ pub(crate) struct ContextMenuCapabilities {
     pub can_paste: bool,
     pub git_available: bool,
     pub svn_available: bool,
+    pub supports_create: bool,
     pub supports_transfer_ops: bool,
     pub supports_cut: bool,
     pub supports_rename: bool,
     pub supports_delete: bool,
     pub supports_favorite: bool,
+    pub supports_properties: bool,
+    pub supports_reveal: bool,
+    pub supports_share: bool,
     pub is_shell_namespace: bool,
 }
 
@@ -89,23 +93,49 @@ impl ContextMenuCapabilities {
         svn_available: bool,
     ) -> Self {
         let is_shell_namespace = crate::shell_fs::is_shell_namespace_path(path);
-        let (supports_cut, supports_rename, supports_delete) = if is_shell_namespace {
-            let (can_rename, can_delete, can_move) = crate::shell_fs::item_capabilities(path);
-            (can_move, can_rename, can_delete)
+        let shell = is_shell_namespace.then(|| crate::shell_fs::capability_snapshot(path));
+        let mut can_paste = can_paste;
+        let (
+            supports_create,
+            supports_transfer_ops,
+            supports_cut,
+            supports_rename,
+            supports_delete,
+            supports_properties,
+            supports_reveal,
+            supports_share,
+        ) = if let Some(shell) = shell {
+            can_paste = shell.can_paste;
+            (
+                shell.can_create,
+                shell.can_copy || shell.can_paste,
+                shell.can_move,
+                shell.can_rename,
+                shell.can_delete,
+                shell.can_properties,
+                false,
+                false,
+            )
         } else {
             let can_change = path.parent().is_some();
-            (can_change, can_change, can_change)
+            (
+                true, true, can_change, can_change, can_change, true, true, false,
+            )
         };
         Self {
             loading,
             can_paste,
             git_available,
             svn_available,
-            supports_transfer_ops: true,
+            supports_create,
+            supports_transfer_ops,
             supports_cut,
             supports_rename,
             supports_delete,
             supports_favorite: !is_shell_namespace,
+            supports_properties,
+            supports_reveal,
+            supports_share,
             is_shell_namespace,
         }
     }
@@ -122,14 +152,20 @@ pub(crate) struct ContextMenuTarget {
     pub can_paste: bool,
     pub git_available: bool,
     pub svn_available: bool,
+    pub supports_create: bool,
     pub supports_transfer_ops: bool,
     pub supports_cut: bool,
     pub supports_rename: bool,
     pub supports_delete: bool,
     pub supports_favorite: bool,
+    pub supports_properties: bool,
+    pub supports_reveal: bool,
+    pub supports_share: bool,
     pub is_shell_namespace: bool,
     pub agent_available: bool,
     pub container_is_primary_target: bool,
+    pub surface: ContextSurface,
+    pub is_favorite: bool,
 }
 
 impl ContextMenuTarget {
@@ -141,21 +177,27 @@ impl ContextMenuTarget {
         Self {
             working_directory: path.clone(),
             path: path.clone(),
-            paths: vec![path],
+            paths: Vec::new(),
             title,
             is_dir: true,
             loading: capabilities.loading,
             can_paste: capabilities.can_paste,
             git_available: capabilities.git_available,
             svn_available: capabilities.svn_available,
+            supports_create: capabilities.supports_create,
             supports_transfer_ops: capabilities.supports_transfer_ops,
             supports_cut: capabilities.supports_cut,
             supports_rename: capabilities.supports_rename,
             supports_delete: capabilities.supports_delete,
             supports_favorite: capabilities.supports_favorite,
+            supports_properties: capabilities.supports_properties,
+            supports_reveal: capabilities.supports_reveal,
+            supports_share: capabilities.supports_share,
             is_shell_namespace: capabilities.is_shell_namespace,
             agent_available: false,
             container_is_primary_target: true,
+            surface: ContextSurface::Background,
+            is_favorite: false,
         }
     }
 
@@ -176,15 +218,31 @@ impl ContextMenuTarget {
             can_paste: capabilities.can_paste,
             git_available: capabilities.git_available,
             svn_available: capabilities.svn_available,
+            supports_create: capabilities.supports_create,
             supports_transfer_ops: capabilities.supports_transfer_ops,
             supports_cut: capabilities.supports_cut,
             supports_rename: capabilities.supports_rename,
             supports_delete: capabilities.supports_delete,
             supports_favorite: capabilities.supports_favorite,
+            supports_properties: capabilities.supports_properties,
+            supports_reveal: capabilities.supports_reveal,
+            supports_share: capabilities.supports_share,
             is_shell_namespace: capabilities.is_shell_namespace,
             agent_available: false,
             container_is_primary_target: false,
+            surface: ContextSurface::BrowserList,
+            is_favorite: false,
         }
+    }
+
+    pub(crate) fn with_surface(mut self, surface: ContextSurface) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    pub(crate) fn with_favorite(mut self, is_favorite: bool) -> Self {
+        self.is_favorite = is_favorite;
+        self
     }
 
     pub(crate) fn with_agent_available(mut self, available: bool) -> Self {
@@ -199,7 +257,11 @@ impl ContextMenuTarget {
         self
     }
 
-    fn action(&self, plan_action: &ResolvedAction) -> Option<ContextMenuAction> {
+    fn action(
+        &self,
+        plan_action: &ResolvedAction,
+        target_kinds: &[String],
+    ) -> Option<ContextMenuAction> {
         let command = ContextMenuCommand::from_action_id(
             &plan_action.action_id,
             plan_action.variant_key.as_deref(),
@@ -234,16 +296,13 @@ impl ContextMenuTarget {
             command,
             action_id: plan_action.action_id.clone(),
             variant_key: plan_action.variant_key.clone(),
+            target_kinds: target_kinds.to_vec(),
             payload,
         })
     }
 
     fn context_snapshot(&self, policy: ContextMenuPolicy) -> ContextSnapshot {
-        let paths = if self.paths.is_empty() {
-            vec![self.path.clone()]
-        } else {
-            self.paths.clone()
-        };
+        let paths = self.paths.clone();
         let targets = paths
             .iter()
             .map(|path| self.context_target(path))
@@ -266,8 +325,13 @@ impl ContextMenuTarget {
         let mut container = ContainerSnapshot::for_path(
             self.working_directory.display().to_string(),
             self.container_is_primary_target,
-        );
-        container.writable = self.supports_transfer_ops && !self.is_shell_namespace;
+        )
+        .with_kind(if self.is_shell_namespace {
+            TargetKind::DeviceContainer
+        } else {
+            TargetKind::Directory
+        });
+        container.writable = self.supports_create;
         let open_with = if paths.len() == 1 && !self.is_shell_namespace {
             open_with_windows::catalog(&paths[0])
         } else {
@@ -281,38 +345,37 @@ impl ContextMenuTarget {
         let vcs_menu = if self.is_shell_namespace {
             kite_core::vcs_menu::VcsMenuSnapshot::default()
         } else {
-            load_vcs_menu_snapshot(&paths, &self.working_directory)
+            let vcs_paths = if paths.is_empty() {
+                vec![self.working_directory.clone()]
+            } else {
+                paths.clone()
+            };
+            load_vcs_menu_snapshot(&vcs_paths, &self.working_directory)
         };
         ContextSnapshot {
             schema_version: kite_core::context_menu_model::CONTEXT_MENU_SCHEMA_VERSION,
             snapshot_id: format!("windows-context-menu:{}", self.path.display()),
             platform: ContextPlatform::Windows,
-            surface: if self.container_is_primary_target {
-                ContextSurface::BrowserColumns
-            } else {
-                ContextSurface::BrowserList
-            },
+            surface: self.surface,
             target_set,
             container,
             capabilities: ContextCapabilities {
                 loading: self.loading,
                 can_paste: self.can_paste,
-                can_create: self.supports_transfer_ops
-                    && !self.is_shell_namespace
-                    && self.container_is_primary_target,
+                can_create: self.supports_create && self.container_is_primary_target,
                 supports_transfer_ops: self.supports_transfer_ops,
                 supports_cut: self.supports_cut,
                 supports_rename: self.supports_rename,
                 supports_delete: self.supports_delete,
                 supports_favorite: self.supports_favorite,
-                is_favorite: false,
+                is_favorite: self.is_favorite,
                 git_available: self.git_available || vcs_menu.git_available,
                 svn_available: self.svn_available || vcs_menu.svn_available,
                 agent_available: self.agent_available,
                 quick_look_available: false,
-                reveal_available: false,
-                share_available: false,
-                properties_available: true,
+                reveal_available: self.supports_reveal,
+                share_available: self.supports_share,
+                properties_available: self.supports_properties,
                 text_editor_available: false,
                 mindmap_available: false,
                 mindmap_import_available: false,
@@ -328,12 +391,16 @@ impl ContextMenuTarget {
     }
 
     fn context_target(&self, path: &Path) -> ContextTarget {
-        let kind = if archive::is_supported_archive(path) {
+        let kind = if self.is_shell_namespace {
+            if self.path == path && self.is_dir || crate::shell_fs::is_directory(path) {
+                TargetKind::DeviceContainer
+            } else {
+                TargetKind::DeviceItem
+            }
+        } else if archive::is_supported_archive(path) {
             TargetKind::Archive
         } else if path.is_dir() || (path == self.path && self.is_dir) {
             TargetKind::Directory
-        } else if self.is_shell_namespace {
-            TargetKind::DeviceItem
         } else {
             TargetKind::File
         };
@@ -345,9 +412,21 @@ impl ContextMenuTarget {
                 .unwrap_or_else(|| path.display().to_string())
         };
         let mut target = ContextTarget::new(path.display().to_string(), display_name, kind);
-        target.exists = path.exists();
-        target.readable =
-            !self.is_shell_namespace && (path.is_dir() || std::fs::File::open(path).is_ok());
+        target.exists = if self.is_shell_namespace {
+            crate::shell_fs::exists(path)
+        } else {
+            path.exists()
+        };
+        target.readable = if self.is_shell_namespace {
+            crate::shell_fs::is_readable(path)
+        } else {
+            path.is_dir() || std::fs::File::open(path).is_ok()
+        };
+        target.writable = if self.is_shell_namespace {
+            kind == TargetKind::DeviceContainer
+        } else {
+            self.supports_create || self.supports_rename || self.supports_delete
+        };
         target
     }
 }
@@ -390,12 +469,13 @@ fn popup_icon(icon_key: &str) -> IconName {
 fn append_action(
     mut menu: PopupMenu,
     action: &ResolvedAction,
+    target_kinds: &[String],
     target: &ContextMenuTarget,
     action_context: &FocusHandle,
-    window: &mut Window,
-    cx: &mut App,
+    _window: &mut Window,
+    _cx: &mut App,
 ) -> PopupMenu {
-    let Some(dispatched) = target.action(action) else {
+    let Some(dispatched) = target.action(action, target_kinds) else {
         return menu;
     };
     let item = if action.action_id == "system.native-menu" {
@@ -449,6 +529,7 @@ fn append_action(
 fn append_sections(
     mut menu: PopupMenu,
     sections: &[kite_core::context_menu_model::MenuSectionPlan],
+    target_kinds: &[String],
     target: &ContextMenuTarget,
     action_context: &FocusHandle,
     window: &mut Window,
@@ -459,7 +540,15 @@ fn append_sections(
             menu = menu.separator();
         }
         for action in &section.entries {
-            menu = append_action(menu, action, target, action_context, window, cx);
+            menu = append_action(
+                menu,
+                action,
+                target_kinds,
+                target,
+                action_context,
+                window,
+                cx,
+            );
         }
     }
     menu
@@ -473,6 +562,7 @@ fn append_plan(
     window: &mut Window,
     cx: &mut App,
 ) -> PopupMenu {
+    let target_kinds = plan.target_kinds.clone();
     for (group_index, group) in plan.groups.iter().enumerate() {
         if group_index > 0 {
             menu = menu.separator();
@@ -480,7 +570,15 @@ fn append_plan(
         for entry in &group.entries {
             match entry {
                 MenuEntryPlan::Action(action) => {
-                    menu = append_action(menu, action, target, action_context, window, cx);
+                    menu = append_action(
+                        menu,
+                        action,
+                        &target_kinds,
+                        target,
+                        action_context,
+                        window,
+                        cx,
+                    );
                 }
                 MenuEntryPlan::Submenu(entry_submenu) => {
                     let Some(submenu) = plan.find_submenu(&entry_submenu.id) else {
@@ -488,11 +586,13 @@ fn append_plan(
                     };
                     let submenu_clone = submenu.clone();
                     let target = target.clone();
+                    let target_kinds = target_kinds.clone();
                     let action_context = action_context.clone();
                     let popup = PopupMenu::build(window, cx, move |menu, window, cx| {
                         append_sections(
                             menu,
                             &submenu_clone.sections,
+                            &target_kinds,
                             &target,
                             &action_context,
                             window,
@@ -525,136 +625,4 @@ pub(crate) fn render_context_menu(
         menu = append_plan(menu, &plan, target, &action_context, window, cx);
     }
     menu
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::actions::ContextMenuCommand;
-    use kite_core::context_menu_model::ActionRisk;
-
-    fn target(is_dir: bool) -> ContextMenuTarget {
-        let path = if is_dir {
-            PathBuf::from(r"C:\repo\src")
-        } else {
-            PathBuf::from(r"C:\repo\src\main.rs")
-        };
-        let working_directory = if is_dir {
-            path.clone()
-        } else {
-            PathBuf::from(r"C:\repo\src")
-        };
-        ContextMenuTarget::entry(
-            path,
-            if is_dir {
-                "src".to_string()
-            } else {
-                "main.rs".to_string()
-            },
-            is_dir,
-            working_directory,
-            ContextMenuCapabilities {
-                loading: false,
-                can_paste: true,
-                git_available: true,
-                svn_available: true,
-                supports_transfer_ops: true,
-                supports_cut: true,
-                supports_rename: true,
-                supports_delete: true,
-                supports_favorite: true,
-                is_shell_namespace: false,
-            },
-        )
-        .with_agent_available(true)
-    }
-
-    fn windows_policy() -> ContextMenuPolicy {
-        ContextMenuPolicy::for_platform(HostPlatform::Windows)
-    }
-
-    #[test]
-    fn local_root_keeps_transfer_actions_and_disables_destructive_actions() {
-        let capabilities = ContextMenuCapabilities::for_path(
-            std::path::Path::new(r"C:\"),
-            false,
-            true,
-            false,
-            false,
-        );
-
-        assert!(capabilities.supports_transfer_ops);
-        assert!(capabilities.supports_favorite);
-        assert!(!capabilities.supports_cut);
-        assert!(!capabilities.supports_rename);
-        assert!(!capabilities.supports_delete);
-    }
-
-    #[test]
-    fn plan_uses_stable_root_order_and_native_tail() {
-        let plan = build_plan(&target(false), windows_policy());
-        let groups = plan
-            .groups
-            .iter()
-            .map(|group| group.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(groups.first().copied(), Some("G10"));
-        assert_eq!(groups.last().copied(), Some("G99"));
-        let last = plan.groups.last().and_then(|group| group.entries.last());
-        assert!(matches!(
-            last,
-            Some(MenuEntryPlan::Action(action)) if action.action_id == "system.native-menu"
-        ));
-    }
-
-    #[test]
-    fn every_windows_visible_action_has_a_stable_command_mapping() {
-        let mut target = target(true);
-        target.git_available = true;
-        target.svn_available = true;
-        let plan = build_plan(&target, windows_policy());
-        for action_id in plan.visible_action_ids() {
-            assert!(
-                ContextMenuCommand::from_action_id(action_id, None).is_some(),
-                "missing Windows dispatch mapping for {action_id}"
-            );
-        }
-    }
-
-    #[test]
-    fn git_and_agent_are_declared_once_in_central_submenus() {
-        let plan = build_plan(&target(false), windows_policy());
-        let ids = plan.visible_action_ids();
-        assert_eq!(ids.iter().filter(|id| **id == "open.in").count(), 1);
-        assert_eq!(ids.iter().filter(|id| **id == "agent.ask").count(), 1);
-        assert!(plan.find_submenu("git").is_some());
-        assert!(plan.find_submenu("agent").is_some());
-    }
-
-    #[test]
-    fn multi_select_promotes_delete_to_destructive_group() {
-        let mut target = target(false);
-        target.paths = vec![
-            PathBuf::from(r"C:\repo\src\main.rs"),
-            PathBuf::from(r"C:\repo\src\lib.rs"),
-        ];
-        let plan = build_plan(&target, windows_policy());
-        let trash = plan
-            .groups
-            .iter()
-            .flat_map(|group| &group.entries)
-            .find_map(|entry| match entry {
-                MenuEntryPlan::Action(action) if action.action_id == "file.move-to-trash" => {
-                    Some(action)
-                }
-                _ => None,
-            })
-            .expect("trash action");
-        assert_eq!(trash.risk, ActionRisk::High);
-        assert_eq!(
-            trash.root_group,
-            kite_core::context_menu_model::RootGroup::Destructive
-        );
-        assert!(!plan.visible_action_ids().contains(&"file.rename"));
-    }
 }

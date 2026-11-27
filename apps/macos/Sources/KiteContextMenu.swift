@@ -13,10 +13,139 @@ enum KiteNativeMenuBridge {
     }
 }
 
+enum KiteContextMenuSurface: String {
+    case browserList = "browser.list"
+    case browserColumns = "browser.columns"
+    case preview = "preview"
+    case searchResults = "search.results"
+    case searchColumn = "search.column"
+    case searchGlobal = "search.global"
+    case searchContent = "search.content"
+    case sidebarLocations = "sidebar.locations"
+    case sidebarFavorites = "sidebar.favorites"
+    case sidebarVolumes = "sidebar.volumes"
+    case background = "background"
+}
+
 enum KiteContextMenuTarget {
-    case entry(BrowserEntry)
-    case searchEntry(BrowserEntry)
-    case directory(BrowserColumn)
+    case entries(BrowserEntry, columnIndex: Int?, surface: KiteContextMenuSurface)
+    case background(path: String, title: String)
+    case sidebar(
+        path: String,
+        name: String,
+        isDirectory: Bool,
+        surface: KiteContextMenuSurface
+    )
+    case preview(BrowserEntry)
+}
+
+struct KiteContextMenuEntrySnapshot {
+    let path: String
+    let name: String
+    let isDirectory: Bool
+    let kind: String
+}
+
+/// Captured when the menu is created. Dispatch never reads the live selection,
+/// preview target, or navigation history again.
+struct KiteFrozenContextMenuContext {
+    let surface: KiteContextMenuSurface
+    let targets: [KiteContextMenuEntrySnapshot]
+    let entries: [BrowserEntry]
+    let primaryPath: String?
+    let containerPath: String
+    let workingDirectory: String
+    let containerIsPrimary: Bool
+    let isFavorite: Bool
+
+    @MainActor
+    init(model: KiteModel, target: KiteContextMenuTarget) {
+        switch target {
+        case .entries(let clicked, let columnIndex, let surface):
+            let column = columnIndex.flatMap { index in
+                model.columns.indices.contains(index) ? model.columns[index] : nil
+            }
+            let selected = column?.entries.filter {
+                column?.selectedPaths.contains($0.path) == true
+            } ?? []
+            let frozenEntries = if selected.count > 1,
+                                   selected.contains(where: { $0.path == clicked.path }) {
+                selected
+            } else {
+                [clicked]
+            }
+            self.surface = surface
+            self.entries = frozenEntries
+            self.targets = frozenEntries.map(Self.snapshot)
+            self.primaryPath = clicked.path
+            self.containerPath = clicked.isDirectory
+                ? clicked.path
+                : (clicked.path as NSString).deletingLastPathComponent
+            self.workingDirectory = self.containerPath
+            self.containerIsPrimary = false
+            self.isFavorite = false
+
+        case .background(let path, _):
+            self.surface = .background
+            self.entries = []
+            self.targets = []
+            self.primaryPath = nil
+            self.containerPath = path
+            self.workingDirectory = path
+            self.containerIsPrimary = true
+            self.isFavorite = false
+
+        case .sidebar(let path, let name, let isDirectory, let surface):
+            let snapshot = KiteContextMenuEntrySnapshot(
+                path: path,
+                name: name,
+                isDirectory: isDirectory,
+                kind: Self.targetKind(path: path, isDirectory: isDirectory)
+            )
+            self.surface = surface
+            self.entries = []
+            self.targets = [snapshot]
+            self.primaryPath = path
+            self.containerPath = isDirectory
+                ? path
+                : (path as NSString).deletingLastPathComponent
+            self.workingDirectory = self.containerPath
+            self.containerIsPrimary = false
+            self.isFavorite = surface == .sidebarFavorites
+
+        case .preview(let entry):
+            self.surface = .preview
+            self.entries = [entry]
+            self.targets = [Self.snapshot(entry)]
+            self.primaryPath = entry.path
+            self.containerPath = entry.isDirectory
+                ? entry.path
+                : (entry.path as NSString).deletingLastPathComponent
+            self.workingDirectory = self.containerPath
+            self.containerIsPrimary = false
+            self.isFavorite = false
+        }
+    }
+
+    var menuPaths: [String] { targets.map(\.path) }
+    var toolPaths: [String] { menuPaths.isEmpty ? [containerPath] : menuPaths }
+    var primaryTarget: KiteContextMenuEntrySnapshot? { targets.first }
+
+    private static func snapshot(_ entry: BrowserEntry) -> KiteContextMenuEntrySnapshot {
+        KiteContextMenuEntrySnapshot(
+            path: entry.path,
+            name: entry.name,
+            isDirectory: entry.isDirectory,
+            kind: targetKind(path: entry.path, isDirectory: entry.isDirectory)
+        )
+    }
+
+    private static func targetKind(path: String, isDirectory: Bool) -> String {
+        if KitePlatform.archiveFormat(path) != nil {
+            return "archive"
+        }
+        return isDirectory ? "directory" : "file"
+    }
 }
 
 struct KiteContextMenuView: View {
@@ -25,64 +154,88 @@ struct KiteContextMenuView: View {
     @ObservedObject private var toolCatalog = KiteToolCatalogCache.shared
     @ObservedObject private var toolPolicy = KiteToolPolicyStore.shared
     @EnvironmentObject private var agent: KiteAgentPanelModel
-    let target: KiteContextMenuTarget
+    @State private var context: KiteFrozenContextMenuContext
+
+    @MainActor
+    init(model: KiteModel, target: KiteContextMenuTarget) {
+        self.model = model
+        _context = State(initialValue: KiteFrozenContextMenuContext(model: model, target: target))
+    }
 
     var body: some View {
         let _ = openWithCatalog.revision
         let _ = toolCatalog.revision
         let plan = makePlan()
         KiteContextMenuPlanView(groups: plan.groups, submenus: plan.submenus) { action in
-            KiteContextMenuRunner(model: model, agent: agent, target: target)
+            KiteContextMenuRunner(model: model, agent: agent, context: context)
                 .perform(action)
         }
     }
 
     private func makePlan() -> ContextMenuPlanDto {
         let vcsMenu = loadVcsMenuSnapshot(
-            paths: menuPaths,
-            workingDirectory: workingDirectory
+            paths: context.toolPaths,
+            workingDirectory: context.workingDirectory
         )
+        let textEditorAvailable = context.targets.count == 1
+            && !(context.primaryTarget?.isDirectory ?? false)
+            && KitePlatform.isEditableTextFile(context.primaryTarget?.path ?? "")
+        let mindmapAvailable = context.targets.count == 1
+            && !(context.primaryTarget?.isDirectory ?? false)
+            && KitePlatform.isMindmapFile(context.primaryTarget?.path ?? "")
         let request = ContextMenuRequestDto(
-            surface: surface,
+            surface: context.surface.rawValue,
             platform: "macos",
-            primaryPath: primaryPath,
-            targets: menuTargets,
-            workingDirectory: workingDirectory,
-            containerPath: containerPath,
-            containerIsPrimaryTarget: isDirectoryContext,
-            loading: isLoading,
+            primaryPath: context.primaryPath,
+            targets: context.targets.map { target in
+                ContextMenuTargetDto(
+                    path: target.path,
+                    displayName: target.name,
+                    kind: target.kind,
+                    exists: FileManager.default.fileExists(atPath: target.path),
+                    readable: FileManager.default.isReadableFile(atPath: target.path)
+                )
+            },
+            workingDirectory: context.workingDirectory,
+            containerPath: context.containerPath,
+            containerIsPrimaryTarget: context.containerIsPrimary,
+            loading: false,
             canPaste: true,
-            canCreate: KitePlatform.canModify(containerPath),
-            supportsTransferOps: true,
-            supportsCut: menuPaths.allSatisfy(KitePlatform.canModify),
-            supportsRename: menuPaths.count == 1 && KitePlatform.canModify(primaryPath),
-            supportsDelete: menuPaths.allSatisfy(KitePlatform.canModify),
-            supportsFavorite: true,
-            isFavorite: menuPaths.count == 1 && model.isFavorite(path: primaryPath),
+            canCreate: KitePlatform.canModify(context.containerPath),
+            supportsTransferOps: context.targets.allSatisfy {
+                KitePlatform.canModify($0.path)
+            },
+            supportsCut: context.targets.allSatisfy { KitePlatform.canModify($0.path) },
+            supportsRename: context.targets.count == 1
+                && KitePlatform.canModify(context.primaryPath ?? context.containerPath),
+            supportsDelete: !context.targets.isEmpty
+                && context.targets.allSatisfy { KitePlatform.canModify($0.path) },
+            supportsFavorite: !context.targets.isEmpty,
+            isFavorite: context.isFavorite,
             gitAvailable: vcsMenu.gitAvailable,
             svnAvailable: vcsMenu.svnAvailable,
             agentAvailable: agent.hasConfiguredAgent,
-            quickLookAvailable: true,
-            revealAvailable: true,
-            shareAvailable: true,
-            propertiesAvailable: true,
-            textEditorAvailable: menuPaths.count == 1
-                && !isDirectoryContext
-                && KitePlatform.isEditableTextFile(primaryPath),
-            mindmapAvailable: menuPaths.count == 1
-                && !isDirectoryContext
-                && KitePlatform.isMindmapFile(primaryPath),
-            mindmapImportAvailable: menuPaths.count == 1
-                && !isDirectoryContext
-                && KitePlatform.isMindmapImportFile(primaryPath),
+            quickLookAvailable: !context.targets.isEmpty,
+            revealAvailable: !context.targets.isEmpty,
+            shareAvailable: !context.targets.isEmpty,
+            propertiesAvailable: context.targets.count == 1,
+            textEditorAvailable: textEditorAvailable,
+            mindmapAvailable: mindmapAvailable,
+            mindmapImportAvailable: context.targets.count == 1
+                && !(context.primaryTarget?.isDirectory ?? false)
+                && KitePlatform.isMindmapImportFile(context.primaryTarget?.path ?? ""),
             isShellNamespace: false,
-            nativePlaneAvailable: KiteNativeMenuBridge.isAvailable,
-            openWith: openWithCatalog.catalog(for: openWithPath).dto,
+            nativePlaneAvailable: true,
+            openWith: openWithCatalog.catalog(
+                for: context.targets.count == 1 && !(context.primaryTarget?.isDirectory ?? false)
+                    ? context.primaryTarget?.path
+                    : nil
+            ).dto,
             tools: toolCatalog.catalog(
-                paths: menuPaths,
+                paths: context.toolPaths,
                 textEditorEligible: textEditorAvailable,
                 mindmapEligible: mindmapAvailable,
-                gitAvailable: gitAvailable
+                gitAvailable: vcsMenu.gitAvailable
             ).dto,
             toolPolicy: toolPolicy.policy.dto,
             vcsMenu: vcsMenu,
@@ -91,147 +244,6 @@ struct KiteContextMenuView: View {
             confirmHighRisk: true
         )
         return composeContextMenu(request: request)
-    }
-
-    private var primaryPath: String {
-        switch target {
-        case .entry(let entry), .searchEntry(let entry): return entry.path
-        case .directory(let column): return column.path
-        }
-    }
-
-    private var isDirectoryContext: Bool {
-        switch target {
-        case .entry(let entry), .searchEntry(let entry): return entry.isDirectory
-        case .directory: return true
-        }
-    }
-
-    private var surface: String {
-        switch target {
-        case .entry: return "browser.list"
-        case .searchEntry: return "search.results"
-        case .directory: return "browser.columns"
-        }
-    }
-
-    private var menuPaths: [String] {
-        switch target {
-        case .directory:
-            return [primaryPath]
-        case .entry, .searchEntry:
-            return menuEntries.map(\.path)
-        }
-    }
-
-    private var menuEntries: [BrowserEntry] {
-        switch target {
-        case .directory:
-            return []
-        case .entry(let entry), .searchEntry(let entry):
-            let selected = model.selectedColumnEntries
-            if case .entry = target,
-               selected.count > 1,
-               selected.contains(where: { $0.path == entry.path }) {
-                return selected
-            }
-            return [entry]
-        }
-    }
-
-    private var workingDirectory: String {
-        switch target {
-        case .entry(let entry), .searchEntry(let entry):
-            return entry.isDirectory ? entry.path : (entry.path as NSString).deletingLastPathComponent
-        case .directory(let column):
-            return column.path
-        }
-    }
-
-    private var containerPath: String {
-        switch target {
-        case .entry(let entry), .searchEntry(let entry):
-            return entry.isDirectory ? entry.path : (entry.path as NSString).deletingLastPathComponent
-        case .directory(let column):
-            return column.path
-        }
-    }
-
-    private var isLoading: Bool {
-        switch target {
-        case .entry, .searchEntry: return false
-        case .directory(let column): return model.columns.last?.path == column.path && column.entries.isEmpty
-        }
-    }
-
-    private var gitAvailable: Bool {
-        switch target {
-        case .directory(let column):
-            return column.gitAvailable
-        case .entry, .searchEntry:
-            return menuEntries.allSatisfy {
-                $0.gitStatus != nil || model.isGitAvailable(forEntryPath: $0.path)
-            }
-        }
-    }
-
-    private var svnAvailable: Bool {
-        switch target {
-        case .directory(let column):
-            return column.svnAvailable
-        case .entry, .searchEntry:
-            return menuEntries.allSatisfy { $0.svnStatus != nil }
-                || model.columns.last?.svnAvailable == true
-        }
-    }
-
-    private var menuTargets: [ContextMenuTargetDto] {
-        switch target {
-        case .entry, .searchEntry:
-            return menuEntries.map { entry in
-                ContextMenuTargetDto(
-                    path: entry.path,
-                    displayName: entry.name,
-                    kind: targetKind(for: entry),
-                    exists: FileManager.default.fileExists(atPath: entry.path),
-                    readable: FileManager.default.isReadableFile(atPath: entry.path)
-                )
-            }
-        case .directory(let column):
-            return [
-                ContextMenuTargetDto(
-                    path: column.path,
-                    displayName: column.title,
-                    kind: "directory",
-                    exists: FileManager.default.fileExists(atPath: column.path),
-                    readable: FileManager.default.isReadableFile(atPath: column.path)
-                )
-            ]
-        }
-    }
-
-    private var openWithPath: String? {
-        guard !isDirectoryContext, menuPaths.count == 1 else { return nil }
-        return menuPaths[0]
-    }
-
-    private var textEditorAvailable: Bool {
-        menuPaths.count == 1
-            && !isDirectoryContext
-            && KitePlatform.isEditableTextFile(primaryPath)
-    }
-
-    private var mindmapAvailable: Bool {
-        menuPaths.count == 1
-            && !isDirectoryContext
-            && KitePlatform.isMindmapFile(primaryPath)
-    }
-
-    private func targetKind(for entry: BrowserEntry) -> String {
-        if KitePlatform.archiveFormat(entry.path) != nil {
-            return "archive"
-        }
-        return entry.isDirectory ? "directory" : "file"
     }
 }
 
@@ -330,11 +342,12 @@ private struct KiteContextMenuEntryView: View {
 private struct KiteContextMenuRunner {
     let model: KiteModel
     let agent: KiteAgentPanelModel
-    let target: KiteContextMenuTarget
+    let context: KiteFrozenContextMenuContext
 
     func perform(_ action: ContextMenuActionDto) {
+        guard validateTargets(action) else { return }
         let paths = action.targetPaths
-        let primaryPath = paths.first ?? target.primaryPath
+        let primaryPath = paths.first ?? context.primaryPath ?? context.containerPath
         if isVcsWriteAction(action.actionId) {
             guard validateVcsRevision(action, path: primaryPath) else { return }
         }
@@ -387,16 +400,17 @@ private struct KiteContextMenuRunner {
             pasteboard.clearContents()
             pasteboard.setString(paths.joined(separator: "\n"), forType: .string)
         case "clipboard.paste":
-            model.pasteFiles(into: target.containerPath)
+            model.pasteFiles(into: context.containerPath)
         case "file.new-folder":
-            model.createFolder(in: target.containerPath)
+            model.createFolder(in: context.containerPath)
         case "file.new-file":
-            model.createFile(in: target.containerPath)
+            model.createFile(in: context.containerPath)
         case "favorite.add", "favorite.remove":
             model.toggleFavorite(
                 path: primaryPath,
-                name: target.displayName(for: primaryPath),
-                isDirectory: target.isDirectory(path: primaryPath)
+                name: context.targets.first(where: { $0.path == primaryPath })?.name
+                    ?? (primaryPath as NSString).lastPathComponent,
+                isDirectory: context.targets.first(where: { $0.path == primaryPath })?.isDirectory ?? false
             )
         case "file.rename":
             model.rename(primaryPath)
@@ -440,7 +454,7 @@ private struct KiteContextMenuRunner {
                 repositoryPath: repositoryPath(for: primaryPath)
             )
         case "git.clone":
-            KiteGitWindows.shared.showClone(model: model, directory: target.containerPath)
+            KiteGitWindows.shared.showClone(model: model, directory: context.containerPath)
         case "git.init":
             initializeRepository(at: repositoryPath(for: primaryPath))
         case "git.pull":
@@ -554,7 +568,7 @@ private struct KiteContextMenuRunner {
                 toolID: toolID,
                 role: role,
                 paths: paths,
-                workingDirectory: target.workingDirectory,
+                workingDirectory: context.workingDirectory,
                 repositoryRoot: paths.first.map(repositoryPath(for:))
             ) { error in
                 if let error {
@@ -565,7 +579,7 @@ private struct KiteContextMenuRunner {
     }
 
     private func openDefault(_ path: String) {
-        if target.isDirectory(path: path) {
+        if targetIsDirectory(path) {
             model.loadRoot(path)
         } else {
             KitePlatform.open(path)
@@ -573,20 +587,58 @@ private struct KiteContextMenuRunner {
     }
 
     private func presentAgent(_ action: KiteAgentAction) {
-        switch target {
-        case .directory(let column):
-            agent.presentDirectory(column.path, action: action)
-        case .entry(let entry), .searchEntry(let entry):
-            agent.present(action: action, primary: entry.path, entries: target.entries(for: model, clicked: entry))
+        let primary = context.primaryPath ?? context.containerPath
+        if context.entries.isEmpty {
+            agent.presentDirectory(primary, action: action)
+        } else {
+            agent.present(action: action, primary: primary, entries: context.entries)
         }
     }
 
     private func repositoryPath(for path: String) -> String {
-        target.isDirectory(path: path) ? path : (path as NSString).deletingLastPathComponent
+        targetIsDirectory(path) ? path : (path as NSString).deletingLastPathComponent
     }
 
     private func logScope(for path: String) -> GitGraphScopeDto {
-        target.isDirectory(path: path) ? .directory(path: path) : .file(path: path)
+        targetIsDirectory(path) ? .directory(path: path) : .file(path: path)
+    }
+
+    private func targetIsDirectory(_ path: String) -> Bool {
+        if let snapshot = context.targets.first(where: { $0.path == path }) {
+            return snapshot.isDirectory
+        }
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+
+    private func validateTargets(_ action: ContextMenuActionDto) -> Bool {
+        guard action.targetKinds.count == action.targetPaths.count else {
+            if action.targetKinds.isEmpty { return true }
+            model.errorMessage = "右键目标快照已失效，请重新选择目标。"
+            return false
+        }
+        for (path, expectedKind) in zip(action.targetPaths, action.targetKinds) {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+                model.errorMessage = "右键目标已不存在，请重新选择目标。"
+                return false
+            }
+            let kindMatches: Bool
+            switch expectedKind {
+            case "directory", "repository-root", "workspace-root", "device-container":
+                kindMatches = isDirectory.boolValue
+            case "file", "archive", "device-item":
+                kindMatches = !isDirectory.boolValue
+            default:
+                kindMatches = true
+            }
+            if !kindMatches {
+                model.errorMessage = "右键目标类型已变化，请重新选择目标。"
+                return false
+            }
+        }
+        return true
     }
 
     private func initializeRepository(at path: String) {
@@ -686,67 +738,5 @@ private struct KiteContextMenuRunner {
         alert.addButton(withTitle: "继续")
         alert.addButton(withTitle: "取消")
         return alert.runModal() == .alertFirstButtonReturn
-    }
-}
-
-private extension KiteContextMenuTarget {
-    var primaryPath: String {
-        switch self {
-        case .entry(let entry), .searchEntry(let entry): return entry.path
-        case .directory(let column): return column.path
-        }
-    }
-
-    var containerPath: String {
-        switch self {
-        case .entry(let entry), .searchEntry(let entry):
-            return entry.isDirectory ? entry.path : (entry.path as NSString).deletingLastPathComponent
-        case .directory(let column):
-            return column.path
-        }
-    }
-
-    var workingDirectory: String {
-        switch self {
-        case .entry(let entry), .searchEntry(let entry):
-            return entry.isDirectory ? entry.path : (entry.path as NSString).deletingLastPathComponent
-        case .directory(let column):
-            return column.path
-        }
-    }
-
-    @MainActor
-    func entries(for model: KiteModel, clicked entry: BrowserEntry) -> [BrowserEntry] {
-        let selected = model.selectedColumnEntries
-        if selected.count > 1, selected.contains(where: { $0.path == entry.path }) {
-            return selected
-        }
-        return [entry]
-    }
-
-    func isDirectory(path: String) -> Bool {
-        var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
-            return isDirectory.boolValue
-        }
-        switch self {
-        case .directory:
-            return true
-        case .entry(let entry), .searchEntry(let entry):
-            return entry.path == path && entry.isDirectory
-        }
-    }
-
-    func displayName(for path: String) -> String {
-        switch self {
-        case .directory(let column):
-            return column.title
-        case .entry(let entry) where entry.path == path:
-            return entry.name
-        case .searchEntry(let entry) where entry.path == path:
-            return entry.name
-        default:
-            return (path as NSString).lastPathComponent
-        }
     }
 }

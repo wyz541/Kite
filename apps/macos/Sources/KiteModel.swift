@@ -926,6 +926,12 @@ final class KiteModel: ObservableObject {
         return column.entries.filter { column.selectedPaths.contains($0.path) }
     }
 
+    func selectedColumnEntries(in columnIndex: Int) -> [BrowserEntry] {
+        guard columns.indices.contains(columnIndex) else { return [] }
+        let column = columns[columnIndex]
+        return column.entries.filter { column.selectedPaths.contains($0.path) }
+    }
+
     var selectedColumnEntry: BrowserEntry? {
         guard let column = columns.last,
               column.selectedPaths.count == 1,

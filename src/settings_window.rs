@@ -2947,7 +2947,7 @@ impl SettingsWindow {
                     .small()
                     .outline()
                     .label("重新发现")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         crate::context_menu::tool_registry_windows::refresh();
                         this.status = Some("工具发现缓存已清除".into());
                         cx.notify();

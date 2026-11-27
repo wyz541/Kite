@@ -169,8 +169,8 @@ struct ContextMenuPlanSmoke {
 
         let native = plan.groups.last?.entries.last?.action
         precondition(native?.actionId == "system.native-menu")
-        precondition(native?.enabled == false)
-        precondition(native?.disabledReasonCode == "NATIVE_PLANE_UNAVAILABLE")
+        precondition(native?.enabled == true)
+        precondition(native?.targetKinds == ["file"])
 
         let gitActions = plan.submenus.first { $0.id == "git" }?
             .groups.flatMap(\.entries)

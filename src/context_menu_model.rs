@@ -60,7 +60,13 @@ pub enum ContextSurface {
     BrowserColumns,
     Preview,
     SearchResults,
+    SearchColumn,
+    SearchGlobal,
+    SearchContent,
     Sidebar,
+    SidebarLocations,
+    SidebarFavorites,
+    SidebarVolumes,
     Background,
     DeviceNamespace,
 }
@@ -72,10 +78,34 @@ impl ContextSurface {
             "browser.columns" => Self::BrowserColumns,
             "preview" => Self::Preview,
             "search.results" => Self::SearchResults,
+            "search.column" => Self::SearchColumn,
+            "search.global" => Self::SearchGlobal,
+            "search.content" => Self::SearchContent,
             "sidebar" => Self::Sidebar,
+            "sidebar.locations" => Self::SidebarLocations,
+            "sidebar.favorites" => Self::SidebarFavorites,
+            "sidebar.volumes" => Self::SidebarVolumes,
             "device.namespace" => Self::DeviceNamespace,
             _ => Self::Background,
         }
+    }
+
+    pub const fn is_search(self) -> bool {
+        matches!(
+            self,
+            Self::SearchResults | Self::SearchColumn | Self::SearchGlobal | Self::SearchContent
+        )
+    }
+
+    pub const fn is_sidebar(self) -> bool {
+        matches!(
+            self,
+            Self::Sidebar | Self::SidebarLocations | Self::SidebarFavorites | Self::SidebarVolumes
+        )
+    }
+
+    pub const fn is_device_namespace(self) -> bool {
+        matches!(self, Self::DeviceNamespace)
     }
 }
 
@@ -223,6 +253,7 @@ pub struct ContainerSnapshot {
     pub path: String,
     pub display_name: String,
     pub writable: bool,
+    pub kind: TargetKind,
     /// True when the container itself is the object being activated, as in a
     /// directory/background menu. File menus use their parent only as fallback.
     pub is_primary_target: bool,
@@ -240,8 +271,14 @@ impl ContainerSnapshot {
             path,
             display_name,
             writable: true,
+            kind: TargetKind::Directory,
             is_primary_target,
         }
+    }
+
+    pub fn with_kind(mut self, kind: TargetKind) -> Self {
+        self.kind = kind;
+        self
     }
 }
 
@@ -935,6 +972,7 @@ pub struct MenuPlan {
     pub schema_version: u32,
     pub snapshot_id: String,
     pub title: String,
+    pub target_kinds: Vec<String>,
     pub groups: Vec<MenuGroupPlan>,
     pub submenus: Vec<SubmenuPlan>,
     pub diagnostics: Vec<String>,
@@ -990,6 +1028,7 @@ impl ContextMenuComposer {
     pub fn compose(&self, context: &ContextSnapshot) -> Result<MenuPlan, ComposerError> {
         let mut diagnostics = Vec::new();
         let mut resolved = Vec::new();
+        let (_, target_kinds) = context_target_paths_and_kinds(context);
         for provider in &self.providers {
             for candidate in provider.candidates(context) {
                 let Some(descriptor) = descriptor(context, &candidate.action_id) else {
@@ -1003,6 +1042,9 @@ impl ContextMenuComposer {
                     continue;
                 }
                 if !descriptor.target_rule.matches(context) {
+                    continue;
+                }
+                if !surface_allows_action(context, &candidate.action_id) {
                     continue;
                 }
                 let (enabled, reason_code, reason) = match &candidate.availability {
@@ -1029,11 +1071,7 @@ impl ContextMenuComposer {
                     continue;
                 }
 
-                let targets = if context.target_set.ordered_paths.is_empty() {
-                    vec![context.container.path.clone()]
-                } else {
-                    context.target_set.ordered_paths.clone()
-                };
+                let (targets, _) = context_target_paths_and_kinds(context);
                 let mut risk = descriptor.risk;
                 if descriptor.action_id == "file.move-to-trash" && targets.len() > 1 {
                     risk = ActionRisk::High;
@@ -1199,6 +1237,7 @@ impl ContextMenuComposer {
             schema_version: CONTEXT_MENU_SCHEMA_VERSION,
             snapshot_id: context.snapshot_id.clone(),
             title: context.title(),
+            target_kinds,
             groups,
             submenus,
             diagnostics,
@@ -1252,6 +1291,95 @@ fn submenu_for_action(action_id: &str) -> Option<SubmenuId> {
         return Some(SubmenuId::System);
     }
     None
+}
+
+fn surface_allows_action(context: &ContextSnapshot, action_id: &str) -> bool {
+    if action_id == "system.native-menu" {
+        return true;
+    }
+
+    match context.surface {
+        ContextSurface::BrowserList | ContextSurface::BrowserColumns => true,
+        ContextSurface::Preview => !matches!(
+            action_id,
+            "navigation.refresh" | "clipboard.paste" | "file.new-folder" | "file.new-file"
+        ),
+        ContextSurface::SearchResults
+        | ContextSurface::SearchColumn
+        | ContextSurface::SearchGlobal
+        | ContextSurface::SearchContent => matches!(
+            action_id,
+            "open.default"
+                | "open.with"
+                | "open.with.choose-other"
+                | "open.in"
+                | "open.quick-look"
+                | "clipboard.copy-path"
+                | "system.reveal"
+        ),
+        ContextSurface::Sidebar | ContextSurface::SidebarLocations => matches!(
+            action_id,
+            "open.default" | "open.in" | "favorite.add" | "system.reveal" | "system.properties"
+        ),
+        ContextSurface::SidebarFavorites => matches!(
+            action_id,
+            "open.default"
+                | "open.in"
+                | "clipboard.copy-path"
+                | "favorite.remove"
+                | "system.reveal"
+                | "system.properties"
+        ),
+        ContextSurface::SidebarVolumes => matches!(
+            action_id,
+            "open.default" | "system.reveal" | "system.properties"
+        ),
+        ContextSurface::Background => {
+            matches!(
+                action_id,
+                "navigation.refresh"
+                    | "open.in"
+                    | "clipboard.paste"
+                    | "file.new-folder"
+                    | "file.new-file"
+                    | "archive.compress.zip"
+                    | "archive.compress.tar-gz"
+                    | "agent.ask"
+                    | "agent.summarize-folder"
+                    | "agent.review-changes"
+                    | "agent.generate-commit-message"
+                    | "agent.configure"
+            ) || action_id.starts_with("git.")
+                || action_id.starts_with("svn.")
+        }
+        ContextSurface::DeviceNamespace => {
+            let targets = &context.target_set.targets;
+            let container = !targets.is_empty()
+                && targets
+                    .iter()
+                    .all(|target| target.kind == TargetKind::DeviceContainer);
+            if container {
+                matches!(
+                    action_id,
+                    "navigation.refresh"
+                        | "open.default"
+                        | "clipboard.paste"
+                        | "file.new-folder"
+                        | "file.new-file"
+                        | "system.properties"
+                )
+            } else {
+                matches!(
+                    action_id,
+                    "open.default"
+                        | "clipboard.copy"
+                        | "clipboard.copy-path"
+                        | "device.delete"
+                        | "system.properties"
+                )
+            }
+        }
+    }
 }
 
 fn validate_plan(context: &ContextSnapshot, plan: &MenuPlan) -> Result<(), ComposerError> {
@@ -1400,6 +1528,7 @@ pub fn compose_menu_with_fallback(context: &ContextSnapshot) -> MenuPlan {
 }
 
 fn fallback_plan(context: &ContextSnapshot) -> MenuPlan {
+    let (_, target_kinds) = context_target_paths_and_kinds(context);
     let mut groups = Vec::new();
     let mut open_group = Vec::new();
     if context.target_set.targets.len() == 1
@@ -1429,20 +1558,12 @@ fn fallback_plan(context: &ContextSnapshot) -> MenuPlan {
         });
     }
     if let Some(descriptor) = descriptor(context, "system.native-menu") {
-        let availability = if context.capabilities.native_plane_available {
-            CandidateAvailability::Available
-        } else {
-            CandidateAvailability::disabled(
-                "NATIVE_PLANE_UNAVAILABLE",
-                "当前平台没有可用的完整原生菜单平面",
-            )
-        };
         groups.push(MenuGroupPlan {
             id: RootGroup::Native.id().to_string(),
             entries: vec![MenuEntryPlan::Action(resolved_action(
                 descriptor,
                 context,
-                availability,
+                CandidateAvailability::Available,
                 ActionPayload::None,
             ))],
         });
@@ -1451,6 +1572,7 @@ fn fallback_plan(context: &ContextSnapshot) -> MenuPlan {
         schema_version: CONTEXT_MENU_SCHEMA_VERSION,
         snapshot_id: context.snapshot_id.clone(),
         title: context.title(),
+        target_kinds,
         groups,
         submenus: Vec::new(),
         diagnostics: vec!["safe fallback menu".to_string()],
@@ -1520,6 +1642,25 @@ fn resolved_action(
         disabled_reason_code,
         disabled_reason,
         payload,
+    }
+}
+
+fn context_target_paths_and_kinds(context: &ContextSnapshot) -> (Vec<String>, Vec<String>) {
+    if context.target_set.ordered_paths.is_empty() {
+        (
+            vec![context.container.path.clone()],
+            vec![context.container.kind.as_str().to_string()],
+        )
+    } else {
+        (
+            context.target_set.ordered_paths.clone(),
+            context
+                .target_set
+                .targets
+                .iter()
+                .map(|target| target.kind.as_str().to_string())
+                .collect(),
+        )
     }
 }
 
@@ -1841,11 +1982,26 @@ fn normalized_open_with_applications(
 
 impl ActionProvider for ToolActionProvider {
     fn candidates(&self, context: &ContextSnapshot) -> Vec<ActionCandidate> {
-        if context.capabilities.is_shell_namespace || context.target_set.targets.is_empty() {
+        if context.capabilities.is_shell_namespace {
             return Vec::new();
         }
 
         let definitions = builtin_tool_definitions(ToolPlatform::from_context(context.platform));
+        let background_target_set = context.target_set.targets.is_empty().then(|| {
+            let target = ContextTarget::new(
+                context.container.path.clone(),
+                context.container.display_name.clone(),
+                context.container.kind,
+            );
+            TargetSet::new(
+                Some(target.id.clone()),
+                vec![target],
+                context.container.path.clone(),
+            )
+        });
+        let tool_target_set = background_target_set
+            .as_ref()
+            .unwrap_or(&context.target_set);
         let mut candidates = Vec::new();
         if context.tool_catalog.status == ToolCatalogStatus::Loading {
             candidates.push(
@@ -1867,7 +2023,7 @@ impl ActionProvider for ToolActionProvider {
                 &definitions,
                 &context.tool_catalog,
                 &context.tool_policy,
-                &context.target_set,
+                tool_target_set,
                 ToolRole::Open,
             );
             for (index, tool) in tools.into_iter().enumerate() {
@@ -1907,7 +2063,7 @@ impl ActionProvider for ToolActionProvider {
                     &definitions,
                     &context.tool_catalog,
                     &context.tool_policy,
-                    &context.target_set,
+                    tool_target_set,
                     ToolRole::Compare,
                 );
                 for (index, tool) in tools.into_iter().enumerate() {
@@ -2284,10 +2440,14 @@ impl ActionProvider for SystemActionProvider {
         if context.capabilities.quick_look_available && !context.target_set.targets.is_empty() {
             candidates.push(ActionCandidate::available("open.quick-look"));
         }
-        if context.capabilities.reveal_available && !context.target_set.targets.is_empty() {
+        if context.capabilities.reveal_available
+            && (!context.target_set.targets.is_empty() || context.container.is_primary_target)
+        {
             candidates.push(ActionCandidate::available("system.reveal"));
         }
-        if context.capabilities.share_available && !context.target_set.targets.is_empty() {
+        if context.capabilities.share_available
+            && (!context.target_set.targets.is_empty() || context.container.is_primary_target)
+        {
             candidates.push(ActionCandidate::available("system.share"));
         }
         if context.capabilities.properties_available && context.target_set.targets.len() == 1 {
@@ -2296,17 +2456,9 @@ impl ActionProvider for SystemActionProvider {
         if context.capabilities.mindmap_import_available && context.target_set.targets.len() == 1 {
             candidates.push(ActionCandidate::available("tool.kite.mindmap-import"));
         }
-        let native_availability = if context.capabilities.native_plane_available {
-            CandidateAvailability::Available
-        } else {
-            CandidateAvailability::disabled(
-                "NATIVE_PLANE_UNAVAILABLE",
-                "当前平台没有可用的完整原生菜单平面",
-            )
-        };
         candidates.push(ActionCandidate::with_availability(
             "system.native-menu",
-            native_availability,
+            CandidateAvailability::Available,
         ));
         candidates
     }
@@ -2350,7 +2502,13 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             ActionEffect::Navigation,
             ActionRisk::Low,
             TargetRule::new(
-                &[TargetKind::File, TargetKind::Directory, TargetKind::Archive],
+                &[
+                    TargetKind::File,
+                    TargetKind::Directory,
+                    TargetKind::Archive,
+                    TargetKind::DeviceContainer,
+                    TargetKind::DeviceItem,
+                ],
                 TargetCardinality::One,
             ),
             RootGroup::OpenAndLaunch,
@@ -2452,7 +2610,12 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             ActionEffect::Clipboard,
             ActionRisk::Low,
             TargetRule::new(
-                &[TargetKind::File, TargetKind::Directory, TargetKind::Archive],
+                &[
+                    TargetKind::File,
+                    TargetKind::Directory,
+                    TargetKind::Archive,
+                    TargetKind::DeviceItem,
+                ],
                 TargetCardinality::OneOrMore,
             ),
             RootGroup::Transfer,
@@ -2513,7 +2676,12 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             ActionEffect::Clipboard,
             ActionRisk::None,
             TargetRule::new(
-                &[TargetKind::File, TargetKind::Directory, TargetKind::Archive],
+                &[
+                    TargetKind::File,
+                    TargetKind::Directory,
+                    TargetKind::Archive,
+                    TargetKind::DeviceItem,
+                ],
                 TargetCardinality::OneOrMore,
             ),
             RootGroup::Transfer,
@@ -3046,7 +3214,13 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             ActionEffect::SystemUi,
             ActionRisk::None,
             TargetRule::new(
-                &[TargetKind::File, TargetKind::Directory, TargetKind::Archive],
+                &[
+                    TargetKind::File,
+                    TargetKind::Directory,
+                    TargetKind::Archive,
+                    TargetKind::DeviceContainer,
+                    TargetKind::DeviceItem,
+                ],
                 TargetCardinality::One,
             ),
             RootGroup::System,
@@ -3440,6 +3614,18 @@ mod tests {
     }
 
     #[test]
+    fn directory_entity_menu_keeps_directory_actions() {
+        let context = snapshot(ContextSurface::BrowserColumns, &[TargetKind::Directory], 1);
+        let plan = compose_default_menu(&context).expect("directory entity menu");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"open.default"));
+        assert!(ids.contains(&"file.rename"));
+        assert!(ids.contains(&"file.move-to-trash"));
+        assert!(!ids.contains(&"archive.extract-here"));
+        assert_eq!(ids.last().copied(), Some("system.native-menu"));
+    }
+
+    #[test]
     fn duplicate_candidates_are_resolved_by_precedence_independent_of_provider_order() {
         struct DuplicateProvider {
             first: bool,
@@ -3552,6 +3738,122 @@ mod tests {
         assert!(ids.contains(&"clipboard.paste"));
         assert!(ids.contains(&"file.new-folder"));
         assert_eq!(ids.last().copied(), Some("system.native-menu"));
+    }
+
+    #[test]
+    fn search_result_menu_is_identity_only_and_never_container_mutating() {
+        for surface in [
+            ContextSurface::SearchResults,
+            ContextSurface::SearchColumn,
+            ContextSurface::SearchGlobal,
+            ContextSurface::SearchContent,
+        ] {
+            let context = snapshot(surface, &[TargetKind::File], 1);
+            let plan = compose_default_menu(&context).expect("search result menu");
+            let ids = plan.visible_action_ids();
+            assert!(ids.contains(&"open.default"));
+            assert!(ids.contains(&"clipboard.copy-path"));
+            assert!(ids.contains(&"system.reveal"));
+            assert!(!ids.contains(&"clipboard.paste"));
+            assert!(!ids.contains(&"file.new-folder"));
+            assert!(!ids.contains(&"file.new-file"));
+            assert!(!ids.contains(&"file.rename"));
+            assert!(!ids.contains(&"file.move-to-trash"));
+            assert!(
+                !ids.iter()
+                    .any(|id| id.starts_with("git.") || id.starts_with("svn."))
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_favorite_menu_has_remove_without_file_content_mutations() {
+        let mut context = snapshot(
+            ContextSurface::SidebarFavorites,
+            &[TargetKind::Directory],
+            1,
+        );
+        context.capabilities.is_favorite = true;
+        let plan = compose_default_menu(&context).expect("sidebar favorite menu");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"open.default"));
+        assert!(ids.contains(&"clipboard.copy-path"));
+        assert!(ids.contains(&"favorite.remove"));
+        assert!(!ids.contains(&"file.rename"));
+        assert!(!ids.contains(&"file.move-to-trash"));
+        assert!(!ids.contains(&"clipboard.cut"));
+        assert!(
+            !ids.iter()
+                .any(|id| id.starts_with("git.") || id.starts_with("svn."))
+        );
+    }
+
+    #[test]
+    fn preview_menu_reuses_file_context_without_container_actions() {
+        let context = snapshot(ContextSurface::Preview, &[TargetKind::File], 1);
+        let plan = compose_default_menu(&context).expect("preview menu");
+        let ids = plan.visible_action_ids();
+        assert!(!ids.contains(&"navigation.refresh"));
+        assert!(!ids.contains(&"clipboard.paste"));
+        assert!(!ids.contains(&"file.new-folder"));
+        assert!(!ids.contains(&"file.new-file"));
+        assert!(ids.contains(&"open.default"));
+        assert!(ids.contains(&"clipboard.copy"));
+        assert!(ids.contains(&"file.move-to-trash"));
+    }
+
+    #[test]
+    fn device_item_menu_uses_namespace_capabilities_and_never_file_trash() {
+        let mut context = snapshot(
+            ContextSurface::DeviceNamespace,
+            &[TargetKind::DeviceItem],
+            1,
+        );
+        context.capabilities.is_shell_namespace = true;
+        context.capabilities.supports_transfer_ops = true;
+        context.capabilities.supports_cut = false;
+        context.capabilities.supports_rename = false;
+        context.capabilities.supports_delete = true;
+        context.capabilities.supports_favorite = false;
+        context.capabilities.properties_available = true;
+        let plan = compose_default_menu(&context).expect("device item menu");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"open.default"));
+        assert!(ids.contains(&"clipboard.copy"));
+        assert!(ids.contains(&"clipboard.copy-path"));
+        assert!(ids.contains(&"device.delete"));
+        assert!(ids.contains(&"system.properties"));
+        assert!(!ids.contains(&"file.move-to-trash"));
+        assert!(!ids.contains(&"file.rename"));
+        assert!(!ids.contains(&"open.with"));
+        assert!(!ids.contains(&"open.in"));
+    }
+
+    #[test]
+    fn device_container_background_can_create_and_paste_without_entity_leaks() {
+        let mut context = snapshot(
+            ContextSurface::Background,
+            &[TargetKind::DeviceContainer],
+            0,
+        );
+        context.target_set.targets.clear();
+        context.target_set.ordered_paths.clear();
+        context.target_set.primary = None;
+        context.container = ContainerSnapshot::for_path("/device/root", true)
+            .with_kind(TargetKind::DeviceContainer);
+        context.capabilities.is_shell_namespace = true;
+        context.capabilities.can_paste = true;
+        context.capabilities.can_create = true;
+        context.capabilities.supports_transfer_ops = true;
+        let plan = compose_default_menu(&context).expect("device container background menu");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"clipboard.paste"));
+        assert!(ids.contains(&"file.new-folder"));
+        assert!(ids.contains(&"file.new-file"));
+        assert!(!ids.contains(&"open.default"));
+        assert!(!ids.contains(&"device.delete"));
+        assert!(!ids.contains(&"file.rename"));
+        assert_eq!(plan.target_kinds, vec!["device-container"]);
     }
 
     #[test]
@@ -4172,7 +4474,7 @@ mod tests {
     }
 
     #[test]
-    fn native_entry_survives_unavailable_policy() {
+    fn native_entry_remains_available_when_platform_probe_is_unavailable() {
         let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
         context.capabilities.native_plane_available = false;
         context.policy.hide_unavailable = true;
@@ -4185,11 +4487,8 @@ mod tests {
         match native {
             MenuEntryPlan::Action(action) => {
                 assert_eq!(action.action_id, "system.native-menu");
-                assert!(!action.enabled);
-                assert_eq!(
-                    action.disabled_reason_code.as_deref(),
-                    Some("NATIVE_PLANE_UNAVAILABLE")
-                );
+                assert!(action.enabled);
+                assert_eq!(action.disabled_reason_code, None);
             }
             _ => panic!("native entry must be an action"),
         }

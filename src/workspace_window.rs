@@ -29,6 +29,7 @@ pub(crate) struct WorkspaceWindow {
 }
 
 impl WorkspaceWindow {
+    #[allow(dead_code)] // Some feature combinations open directly with a selection.
     pub(crate) fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_with_selection(root, None, window, cx)
     }

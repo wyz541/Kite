@@ -90,6 +90,7 @@ pub enum ContextMenuCommand {
     RemoveFavorite,
     Rename,
     Recycle,
+    Reveal,
     ShowProperties,
     CompressZip,
     CompressTarGz,
@@ -122,6 +123,7 @@ pub struct ContextMenuAction {
     pub command: ContextMenuCommand,
     pub action_id: String,
     pub variant_key: Option<String>,
+    pub target_kinds: Vec<String>,
     pub payload: ContextMenuActionPayload,
 }
 
@@ -148,6 +150,7 @@ impl ContextMenuCommand {
             "favorite.remove" => Self::RemoveFavorite,
             "file.rename" => Self::Rename,
             "file.move-to-trash" | "device.delete" => Self::Recycle,
+            "system.reveal" => Self::Reveal,
             "archive.compress.zip" => Self::CompressZip,
             "archive.compress.tar-gz" => Self::CompressTarGz,
             "archive.extract-here" => Self::ExtractHere,
@@ -281,4 +284,5 @@ pub enum VcsMenuCommand {
     SvnLog,
     SvnRevert,
     SvnCleanup,
+    SvnResolveConflicts,
 }

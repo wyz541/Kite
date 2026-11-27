@@ -573,7 +573,10 @@ private struct KiteBrowserColumn: View {
             }
         )
         .contextMenu {
-            KiteDirectoryMenu(model: model, column: column)
+            KiteContextMenuView(
+                model: model,
+                target: .background(path: column.path, title: column.title)
+            )
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(column.title)，\(column.entries.count) 个项目")
@@ -1152,7 +1155,14 @@ private struct KiteBrowserRow: View {
             }
         )
         .contextMenu {
-            KiteEntryMenu(model: model, entry: entry)
+            KiteContextMenuView(
+                model: model,
+                target: .entries(
+                    entry,
+                    columnIndex: columnIndex,
+                    surface: searchQuery == nil ? .browserColumns : .searchColumn
+                )
+            )
         }
         .help(entry.path)
         .accessibilityLabel(accessibilityLabel)
@@ -1527,7 +1537,11 @@ struct KiteContentSearchResults: View {
             .contextMenu {
                 KiteContextMenuView(
                     model: model,
-                    target: .searchEntry(BrowserEntry(contentMatch: file))
+                    target: .entries(
+                        BrowserEntry(contentMatch: file),
+                        columnIndex: nil,
+                        surface: .searchContent
+                    )
                 )
             }
             .help(file.path)
@@ -1799,7 +1813,10 @@ struct KiteGlobalSearchResults: View {
             }
         )
         .contextMenu {
-            KiteContextMenuView(model: model, target: .searchEntry(entry))
+            KiteContextMenuView(
+                model: model,
+                target: .entries(entry, columnIndex: nil, surface: .searchGlobal)
+            )
         }
         .help(entry.path)
         .accessibilityLabel("\(entry.name)，\(entry.isDirectory ? "文件夹" : entry.kindLabel)")
@@ -1810,23 +1827,5 @@ struct KiteGlobalSearchResults: View {
             .deletingLastPathComponent()
             .standardizedFileURL
             .path
-    }
-}
-
-private struct KiteEntryMenu: View {
-    @ObservedObject var model: KiteModel
-    let entry: BrowserEntry
-
-    var body: some View {
-        KiteContextMenuView(model: model, target: .entry(entry))
-    }
-}
-
-private struct KiteDirectoryMenu: View {
-    @ObservedObject var model: KiteModel
-    let column: BrowserColumn
-
-    var body: some View {
-        KiteContextMenuView(model: model, target: .directory(column))
     }
 }

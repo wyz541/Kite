@@ -320,6 +320,7 @@ pub struct ContextMenuActionDto {
     pub risk: String,
     pub confirmation_required: bool,
     pub target_paths: Vec<String>,
+    pub target_kinds: Vec<String>,
     pub payload_kind: String,
     pub payload_value: Option<String>,
     pub payload_state_revision: Option<String>,
@@ -874,6 +875,7 @@ fn vcs_menu_snapshot_dto(snapshot: VcsMenuSnapshot) -> VcsMenuSnapshotDto {
 }
 
 fn plan_dto(plan: MenuPlan) -> ContextMenuPlanDto {
+    let target_kinds = plan.target_kinds.clone();
     ContextMenuPlanDto {
         schema_version: plan.schema_version,
         snapshot_id: plan.snapshot_id,
@@ -900,6 +902,7 @@ fn plan_dto(plan: MenuPlan) -> ContextMenuPlanDto {
                                 risk: action.risk.as_str().to_string(),
                                 confirmation_required: action.requires_confirmation,
                                 target_paths: action.targets,
+                                target_kinds: target_kinds.clone(),
                                 payload_kind: action.payload.kind().to_string(),
                                 payload_value: action.payload.value().map(str::to_string),
                                 payload_state_revision: action
@@ -952,6 +955,7 @@ fn plan_dto(plan: MenuPlan) -> ContextMenuPlanDto {
                                     risk: action.risk.as_str().to_string(),
                                     confirmation_required: action.requires_confirmation,
                                     target_paths: action.targets,
+                                    target_kinds: target_kinds.clone(),
                                     payload_kind: action.payload.kind().to_string(),
                                     payload_value: action.payload.value().map(str::to_string),
                                     payload_state_revision: action
@@ -1051,7 +1055,7 @@ mod tests {
         assert_eq!(last.id, "G99");
         assert!(matches!(
             last.entries.last().and_then(|entry| entry.action.as_ref()),
-            Some(action) if action.action_id == "system.native-menu" && !action.enabled
+            Some(action) if action.action_id == "system.native-menu" && action.enabled
         ));
         assert!(
             plan.submenus
