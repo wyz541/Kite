@@ -24,6 +24,15 @@ enum KitePlatform {
         URL(fileURLWithPath: path).pathExtension.lowercased() == "xmind"
     }
 
+    static func isMindmapImportFile(_ path: String) -> Bool {
+        detectMindmapImportSource(path: path)?.format.supported == true
+    }
+
+    @MainActor
+    static func openMindmapConversion(_ path: String) {
+        KiteMindmapImportWindowController.open(sourcePath: path)
+    }
+
     @MainActor
     static func openTextEditor(_ path: String) {
         do {

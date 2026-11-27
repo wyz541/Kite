@@ -11,6 +11,7 @@ mod markdown;
 mod model;
 mod opml;
 mod segment;
+mod service;
 mod text;
 mod tree_builder;
 mod writer;
@@ -30,6 +31,11 @@ pub use opml::OpmlAdapter;
 pub use segment::{
     ParagraphExpansionReport, SentenceSplitOptions, TextFragment, add_paragraph_as_content_nodes,
     segment_sentences,
+};
+pub use service::{
+    CodeStrategy, ContentStrategies, ConversionOutcome, ConversionPreview, ImageStrategy,
+    ImportFormatInfo, ImportSourceInfo, TableStrategy, detect_source, generate as generate_mindmap,
+    preview as preview_mindmap, supported_formats as supported_import_formats,
 };
 pub use text::{
     TextAdapter, TextAdapterOptions, TextAnalysis, TextConfidence, TextLineAnalysis, TextLineKind,

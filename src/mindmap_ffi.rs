@@ -5,6 +5,10 @@ use serde_json::{Value, json};
 
 use crate::ffi::KiteError;
 use crate::mindmap::XmindPackage;
+use crate::mindmap_import::{
+    CodeStrategy, ContentStrategies, ConversionOptions, ConversionPreset, ImageStrategy,
+    TableStrategy, detect_source, generate_mindmap, preview_mindmap, supported_import_formats,
+};
 
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MindmapDocumentDto {
@@ -21,6 +25,124 @@ pub struct MindmapSaveResultDto {
     pub bytes_written: u64,
     pub byte_identical: bool,
     pub rewritten_entries: Vec<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MindmapImportFormatDto {
+    pub id: String,
+    pub display_name: String,
+    pub extensions: Vec<String>,
+    pub supported: bool,
+    pub support_note: String,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MindmapImportSourceDto {
+    pub path: String,
+    pub file_name: String,
+    pub format: MindmapImportFormatDto,
+    pub default_output_path: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MindmapImportPresetDto {
+    StructureFirst,
+    ExpandedContent,
+    StrictOutline,
+    SentenceSplit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MindmapImportTableStrategyDto {
+    Note,
+    RowsAsTopics,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MindmapImportCodeStrategyDto {
+    TopicNote,
+    ParentNote,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MindmapImportImageStrategyDto {
+    TopicLink,
+    ParentNote,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MindmapConversionOptionsDto {
+    pub preset: MindmapImportPresetDto,
+    pub split_content: bool,
+    pub preserve_original_paragraphs: bool,
+    pub merge_short_fragments: bool,
+    pub min_fragment_chars: u32,
+    pub max_title_chars: u32,
+    pub max_nodes: u32,
+    pub max_depth: u32,
+    pub include_source_path: bool,
+    pub table_strategy: MindmapImportTableStrategyDto,
+    pub code_strategy: MindmapImportCodeStrategyDto,
+    pub image_strategy: MindmapImportImageStrategyDto,
+}
+
+impl Default for MindmapConversionOptionsDto {
+    fn default() -> Self {
+        let options = ConversionOptions::default();
+        Self {
+            preset: MindmapImportPresetDto::StructureFirst,
+            split_content: options.split_content,
+            preserve_original_paragraphs: options.preserve_original_paragraphs,
+            merge_short_fragments: options.merge_short_fragments,
+            min_fragment_chars: options.min_fragment_chars as u32,
+            max_title_chars: options.max_title_chars as u32,
+            max_nodes: options.max_nodes as u32,
+            max_depth: u32::from(options.max_depth),
+            include_source_path: options.include_source_path,
+            table_strategy: MindmapImportTableStrategyDto::Note,
+            code_strategy: MindmapImportCodeStrategyDto::TopicNote,
+            image_strategy: MindmapImportImageStrategyDto::TopicLink,
+        }
+    }
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MindmapImportWarningDto {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub location: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MindmapConversionPreviewDto {
+    pub source: MindmapImportSourceDto,
+    pub output_path: String,
+    pub document_title: String,
+    pub source_sha256: String,
+    pub preset: MindmapImportPresetDto,
+    pub node_count: u32,
+    pub structure_node_count: u32,
+    pub content_node_count: u32,
+    pub max_depth: u32,
+    pub note_count: u32,
+    pub link_count: u32,
+    pub attachment_count: u32,
+    pub table_count: u32,
+    pub warnings: Vec<MindmapImportWarningDto>,
+    pub sample_tree_json: String,
+    pub sampled_node_count: u32,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MindmapConversionResultDto {
+    pub output_path: String,
+    pub source_sha256: String,
+    pub output_sha256: String,
+    pub source_unchanged: bool,
+    pub node_count: u32,
+    pub max_depth: u32,
+    pub warnings: Vec<MindmapImportWarningDto>,
 }
 
 #[derive(Clone, Debug, uniffi::Enum)]
@@ -58,6 +180,90 @@ pub enum MindmapEditDto {
     Delete {
         topic_id: String,
     },
+}
+
+#[uniffi::export]
+pub fn supported_mindmap_import_formats() -> Vec<MindmapImportFormatDto> {
+    supported_import_formats()
+        .into_iter()
+        .map(import_format_dto)
+        .collect()
+}
+
+#[uniffi::export]
+pub fn detect_mindmap_import_source(path: String) -> Option<MindmapImportSourceDto> {
+    detect_source(std::path::Path::new(&path)).map(import_source_dto)
+}
+
+#[uniffi::export]
+pub fn preview_mindmap_conversion(
+    source_path: String,
+    options: MindmapConversionOptionsDto,
+) -> Result<MindmapConversionPreviewDto, KiteError> {
+    let (conversion_options, strategies) = import_options(&options)?;
+    let preview = preview_mindmap(
+        std::path::Path::new(&source_path),
+        &conversion_options,
+        strategies,
+    )
+    .map_err(import_error)?;
+    Ok(MindmapConversionPreviewDto {
+        source: import_source_dto(preview.source),
+        output_path: preview.output_path.to_string_lossy().into_owned(),
+        document_title: preview.document_title,
+        source_sha256: preview.source_sha256,
+        preset: import_preset_dto(&preview.report.preset),
+        node_count: count_u32(preview.report.node_count),
+        structure_node_count: count_u32(preview.report.structure_node_count),
+        content_node_count: count_u32(preview.report.content_node_count),
+        max_depth: count_u32(preview.report.max_depth),
+        note_count: count_u32(preview.report.note_count),
+        link_count: count_u32(preview.report.link_count),
+        attachment_count: count_u32(preview.report.attachment_count),
+        table_count: count_u32(preview.report.table_count),
+        warnings: preview
+            .report
+            .warnings
+            .iter()
+            .map(import_warning_dto)
+            .collect(),
+        sample_tree_json: preview.sample_tree_json,
+        sampled_node_count: count_u32(preview.sampled_node_count),
+    })
+}
+
+#[uniffi::export]
+pub fn convert_mindmap_file(
+    source_path: String,
+    expected_source_sha256: String,
+    output_path: String,
+    overwrite_existing_output: bool,
+    options: MindmapConversionOptionsDto,
+) -> Result<MindmapConversionResultDto, KiteError> {
+    let (conversion_options, strategies) = import_options(&options)?;
+    let outcome = generate_mindmap(
+        std::path::Path::new(&source_path),
+        std::path::Path::new(&output_path),
+        &expected_source_sha256,
+        overwrite_existing_output,
+        &conversion_options,
+        strategies,
+    )
+    .map_err(import_error)?;
+    Ok(MindmapConversionResultDto {
+        output_path: outcome.output_path.to_string_lossy().into_owned(),
+        source_sha256: outcome.source_sha256,
+        output_sha256: outcome.output_sha256,
+        source_unchanged: outcome.source_unchanged,
+        node_count: count_u32(outcome.report.node_count),
+        max_depth: count_u32(outcome.report.max_depth),
+        warnings: outcome
+            .report
+            .warnings
+            .iter()
+            .map(import_warning_dto)
+            .collect(),
+    })
 }
 
 #[uniffi::export]
@@ -112,6 +318,112 @@ pub fn save_mindmap_content(
         byte_identical: report.byte_identical,
         rewritten_entries: report.rewritten_entries,
     })
+}
+
+fn import_format_dto(format: crate::mindmap_import::ImportFormatInfo) -> MindmapImportFormatDto {
+    MindmapImportFormatDto {
+        id: format.id,
+        display_name: format.display_name,
+        extensions: format.extensions,
+        supported: format.supported,
+        support_note: format.support_note,
+    }
+}
+
+fn import_source_dto(source: crate::mindmap_import::ImportSourceInfo) -> MindmapImportSourceDto {
+    MindmapImportSourceDto {
+        path: source.path.to_string_lossy().into_owned(),
+        file_name: source.file_name,
+        format: import_format_dto(source.format),
+        default_output_path: source.default_output_path.to_string_lossy().into_owned(),
+    }
+}
+
+fn import_options(
+    options: &MindmapConversionOptionsDto,
+) -> Result<(ConversionOptions, ContentStrategies), KiteError> {
+    let conversion = ConversionOptions {
+        preset: import_preset(&options.preset),
+        split_content: options.split_content,
+        preserve_original_paragraphs: options.preserve_original_paragraphs,
+        merge_short_fragments: options.merge_short_fragments,
+        min_fragment_chars: usize::try_from(options.min_fragment_chars).unwrap_or(usize::MAX),
+        max_title_chars: usize::try_from(options.max_title_chars).unwrap_or(usize::MAX),
+        max_nodes: usize::try_from(options.max_nodes).unwrap_or(usize::MAX),
+        max_depth: u8::try_from(options.max_depth).unwrap_or(u8::MAX),
+        include_source_path: options.include_source_path,
+    };
+    conversion.validate().map_err(import_error)?;
+    let strategies = ContentStrategies {
+        table: match options.table_strategy {
+            MindmapImportTableStrategyDto::Note => TableStrategy::Note,
+            MindmapImportTableStrategyDto::RowsAsTopics => TableStrategy::RowsAsTopics,
+        },
+        code: match options.code_strategy {
+            MindmapImportCodeStrategyDto::TopicNote => CodeStrategy::TopicNote,
+            MindmapImportCodeStrategyDto::ParentNote => CodeStrategy::ParentNote,
+        },
+        image: match options.image_strategy {
+            MindmapImportImageStrategyDto::TopicLink => ImageStrategy::TopicLink,
+            MindmapImportImageStrategyDto::ParentNote => ImageStrategy::ParentNote,
+        },
+    };
+    Ok((conversion, strategies))
+}
+
+fn import_preset(preset: &MindmapImportPresetDto) -> ConversionPreset {
+    match preset {
+        MindmapImportPresetDto::StructureFirst => ConversionPreset::StructureFirst,
+        MindmapImportPresetDto::ExpandedContent => ConversionPreset::ExpandedContent,
+        MindmapImportPresetDto::StrictOutline => ConversionPreset::StrictOutline,
+        MindmapImportPresetDto::SentenceSplit => ConversionPreset::SentenceSplit,
+    }
+}
+
+fn import_preset_dto(preset: &ConversionPreset) -> MindmapImportPresetDto {
+    match preset {
+        ConversionPreset::StructureFirst => MindmapImportPresetDto::StructureFirst,
+        ConversionPreset::ExpandedContent => MindmapImportPresetDto::ExpandedContent,
+        ConversionPreset::StrictOutline => MindmapImportPresetDto::StrictOutline,
+        ConversionPreset::SentenceSplit => MindmapImportPresetDto::SentenceSplit,
+    }
+}
+
+fn import_warning_dto(
+    warning: &crate::mindmap_import::ConversionWarning,
+) -> MindmapImportWarningDto {
+    MindmapImportWarningDto {
+        code: format!("{:?}", warning.code),
+        severity: match warning.severity {
+            crate::mindmap_import::WarningSeverity::Info => "info".to_string(),
+            crate::mindmap_import::WarningSeverity::Warning => "warning".to_string(),
+            crate::mindmap_import::WarningSeverity::Error => "error".to_string(),
+        },
+        message: warning.message.clone(),
+        location: warning.source.as_ref().map(|source| {
+            let mut parts = Vec::new();
+            if !source.path.is_empty() {
+                parts.push(source.path.join(" / "));
+            }
+            if let Some(line) = source.line {
+                parts.push(format!("第 {line} 行"));
+            }
+            if let Some(column) = source.column {
+                parts.push(format!("第 {column} 列"));
+            }
+            parts.join(" · ")
+        }),
+    }
+}
+
+fn import_error(error: crate::mindmap_import::ImportError) -> KiteError {
+    KiteError::OperationFailed {
+        message: error.to_string(),
+    }
+}
+
+fn count_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn document_dto(path: String, package: &XmindPackage) -> Result<MindmapDocumentDto, KiteError> {
