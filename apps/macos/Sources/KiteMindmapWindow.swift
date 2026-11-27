@@ -17,6 +17,9 @@ private struct MindmapTopicFormatDraft: Equatable {
     var borderWidth = 1.0
     var borderPattern = "solid"
     var cornerRadius = 4.0
+    var alignment = "left"
+    var lineHeight = ""
+    var letterSpacing = ""
 }
 
 @MainActor
@@ -24,6 +27,9 @@ private struct MindmapGraphDraft: Equatable {
     var structure: MindmapGraphStructureDto = .logicRight
     var connectorKind: MindmapConnectorKindDto = .curved
     var cornerRadius = 12.0
+    var connectorWidth: String?
+    var connectorColor: String?
+    var connectorPattern: String?
 }
 
 @MainActor
@@ -33,6 +39,7 @@ private struct MindmapDateDraft: Equatable {
     var precision: MindmapDatePrecisionDto = .dateOnly
     var target: MindmapDateTargetDto = .title
     var placement: MindmapDatePlacementDto = .end
+    var kind: MindmapDateKindDto = .date
 }
 
 @MainActor
@@ -352,7 +359,10 @@ private final class MindmapEditorModel: ObservableObject {
                 patch: MindmapDocumentStylePatchDto(
                     structure: structure,
                     connectorKind: connectorKind,
-                    connectorCornerRadius: UInt16(max(0, min(256, self.graphDraft.cornerRadius)))
+                    connectorCornerRadius: UInt16(max(0, min(256, self.graphDraft.cornerRadius))),
+                    connectorWidth: self.graphDraft.connectorWidth,
+                    connectorColor: self.graphDraft.connectorColor,
+                    connectorPattern: self.graphDraft.connectorPattern
                 )
             )
         }
@@ -454,6 +464,7 @@ private final class MindmapEditorModel: ObservableObject {
             precision: dateDraft.precision,
             target: dateDraft.target,
             placement: dateDraft.placement,
+            kind: dateDraft.kind,
             systemDateOrder: systemPattern?.0,
             systemDateSeparator: systemPattern?.1
         )
@@ -480,7 +491,9 @@ private final class MindmapEditorModel: ObservableObject {
             underline: topicFormat.underline,
             strike: topicFormat.strike,
             textColor: topicFormat.textColorHex,
-            alignment: "left",
+            alignment: topicFormat.alignment,
+            lineHeight: topicFormat.lineHeight.isEmpty ? nil : topicFormat.lineHeight,
+            letterSpacing: topicFormat.letterSpacing.isEmpty ? nil : topicFormat.letterSpacing,
             nodeFill: topicFormat.fillColorHex,
             borderColor: topicFormat.borderColorHex,
             borderWidth: topicFormat.borderWidth,
@@ -686,7 +699,10 @@ private final class MindmapEditorModel: ObservableObject {
             borderColorHex: topic.style.borderColorHex ?? "#D0D7DE",
             borderWidth: topic.style.borderWidth,
             borderPattern: topic.style.borderPattern ?? "solid",
-            cornerRadius: topic.style.cornerRadius ?? (topic.shapeClass?.contains("rounded") == true ? 8 : 2)
+            cornerRadius: topic.style.cornerRadius ?? (topic.shapeClass?.contains("rounded") == true ? 8 : 2),
+            alignment: topic.style.alignment ?? "left",
+            lineHeight: topic.style.lineHeight ?? "",
+            letterSpacing: topic.style.letterSpacing ?? ""
         )
     }
 
@@ -700,7 +716,10 @@ private final class MindmapEditorModel: ObservableObject {
         MindmapGraphDraft(
             structure: style.structure == .unknown ? .logicRight : style.structure,
             connectorKind: style.connectorKind == .unknown ? .curved : style.connectorKind,
-            cornerRadius: Double(style.connectorCornerRadius ?? 12)
+            cornerRadius: Double(style.connectorCornerRadius ?? 12),
+            connectorWidth: style.connectorWidth,
+            connectorColor: style.connectorColor,
+            connectorPattern: style.connectorPattern
         )
     }
 

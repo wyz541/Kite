@@ -22,6 +22,8 @@ struct MindmapTopicVisualStyle: Equatable {
     var borderPattern: String?
     var cornerRadius: Double?
     var alignment: String?
+    var lineHeight: String?
+    var letterSpacing: String?
 
     var accentHex: String? { borderColorHex ?? fillColorHex ?? textColorHex }
 }
@@ -244,6 +246,8 @@ private func parseVisualStyle(_ properties: [String: Any]?) -> MindmapTopicVisua
     style.borderPattern = properties?["border-line-pattern"] as? String
     style.cornerRadius = parseMeasurement(properties?["shape-corner"])
     style.alignment = properties?["fo:text-align"] as? String
+    style.lineHeight = properties?["fo:line-height"] as? String
+    style.letterSpacing = properties?["fo:letter-spacing"] as? String
     return style
 }
 
