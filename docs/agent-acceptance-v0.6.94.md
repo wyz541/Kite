@@ -2,15 +2,16 @@
 
 ## 状态
 
-该记录用于 #157 的双平台产品化验收。**#157 保持 open，直至下列剩余项全部完成。**
+该记录用于 #157 的双平台产品化验收。**2026-11-27 决定：将下列两项作为已知限制接受，并关闭 #157；它们不记为已通过。**
 
 Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11-26 已在 macOS Apple Silicon 与 Windows x64 上使用真实 Claude Code ACP 和真实 Codex ACP 完成主要 UI 闭环；Codex 通过现有 DeepSeek 配置运行，Kite 未复制或保存该提供方的 token。
 
-仍需完成：
+已接受为已知限制：
 
-- Windows 自动跟随/手动滚动暂停验证；该项属于 UI-only 交互，不能由 CLI/MCP 替代。
-- Windows 与 macOS 的完整键盘焦点序列，重点是权限按钮和上下文 chip；该项属于 UI-only 无障碍验收。
-- 上述项完成后更新本记录并关闭 #157。
+- Windows 自动跟随/手动滚动暂停验证；该项属于 UI-only 交互，不能由 CLI/MCP 替代，保留为后续 UI 验收项。
+- Windows 与 macOS 的完整键盘焦点序列，重点是权限按钮和上下文 chip；该项属于 UI-only 无障碍验收，保留为后续 UI 验收项。
+
+关闭 #157 不代表上述两项已通过，只表示它们不再阻塞当前版本发布。
 
 ## macOS 实机验收（2026-11-26）
 
@@ -47,7 +48,7 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11
 - 设置页 Tab 顺序覆盖“通用、外观、布局、文件处理、Agent、更新、关于”，并可继续进入 Agent 配置按钮。
 - 权限请求的呈现顺序固定为允许一次、始终允许、拒绝一次、始终拒绝、取消任务。
 
-仍未通过的键盘项：
+已知限制（已接受，不记为通过）：
 
 - 从 Agent 输入框完整 Tab/Shift+Tab 到权限按钮与上下文 chip 的环形焦点序列。
 - 上下文 chip 的键盘移除与定位动作。
@@ -74,7 +75,7 @@ Core、CLI、MCP、fixture、Windows 编译与性能基线已可复现。2026-11
 - 使用真实 `@agentclientprotocol/codex-acp 2.12.1` 与自定义 DeepSeek provider 完成 Codex ACP 流式回答，Kite UI 最终回答为 `DEEPSEEK-WIN-OK`；旧 `@zed-industries/codex-acp 0.16.0` 因不兼容当前 `[agents]` 配置而不再列为内置预设。
 - Codex ACP 配置只保存 `node.exe`、适配器脚本、模型、工作目录和权限策略；未把 provider token 写入 Kite 配置。
 
-仍未完成的 Windows 验收：自动跟随/手动滚动暂停、完整键盘焦点序列。上述项目不得记为通过。
+已知限制（已接受，不记为通过）：自动跟随/手动滚动暂停、完整键盘焦点序列。上述项目保留为后续 UI 验收项。
 
 ## CLI / MCP 无 UI 验收（2026-11-26）
 
@@ -184,5 +185,5 @@ Windows 与 macOS 必须显示相同的 Agent、模型、工作目录、权限�
 
 - Codex ACP 会声明 ChatGPT / API key 认证方法；连接测试因此显示“需要认证”。但 CC Switch 自定义 provider 的 profile 可继续完成真实会话，Kite 只做诊断展示，不改变 Agent 原生认证。
 - Claude Code ACP 在用户拒绝写入权限时可能返回上游 `Internal error`；Kite 现在将该终态归一化为“权限请求已拒绝”，原始细节仍保留在脱敏诊断日志。
-- 完整键盘焦点序列尚需继续修复并复验；#157 不得提前关闭。
+- 完整键盘焦点序列作为已知限制接受；保留为后续 UI 验收项，不阻塞 #157 关闭。
 - 旧 `@zed-industries/codex-acp 0.16.0` 已弃用；Windows 新验收使用 `@agentclientprotocol/codex-acp 2.12.1`。macOS 的 `0.16.0` 记录保留为历史实机证据，不代表当前预设。
