@@ -92,6 +92,16 @@ fn markdown_fixture(root: &Path) -> PathBuf {
     path
 }
 
+fn low_confidence_text_fixture(root: &Path) -> PathBuf {
+    let path = root.join("ambiguous-notes.txt");
+    fs::write(
+        &path,
+        "背景\n下一句正文需要足够长才能稳定识别吗。\n\n第二段正文同样足够长，不会触发短句合并。\n",
+    )
+    .expect("write text");
+    path
+}
+
 #[test]
 fn format_catalog_and_detection_match_supported_adapters() {
     let formats = supported_mindmap_import_formats();
@@ -288,6 +298,140 @@ fn rows_as_topics_expands_each_data_row_with_header_and_caption_context() {
         plain_note(&topic_children(table)[1]),
         Some("Windows | Pending")
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn preview_exposes_stable_stats_complete_warnings_and_txt_confidence() {
+    let root = temp_dir("preview-stats");
+    let source_path = low_confidence_text_fixture(&root);
+    let preview = preview_mindmap_conversion(
+        source_path.to_string_lossy().into_owned(),
+        MindmapConversionOptionsDto {
+            max_title_chars: 4,
+            ..MindmapConversionOptionsDto::default()
+        },
+    )
+    .expect("text preview");
+
+    assert_eq!(preview.structure_confidence, "low");
+    assert_eq!(preview.inferred_heading_count, 0);
+    assert!(preview.ambiguous_short_line_count >= 1);
+    assert!(preview.split_fragments >= 1);
+    assert!(!preview.warnings.is_empty());
+    assert!(preview.warnings.iter().all(|warning| {
+        !warning.code.is_empty() && !warning.severity.is_empty() && !warning.message.is_empty()
+    }));
+    assert!(preview.warnings.iter().any(|warning| {
+        warning.code == "TitleTruncated"
+            && warning
+                .location
+                .as_deref()
+                .is_some_and(|location| location.contains("第 1 行"))
+    }));
+    assert!(preview.warnings.iter().any(|warning| {
+        warning.code == "InvalidStructure" && warning.message.contains("short line")
+    }));
+
+    let result = convert_mindmap_file(
+        source_path.to_string_lossy().into_owned(),
+        preview.source_sha256.clone(),
+        preview.output_path.clone(),
+        false,
+        MindmapConversionOptionsDto {
+            max_title_chars: 4,
+            ..MindmapConversionOptionsDto::default()
+        },
+    )
+    .expect("convert previewed text");
+    assert_eq!(result.warnings.len(), preview.warnings.len());
+    assert_eq!(
+        result
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>(),
+        preview
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let sample: serde_json::Value =
+        serde_json::from_str(&preview.sample_tree_json).expect("preview JSON");
+    assert_eq!(sample["kind"], "document");
+    assert_eq!(sample["structureConfidence"], "low");
+    assert_eq!(sample["inferredHeadingCount"], 0);
+    assert_eq!(
+        sample["ambiguousShortLineCount"].as_u64(),
+        Some(u64::from(preview.ambiguous_short_line_count))
+    );
+    assert!(
+        sample["children"]
+            .as_array()
+            .is_some_and(|children| !children.is_empty())
+    );
+
+    let skipped_source = markdown_fixture(&root);
+    let skipped = preview_mindmap_conversion(
+        skipped_source.to_string_lossy().into_owned(),
+        MindmapConversionOptionsDto {
+            split_content: false,
+            ..MindmapConversionOptionsDto::default()
+        },
+    )
+    .expect("strict preview");
+    assert!(skipped.skipped_items >= 1);
+    assert!(
+        skipped
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "ContentSkipped")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn explicit_overwrite_and_failed_generation_preserve_existing_output() {
+    let root = temp_dir("overwrite-safety");
+    let source_path = markdown_fixture(&root);
+    let preview = preview_mindmap_conversion(
+        source_path.to_string_lossy().into_owned(),
+        MindmapConversionOptionsDto::default(),
+    )
+    .expect("preview");
+    let output_path = preview.output_path.clone();
+    let sentinel = b"existing output must survive a failed conversion";
+    fs::write(&output_path, sentinel).expect("seed existing output");
+
+    let failure = convert_mindmap_file(
+        source_path.to_string_lossy().into_owned(),
+        preview.source_sha256.clone(),
+        output_path.clone(),
+        true,
+        MindmapConversionOptionsDto {
+            max_title_chars: 0,
+            ..MindmapConversionOptionsDto::default()
+        },
+    )
+    .expect_err("invalid options must fail before writing");
+    assert!(failure.to_string().contains("max_title_chars"));
+    assert_eq!(fs::read(&output_path).expect("existing output"), sentinel);
+
+    let result = convert_mindmap_file(
+        source_path.to_string_lossy().into_owned(),
+        preview.source_sha256,
+        output_path.clone(),
+        true,
+        MindmapConversionOptionsDto::default(),
+    )
+    .expect("explicit overwrite");
+    assert_eq!(Path::new(&result.output_path), Path::new(&output_path));
+    assert_ne!(fs::read(&output_path).expect("generated output"), sentinel);
+    XmindPackage::open(Path::new(&output_path)).expect("overwritten XMind is valid");
 
     let _ = fs::remove_dir_all(root);
 }

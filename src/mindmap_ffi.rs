@@ -139,6 +139,13 @@ pub struct MindmapConversionPreviewDto {
     pub link_count: u32,
     pub attachment_count: u32,
     pub table_count: u32,
+    pub split_fragments: u32,
+    pub merged_fragments: u32,
+    pub truncated_titles: u32,
+    pub skipped_items: u32,
+    pub structure_confidence: String,
+    pub inferred_heading_count: u32,
+    pub ambiguous_short_line_count: u32,
     pub warnings: Vec<MindmapImportWarningDto>,
     pub sample_tree_json: String,
     pub sampled_node_count: u32,
@@ -438,6 +445,13 @@ pub fn preview_mindmap_conversion(
         link_count: count_u32(preview.report.link_count),
         attachment_count: count_u32(preview.report.attachment_count),
         table_count: count_u32(preview.report.table_count),
+        split_fragments: count_u32(preview.stats.split_fragments),
+        merged_fragments: count_u32(preview.stats.merged_fragments),
+        truncated_titles: count_u32(preview.stats.truncated_titles),
+        skipped_items: count_u32(preview.stats.skipped_items),
+        structure_confidence: preview.structure_confidence,
+        inferred_heading_count: count_u32(preview.inferred_heading_count),
+        ambiguous_short_line_count: count_u32(preview.ambiguous_short_line_count),
         warnings: preview
             .report
             .warnings
