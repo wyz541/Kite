@@ -194,6 +194,8 @@ impl ContextMenuCommand {
             "archive.extract-here" => Self::ExtractHere,
             "archive.extract-to" => Self::ExtractTo,
             "system.properties" => Self::ShowProperties,
+            "tool.kite.mindmap" => Self::OpenMindmap,
+            "tool.kite.mindmap-import" => Self::ConvertDocumentToMindmap,
             "system.native-menu" => Self::SystemMenu,
             "tool.kite.mindmap" => Self::OpenMindmap,
             "tool.kite.mindmap-import" => Self::ConvertDocumentToMindmap,

@@ -3676,6 +3676,31 @@ mod tests {
     }
 
     #[test]
+    fn mindmap_actions_require_explicit_platform_capabilities() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.capabilities.mindmap_available = true;
+        context.capabilities.mindmap_import_available = true;
+
+        let plan = compose_default_menu(&context).expect("compose mindmap menu");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"tool.kite.mindmap"));
+        assert!(ids.contains(&"tool.kite.mindmap-import"));
+
+        let multi = snapshot(
+            ContextSurface::BrowserList,
+            &[TargetKind::File, TargetKind::File],
+            2,
+        );
+        let mut multi = multi;
+        multi.capabilities.mindmap_available = true;
+        multi.capabilities.mindmap_import_available = true;
+        let multi_plan = compose_default_menu(&multi).expect("compose multi-selection menu");
+        let ids = multi_plan.visible_action_ids();
+        assert!(!ids.contains(&"tool.kite.mindmap"));
+        assert!(!ids.contains(&"tool.kite.mindmap-import"));
+    }
+
+    #[test]
     fn file_menu_is_deduplicated_and_ordered() {
         let context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
         let plan = compose_default_menu(&context).expect("compose file menu");

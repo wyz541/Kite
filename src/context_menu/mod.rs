@@ -352,9 +352,15 @@ impl ContextMenuTarget {
             };
             load_vcs_menu_snapshot(&vcs_paths, &self.working_directory)
         };
-        let single_file = paths.len() == 1 && !self.is_shell_namespace && !self.is_dir;
-        let mindmap_available = single_file && is_xmind_path(&paths[0]);
-        let mindmap_import_available = single_file && is_supported_mindmap_import_path(&paths[0]);
+        let primary_path = paths.first().unwrap_or(&self.path);
+        let mindmap_available = paths.len() == 1
+            && !self.is_shell_namespace
+            && !self.is_dir
+            && is_xmind_path(primary_path);
+        let mindmap_import_available = paths.len() == 1
+            && !self.is_shell_namespace
+            && !self.is_dir
+            && is_supported_mindmap_import_path(primary_path);
         ContextSnapshot {
             schema_version: kite_core::context_menu_model::CONTEXT_MENU_SCHEMA_VERSION,
             snapshot_id: format!("windows-context-menu:{}", self.path.display()),
