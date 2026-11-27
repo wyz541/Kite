@@ -4,6 +4,15 @@
 //! first compatibility slice. Every other entry is copied through the ZIP writer
 //! without decoding so that future XMind features and attachments survive a save.
 
+pub mod graph_style;
+
+pub use graph_style::{
+    ConnectorColor, ConnectorCornerRadius, ConnectorKind, ConnectorLinePattern, ConnectorStyle,
+    ConnectorStylePatch, ConnectorWidth, DocumentGraphStyle, DocumentGraphStylePatch,
+    GraphStructure, GraphStyleError, apply_document_graph_style as apply_graph_style_to_content,
+    read_document_graph_style as read_graph_style_from_content,
+};
+
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
@@ -195,6 +204,29 @@ impl XmindPackage {
 
     pub fn entries(&self) -> &[XmindEntryInfo] {
         &self.entries
+    }
+
+    /// Read the typed graph structure and connector style for one sheet.
+    pub fn document_graph_style(
+        &self,
+        sheet_index: usize,
+    ) -> Result<DocumentGraphStyle, GraphStyleError> {
+        graph_style::read_document_graph_style(&self.content, sheet_index)
+    }
+
+    /// Apply a document-level graph style patch atomically in memory.
+    ///
+    /// The package only becomes dirty if the resulting `content.json` differs from
+    /// its source. Unknown JSON fields and unknown ZIP entries remain untouched.
+    pub fn apply_document_graph_style(
+        &mut self,
+        sheet_index: usize,
+        patch: &DocumentGraphStylePatch,
+    ) -> Result<(), GraphStyleError> {
+        let mut next = self.content.clone();
+        graph_style::apply_document_graph_style(&mut next, sheet_index, patch)?;
+        self.replace_content(next);
+        Ok(())
     }
 
     pub fn is_dirty(&self) -> bool {

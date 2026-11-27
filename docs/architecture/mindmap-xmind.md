@@ -54,6 +54,10 @@ AtomicFile 原子写入
 - `XmindPackage::edit_content_json`
 - `XmindPackage::save`
 - `XmindPackage::save_as`
+- `XmindPackage::document_graph_style`
+- `XmindPackage::apply_document_graph_style`
+
+图结构和连线的字段映射、兼容性状态与 UI 消费约束见 [XMind 图结构与连线格式兼容性审计](mindmap-xmind-format-audit.md)。
 
 后续应在此模块上增加 typed topic model、命令栈和布局场景，而不是让 UI 直接操作 `serde_json::Value`。
 
