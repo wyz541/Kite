@@ -13,9 +13,9 @@ use sha2::{Digest, Sha256};
 
 use crate::mindmap::XmindPackage;
 use crate::mindmap_import::{
-    ConversionOptions, ConversionReport, DocxAdapter, HtmlAdapter, MarkdownAdapter, OpmlAdapter,
-    OutlineAdapter, OutlineDocument, OutlineNode, OutlineNodeKind, SourceFormat, SourceInput,
-    TextAdapter, write_xmind_bytes, write_xmind_file,
+    ConversionOptions, ConversionReport, ConversionWarning, ConversionWarningCode, DocxAdapter,
+    HtmlAdapter, MarkdownAdapter, OpmlAdapter, OutlineAdapter, OutlineDocument, OutlineNode,
+    OutlineNodeKind, SourceFormat, SourceInput, TextAdapter, write_xmind_bytes, write_xmind_file,
 };
 
 const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
@@ -295,7 +295,8 @@ fn source_format(id: &str) -> Result<SourceFormat, crate::mindmap_import::Import
 
 fn apply_content_strategies(document: &mut OutlineDocument, strategies: ContentStrategies) {
     if strategies.table == TableStrategy::RowsAsTopics {
-        expand_table_rows(&mut document.children);
+        expand_table_rows(&mut document.children, &mut document.warnings);
+        expand_document_tables(document);
     }
     if strategies.code == CodeStrategy::ParentNote {
         fold_children(&mut document.children, is_code_topic);
@@ -305,42 +306,95 @@ fn apply_content_strategies(document: &mut OutlineDocument, strategies: ContentS
     }
 }
 
-fn expand_table_rows(nodes: &mut [OutlineNode]) {
+fn expand_table_rows(nodes: &mut [OutlineNode], warnings: &mut Vec<ConversionWarning>) {
     for node in nodes {
-        expand_table_rows(&mut node.children);
+        expand_table_rows(&mut node.children, warnings);
         let tables = std::mem::take(&mut node.tables);
         for (table_index, table) in tables.into_iter().enumerate() {
-            let title = table
-                .caption
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| format!("表格 {}", table_index + 1));
-            let mut table_topic = OutlineNode::content(
-                title,
-                crate::mindmap_import::ContentKind::Other("table".to_string()),
-            );
-            if !table.headers.is_empty() || !table.rows.is_empty() {
-                let mut note = String::new();
-                if !table.headers.is_empty() {
-                    note.push_str(&table.headers.join(" | "));
-                }
-                for row in table.rows {
-                    if !note.is_empty() {
-                        note.push('\n');
-                    }
-                    note.push_str(&row.join(" | "));
-                }
-                table_topic
-                    .notes
-                    .push(crate::mindmap_import::OutlineNote::plain(
-                        note,
-                        table.source,
-                    ));
-            }
+            let fallback_source = node.source.clone();
+            let table_topic = table_topic(table, table_index, fallback_source, warnings);
             node.children.push(table_topic);
         }
     }
+}
+
+fn expand_document_tables(document: &mut OutlineDocument) {
+    let tables = std::mem::take(&mut document.tables);
+    for (table_index, table) in tables.into_iter().enumerate() {
+        let table_topic = table_topic(table, table_index, None, &mut document.warnings);
+        document.children.push(table_topic);
+    }
+}
+
+fn table_topic(
+    table: crate::mindmap_import::OutlineTable,
+    table_index: usize,
+    fallback_source: Option<crate::mindmap_import::SourceLocation>,
+    warnings: &mut Vec<ConversionWarning>,
+) -> OutlineNode {
+    let title = table
+        .caption
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("表格 {}", table_index + 1));
+    let source = table.source.clone().or(fallback_source);
+    warnings.push(ConversionWarning::warning(
+        ConversionWarningCode::TableFlattened,
+        format!(
+            "Table \"{title}\" was expanded into one topic per data row; header/caption context was retained in the table topic note"
+        ),
+        source.clone(),
+    ));
+    let mut table_topic = OutlineNode::content(
+        title,
+        crate::mindmap_import::ContentKind::Other("table".to_string()),
+    );
+    table_topic.source = source.clone();
+
+    let mut context = Vec::new();
+    if let Some(caption) = table
+        .caption
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        context.push(format!("Caption: {caption}"));
+    }
+    if !table.headers.is_empty() {
+        context.push(format!("Headers: {}", table.headers.join(" | ")));
+    }
+    if !context.is_empty() {
+        table_topic
+            .notes
+            .push(crate::mindmap_import::OutlineNote::plain(
+                context.join("\n"),
+                source.clone(),
+            ));
+    }
+
+    for (row_index, row) in table.rows.into_iter().enumerate() {
+        let row_text = row.join(" | ");
+        let title = if row_text.trim().is_empty() {
+            format!("Row {}", row_index + 1)
+        } else {
+            row_text.clone()
+        };
+        let mut row_topic = OutlineNode::content(
+            title,
+            crate::mindmap_import::ContentKind::Other("table_row".to_string()),
+        );
+        row_topic.source = source.clone();
+        if !row_text.trim().is_empty() {
+            row_topic
+                .notes
+                .push(crate::mindmap_import::OutlineNote::plain(
+                    row_text,
+                    source.clone(),
+                ));
+        }
+        table_topic.children.push(row_topic);
+    }
+    table_topic
 }
 
 fn fold_children(nodes: &mut [OutlineNode], predicate: fn(&OutlineNode) -> bool) {
