@@ -1,6 +1,18 @@
 import AppKit
 import SwiftUI
 
+enum KiteNativeMenuBridge {
+    static var isAvailable: Bool {
+        guard let services = NSApp?.servicesMenu else { return false }
+        return !services.items.isEmpty
+    }
+
+    static func showServices() {
+        guard let services = NSApp?.servicesMenu else { return }
+        services.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+}
+
 enum KiteContextMenuTarget {
     case entry(BrowserEntry)
     case searchEntry(BrowserEntry)
@@ -26,6 +38,10 @@ struct KiteContextMenuView: View {
     }
 
     private func makePlan() -> ContextMenuPlanDto {
+        let vcsMenu = loadVcsMenuSnapshot(
+            paths: menuPaths,
+            workingDirectory: workingDirectory
+        )
         let request = ContextMenuRequestDto(
             surface: surface,
             platform: "macos",
@@ -43,8 +59,8 @@ struct KiteContextMenuView: View {
             supportsDelete: menuPaths.allSatisfy(KitePlatform.canModify),
             supportsFavorite: true,
             isFavorite: menuPaths.count == 1 && model.isFavorite(path: primaryPath),
-            gitAvailable: gitAvailable,
-            svnAvailable: svnAvailable,
+            gitAvailable: vcsMenu.gitAvailable,
+            svnAvailable: vcsMenu.svnAvailable,
             agentAvailable: agent.hasConfiguredAgent,
             quickLookAvailable: true,
             revealAvailable: true,
@@ -60,7 +76,7 @@ struct KiteContextMenuView: View {
                 && !isDirectoryContext
                 && KitePlatform.isMindmapImportFile(primaryPath),
             isShellNamespace: false,
-            nativePlaneAvailable: false,
+            nativePlaneAvailable: KiteNativeMenuBridge.isAvailable,
             openWith: openWithCatalog.catalog(for: openWithPath).dto,
             tools: toolCatalog.catalog(
                 paths: menuPaths,
@@ -69,6 +85,7 @@ struct KiteContextMenuView: View {
                 gitAvailable: gitAvailable
             ).dto,
             toolPolicy: toolPolicy.policy.dto,
+            vcsMenu: vcsMenu,
             compact: true,
             hideUnavailable: true,
             confirmHighRisk: true
@@ -318,6 +335,9 @@ private struct KiteContextMenuRunner {
     func perform(_ action: ContextMenuActionDto) {
         let paths = action.targetPaths
         let primaryPath = paths.first ?? target.primaryPath
+        if isVcsWriteAction(action.actionId) {
+            guard validateVcsRevision(action, path: primaryPath) else { return }
+        }
         switch action.actionId {
         case "navigation.refresh":
             model.refresh()
@@ -455,6 +475,17 @@ private struct KiteContextMenuRunner {
                 path: repositoryPath(for: primaryPath),
                 model: model
             )
+        case "git.conflicts.resolve":
+            KiteGitClientWindowController.show(
+                model: model,
+                repositoryPath: repositoryPath(for: primaryPath)
+            )
+        case "git.operation.continue":
+            executeGitMenuControl(.continueOperation, path: primaryPath)
+        case "git.operation.skip":
+            executeGitMenuControl(.skip, path: primaryPath)
+        case "git.operation.abort":
+            executeGitMenuControl(.abort, path: primaryPath)
         case "git.discard":
             if confirm(
                 title: "放弃更改？",
@@ -492,8 +523,10 @@ private struct KiteContextMenuRunner {
             }
         case "svn.cleanup":
             runVcsOperation(.svn, .cleanup, path: repositoryPath(for: primaryPath))
+        case "svn.resolve-conflicts":
+            Task { await model.openVcsDiff(tool: .svn, path: primaryPath) }
         case "system.native-menu":
-            break
+            KiteNativeMenuBridge.showServices()
         default:
             model.errorMessage = "未实现的上下文菜单动作：\(action.actionId)"
         }
@@ -574,6 +607,57 @@ private struct KiteContextMenuRunner {
         path: String
     ) {
         Task { await model.runVcsOperation(tool: tool, operation: operation, path: path) }
+    }
+
+    private func executeGitMenuControl(
+        _ control: VcsOperationControlDto,
+        path: String
+    ) {
+        Task {
+            do {
+                let message = try await Task.detached(priority: .userInitiated) {
+                    try runGitMenuControl(path: path, control: control)
+                }.value
+                model.errorMessage = nil
+                model.refresh()
+                model.updateGitOperationStatus(message)
+            } catch {
+                model.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func validateVcsRevision(
+        _ action: ContextMenuActionDto,
+        path: String
+    ) -> Bool {
+        guard let revision = action.payloadStateRevision else { return true }
+        let tool: VcsMenuToolDto = action.actionId.hasPrefix("svn.") ? .svn : .git
+        do {
+            try revalidateVcsRevision(
+                path: path,
+                tool: tool,
+                expectedRevision: revision
+            )
+            return true
+        } catch {
+            model.errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func isVcsWriteAction(_ actionId: String) -> Bool {
+        switch actionId {
+        case "git.add", "git.unstage", "git.commit", "git.pull", "git.push",
+             "git.fetch-current", "git.fetch-all", "git.remotes.manage",
+             "git.rebase.interactive", "git.conflicts.resolve", "git.discard",
+             "git.clean-untracked", "git.operation.continue", "git.operation.skip",
+             "git.operation.abort", "svn.update", "svn.add", "svn.commit",
+             "svn.lock", "svn.unlock", "svn.revert", "svn.cleanup":
+            return true
+        default:
+            return false
+        }
     }
 
     private func promptForCommitMessage(tool: VcsToolDto, path: String) {

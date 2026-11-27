@@ -14,6 +14,9 @@ use crate::tool_registry::{
     ToolCatalog, ToolCatalogStatus, ToolPlatform, ToolPolicy, ToolRole, available_tools,
     builtin_tool_definitions,
 };
+use crate::vcs_menu::{
+    VcsMenuRepository, VcsMenuSnapshot, VcsMenuTool, VcsTargetLink, VcsTargetRelation,
+};
 
 pub const CONTEXT_MENU_SCHEMA_VERSION: u32 = 1;
 pub const FILE_ACTIONS_SUBMENU: &str = "file-actions";
@@ -322,6 +325,7 @@ pub struct ContextSnapshot {
     pub open_with: OpenWithCatalog,
     pub tool_catalog: ToolCatalog,
     pub tool_policy: ToolPolicy,
+    pub vcs_menu: VcsMenuSnapshot,
     pub policy: ContextPolicy,
 }
 
@@ -577,12 +581,12 @@ impl RootGroup {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MenuSection {
+    Recovery,
     Primary,
     Changes,
     Sync,
     History,
     Advanced,
-    Recovery,
 }
 
 impl MenuSection {
@@ -722,9 +726,21 @@ impl CandidateAvailability {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionPayload {
     None,
-    Application { application_id: String },
-    Tool { tool_id: String },
-    Repository { path: String, vcs: String },
+    Application {
+        application_id: String,
+    },
+    Tool {
+        tool_id: String,
+    },
+    Repository {
+        path: String,
+        vcs: String,
+    },
+    Vcs {
+        repository_root: String,
+        tool: String,
+        state_revision: String,
+    },
 }
 
 impl ActionPayload {
@@ -734,6 +750,7 @@ impl ActionPayload {
             Self::Application { .. } => "application",
             Self::Tool { .. } => "tool",
             Self::Repository { .. } => "repository",
+            Self::Vcs { .. } => "vcs",
         }
     }
 
@@ -743,6 +760,16 @@ impl ActionPayload {
             Self::Application { application_id } => Some(application_id),
             Self::Tool { tool_id } => Some(tool_id),
             Self::Repository { path, .. } => Some(path),
+            Self::Vcs {
+                repository_root, ..
+            } => Some(repository_root),
+        }
+    }
+
+    pub fn state_revision(&self) -> Option<&str> {
+        match self {
+            Self::Vcs { state_revision, .. } => Some(state_revision),
+            _ => None,
         }
     }
 }
@@ -1994,13 +2021,12 @@ impl ActionProvider for AgentActionProvider {
 
 impl ActionProvider for VcsActionProvider {
     fn candidates(&self, context: &ContextSnapshot) -> Vec<ActionCandidate> {
+        if context.capabilities.is_shell_namespace {
+            return Vec::new();
+        }
+
         let mut candidates = Vec::new();
-        let loading = if context.capabilities.loading {
-            CandidateAvailability::disabled("TARGET_LOADING", "正在读取仓库状态")
-        } else {
-            CandidateAvailability::Available
-        };
-        if context.capabilities.git_available {
+        if context.capabilities.loading {
             for action_id in [
                 "git.add",
                 "git.unstage",
@@ -2015,35 +2041,6 @@ impl ActionProvider for VcsActionProvider {
                 "git.rebase.interactive",
                 "git.discard",
                 "git.clean-untracked",
-            ] {
-                candidates.push(ActionCandidate::with_availability(
-                    action_id,
-                    loading.clone(),
-                ));
-            }
-        }
-        if context.container.is_primary_target {
-            candidates.push(ActionCandidate::with_availability(
-                "git.clone",
-                if context.capabilities.loading {
-                    loading.clone()
-                } else {
-                    CandidateAvailability::Available
-                },
-            ));
-            if !context.capabilities.git_available {
-                candidates.push(ActionCandidate::with_availability(
-                    "git.init",
-                    if context.capabilities.loading {
-                        loading.clone()
-                    } else {
-                        CandidateAvailability::Available
-                    },
-                ));
-            }
-        }
-        if context.capabilities.svn_available {
-            for action_id in [
                 "svn.update",
                 "svn.add",
                 "svn.commit",
@@ -2056,11 +2053,228 @@ impl ActionProvider for VcsActionProvider {
             ] {
                 candidates.push(ActionCandidate::with_availability(
                     action_id,
-                    loading.clone(),
+                    CandidateAvailability::disabled("TARGET_LOADING", "正在读取仓库状态"),
                 ));
             }
+            return candidates;
+        }
+
+        if let Some(repository) = common_vcs_repository(context, VcsMenuTool::Git) {
+            let links = vcs_links(context, VcsMenuTool::Git);
+            let operation_active = repository.operation.is_some();
+            if let Some(operation) = repository.operation.as_ref() {
+                if operation.resolve_available || repository.has_conflicts() {
+                    candidates.push(vcs_candidate("git.conflicts.resolve", repository));
+                }
+                if operation.continue_available {
+                    let mut candidate = ActionCandidate::available("git.operation.continue");
+                    if operation.custom_rebase {
+                        candidate = candidate.label("继续 Kite 变基");
+                    }
+                    candidates.push(with_vcs_payload(candidate, repository));
+                }
+                if operation.skip_available {
+                    candidates.push(vcs_candidate("git.operation.skip", repository));
+                }
+                if operation.abort_available {
+                    candidates.push(vcs_candidate("git.operation.abort", repository));
+                }
+            } else if repository.has_conflicts() {
+                candidates.push(vcs_candidate("git.conflicts.resolve", repository));
+            }
+
+            if !operation_active {
+                let has_staged = repository.has_staged_changes();
+                let has_unstaged = links.iter().any(|link| link.unstaged);
+                let has_selected_staged = links.iter().any(|link| link.staged == Some(true));
+                let has_selected_unstaged = links.iter().any(|link| link.unstaged);
+                let has_selected_changes = has_selected_staged || has_selected_unstaged;
+                let is_container = context.container.is_primary_target;
+                let is_repository_root = links
+                    .iter()
+                    .any(|link| link.relation == VcsTargetRelation::Root);
+                let is_inside_directory = links
+                    .iter()
+                    .any(|link| link.relation == VcsTargetRelation::InsideDirectory);
+
+                if has_unstaged {
+                    candidates.push(vcs_candidate("git.add", repository));
+                }
+                if has_selected_staged {
+                    candidates.push(vcs_candidate("git.unstage", repository));
+                }
+                if has_staged {
+                    candidates.push(vcs_candidate("git.commit", repository));
+                }
+                if has_selected_unstaged {
+                    candidates.push(vcs_candidate("git.discard", repository));
+                }
+                if has_selected_changes || repository.has_conflicts() {
+                    candidates.push(vcs_candidate("git.diff", repository));
+                }
+                candidates.push(vcs_candidate("git.log", repository));
+
+                if repository.has_upstream() {
+                    candidates.push(vcs_candidate("git.pull", repository));
+                    candidates.push(vcs_candidate("git.push", repository));
+                    candidates.push(vcs_candidate("git.fetch-current", repository));
+                } else {
+                    candidates.push(with_vcs_payload(
+                        ActionCandidate::with_availability(
+                            "git.pull",
+                            CandidateAvailability::disabled(
+                                "UPSTREAM_NOT_CONFIGURED",
+                                "当前分支没有配置上游",
+                            ),
+                        ),
+                        repository,
+                    ));
+                    candidates.push(with_vcs_payload(
+                        ActionCandidate::with_availability(
+                            "git.push",
+                            CandidateAvailability::disabled(
+                                "UPSTREAM_NOT_CONFIGURED",
+                                "当前分支没有配置上游",
+                            ),
+                        ),
+                        repository,
+                    ));
+                }
+                candidates.push(vcs_candidate("git.fetch-all", repository));
+                candidates.push(vcs_candidate("git.remotes.manage", repository));
+                candidates.push(vcs_candidate("git.rebase.interactive", repository));
+                if (is_container || is_repository_root || is_inside_directory)
+                    && repository.changes.untracked > 0
+                {
+                    candidates.push(vcs_candidate("git.clean-untracked", repository));
+                }
+            } else {
+                // Keep read-only navigation available while an operation is
+                // active; recovery actions above are the primary controls.
+                candidates.push(vcs_candidate("git.log", repository));
+                if repository.has_staged_changes() || repository.has_unstaged_changes() {
+                    candidates.push(vcs_candidate("git.diff", repository));
+                }
+            }
+        } else if context.vcs_menu.git_available && context.container.is_primary_target {
+            candidates.push(ActionCandidate::available("git.clone"));
+            candidates.push(ActionCandidate::available("git.init"));
+        }
+
+        if let Some(repository) = common_vcs_repository(context, VcsMenuTool::Svn) {
+            let links = vcs_links(context, VcsMenuTool::Svn);
+            let cleanup_required = repository
+                .svn
+                .as_ref()
+                .is_some_and(|svn| svn.cleanup_required);
+            if cleanup_required {
+                candidates.push(vcs_candidate("svn.cleanup", repository));
+            }
+            if repository.has_conflicts() {
+                candidates.push(vcs_candidate("svn.resolve-conflicts", repository));
+            }
+            candidates.push(vcs_candidate("svn.update", repository));
+            if links
+                .iter()
+                .any(|link| link.relation == VcsTargetRelation::SvnUnversioned)
+            {
+                candidates.push(vcs_candidate("svn.add", repository));
+            }
+            if repository.changes.unstaged > 0
+                || repository
+                    .svn
+                    .as_ref()
+                    .is_some_and(|svn| svn.property_modified)
+            {
+                candidates.push(vcs_candidate("svn.commit", repository));
+                candidates.push(vcs_candidate("svn.diff", repository));
+                candidates.push(vcs_candidate("svn.revert", repository));
+            }
+            candidates.push(vcs_candidate("svn.log", repository));
+            candidates.push(vcs_candidate("svn.lock", repository));
+            candidates.push(vcs_candidate("svn.unlock", repository));
         }
         candidates
+    }
+}
+
+fn context_vcs_paths(context: &ContextSnapshot) -> Vec<String> {
+    if context.target_set.targets.is_empty() {
+        vec![context.container.path.clone()]
+    } else {
+        context.target_set.ordered_paths.clone()
+    }
+}
+
+fn vcs_target_for_path<'a>(
+    context: &'a ContextSnapshot,
+    path: &str,
+) -> Option<&'a crate::vcs_menu::VcsTargetMenuState> {
+    let key = context_path_key(Path::new(path));
+    context
+        .vcs_menu
+        .targets
+        .iter()
+        .find(|target| context_path_key(Path::new(&target.path)) == key)
+}
+
+fn vcs_links(context: &ContextSnapshot, tool: VcsMenuTool) -> Vec<&VcsTargetLink> {
+    context_vcs_paths(context)
+        .iter()
+        .filter_map(|path| vcs_target_for_path(context, path))
+        .flat_map(|target| target.links.iter().filter(move |link| link.tool == tool))
+        .collect()
+}
+
+fn common_vcs_repository(
+    context: &ContextSnapshot,
+    tool: VcsMenuTool,
+) -> Option<&VcsMenuRepository> {
+    let paths = context_vcs_paths(context);
+    let mut repository_id: Option<&str> = None;
+    for path in paths {
+        let target = vcs_target_for_path(context, &path)?;
+        let links = target
+            .links
+            .iter()
+            .filter(|link| link.tool == tool)
+            .collect::<Vec<_>>();
+        if links.is_empty() {
+            return None;
+        }
+        for link in links {
+            match repository_id {
+                Some(existing) if existing != link.repository_id => return None,
+                None => repository_id = Some(&link.repository_id),
+                _ => {}
+            }
+        }
+    }
+    repository_id.and_then(|id| context.vcs_menu.repository(id))
+}
+
+fn vcs_candidate(action_id: &str, repository: &VcsMenuRepository) -> ActionCandidate {
+    with_vcs_payload(ActionCandidate::available(action_id), repository)
+}
+
+fn with_vcs_payload(candidate: ActionCandidate, repository: &VcsMenuRepository) -> ActionCandidate {
+    candidate.payload(ActionPayload::Vcs {
+        repository_root: repository.repository_root.clone(),
+        tool: repository.tool.as_str().to_string(),
+        state_revision: repository.state_revision.clone(),
+    })
+}
+
+fn context_path_key(path: &Path) -> String {
+    let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let value = canonical.to_string_lossy();
+    #[cfg(target_os = "windows")]
+    {
+        value.replace('/', "\\").to_ascii_lowercase()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        value.into_owned()
     }
 }
 
@@ -2581,6 +2795,38 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             MenuSection::Primary,
             20,
         ),
+        "git.conflicts.resolve" => git_d(
+            action_id,
+            "解决冲突…",
+            ActionRisk::Low,
+            MenuSection::Recovery,
+            0,
+            "vcs",
+        ),
+        "git.operation.continue" => git_d(
+            action_id,
+            "继续当前 Git 操作",
+            ActionRisk::Medium,
+            MenuSection::Recovery,
+            10,
+            "vcs",
+        ),
+        "git.operation.skip" => git_d(
+            action_id,
+            "跳过当前 Git 操作步骤",
+            ActionRisk::Medium,
+            MenuSection::Recovery,
+            20,
+            "vcs",
+        ),
+        "git.operation.abort" => git_d(
+            action_id,
+            "中止当前 Git 操作",
+            ActionRisk::Medium,
+            MenuSection::Recovery,
+            30,
+            "vcs",
+        ),
         "git.add" => git_d(
             action_id,
             "添加",
@@ -2749,6 +2995,13 @@ fn descriptor(context: &ContextSnapshot, action_id: &str) -> Option<ActionDescri
             ActionRisk::Medium,
             MenuSection::Advanced,
             0,
+        ),
+        "svn.resolve-conflicts" => svn_d(
+            action_id,
+            "解决冲突…",
+            ActionRisk::Low,
+            MenuSection::Recovery,
+            5,
         ),
         "system.reveal" => d(
             action_id,
@@ -2919,7 +3172,7 @@ fn git_d(
         risk,
         TargetRule::new(
             &[TargetKind::File, TargetKind::Directory, TargetKind::Archive],
-            TargetCardinality::One,
+            TargetCardinality::OneOrMore,
         ),
         RootGroup::Vcs,
         section,
@@ -2974,7 +3227,7 @@ fn svn_d(
         risk,
         TargetRule::new(
             &[TargetKind::File, TargetKind::Directory, TargetKind::Archive],
-            TargetCardinality::One,
+            TargetCardinality::OneOrMore,
         ),
         RootGroup::Vcs,
         section,
@@ -3047,10 +3300,81 @@ mod tests {
             open_with: OpenWithCatalog::default(),
             tool_catalog: ToolCatalog::default(),
             tool_policy: ToolPolicy::default(),
+            vcs_menu: VcsMenuSnapshot::default(),
             policy: ContextPolicy {
                 hide_unavailable: true,
                 ..ContextPolicy::default()
             },
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn vcs_snapshot(
+        path: &str,
+        tool: crate::vcs_menu::VcsMenuTool,
+        staged: Option<u32>,
+        unstaged: u32,
+        untracked: u32,
+        conflicted: u32,
+        upstream: Option<&str>,
+        ahead: u32,
+        behind: u32,
+        operation: Option<crate::vcs_menu::VcsOperationMenuState>,
+    ) -> VcsMenuSnapshot {
+        let tool_id = tool.as_str();
+        let repository_id = format!("{tool_id}:{path}");
+        let relation = match tool {
+            crate::vcs_menu::VcsMenuTool::Git => VcsTargetRelation::Root,
+            crate::vcs_menu::VcsMenuTool::Svn => VcsTargetRelation::SvnVersioned,
+        };
+        let repository = VcsMenuRepository {
+            id: repository_id.clone(),
+            tool,
+            repository_root: path.to_string(),
+            worktree_root: path.to_string(),
+            metadata_dir: None,
+            common_dir: None,
+            display_name: "repo".to_string(),
+            head: crate::vcs_menu::VcsHeadState::default(),
+            upstream: upstream.map(str::to_string),
+            ahead,
+            behind,
+            changes: crate::vcs_menu::VcsChangeSummary {
+                staged,
+                unstaged,
+                untracked,
+                ignored: 0,
+                conflicted,
+            },
+            conflicts: (0..conflicted)
+                .map(|index| format!("conflict-{index}"))
+                .collect(),
+            operation,
+            svn: None,
+            state_revision: format!("{tool_id}-revision"),
+        };
+        VcsMenuSnapshot {
+            schema_version: crate::vcs_menu::VCS_MENU_SCHEMA_VERSION,
+            observed_at_unix_ms: 0,
+            git_available: tool == crate::vcs_menu::VcsMenuTool::Git,
+            svn_available: tool == crate::vcs_menu::VcsMenuTool::Svn,
+            repositories: vec![repository],
+            targets: vec![crate::vcs_menu::VcsTargetMenuState {
+                path: path.to_string(),
+                links: vec![VcsTargetLink {
+                    repository_id,
+                    tool,
+                    relative_path: Some(String::new()),
+                    relation,
+                    staged: staged.map(|count| count > 0),
+                    unstaged: unstaged > 0 || untracked > 0,
+                    conflicted: conflicted > 0,
+                    switched: false,
+                    property_modified: false,
+                    missing: false,
+                }],
+            }],
+            state_revision: format!("{tool_id}-snapshot"),
         }
     }
 
@@ -3223,10 +3547,10 @@ mod tests {
         context.container = ContainerSnapshot::for_path("/tmp/background", true);
         let plan = compose_default_menu(&context).expect("background plan");
         let ids = plan.visible_action_ids();
-        assert!(!ids.iter().any(|id| *id == "open.default"));
-        assert!(!ids.iter().any(|id| *id == "file.rename"));
-        assert!(ids.iter().any(|id| *id == "clipboard.paste"));
-        assert!(ids.iter().any(|id| *id == "file.new-folder"));
+        assert!(!ids.contains(&"open.default"));
+        assert!(!ids.contains(&"file.rename"));
+        assert!(ids.contains(&"clipboard.paste"));
+        assert!(ids.contains(&"file.new-folder"));
         assert_eq!(ids.last().copied(), Some("system.native-menu"));
     }
 
@@ -3298,6 +3622,25 @@ mod tests {
         let mut context = context;
         context.capabilities.git_available = true;
         context.capabilities.svn_available = true;
+        let path = context.target_set.targets[0].path.clone();
+        context.vcs_menu = vcs_snapshot(
+            &path,
+            VcsMenuTool::Git,
+            Some(1),
+            1,
+            0,
+            0,
+            Some("origin/main"),
+            0,
+            0,
+            None,
+        );
+        let mut svn = vcs_snapshot(&path, VcsMenuTool::Svn, None, 1, 0, 0, None, 0, 0, None);
+        context.vcs_menu.repositories.append(&mut svn.repositories);
+        context.vcs_menu.targets[0]
+            .links
+            .append(&mut svn.targets[0].links);
+        context.vcs_menu.svn_available = true;
         context.tool_catalog = crate::tool_registry::ToolCatalog::ready(vec![
             crate::tool_registry::DiscoveredTool::available(
                 "kite.git-client",
@@ -3323,6 +3666,148 @@ mod tests {
         ] {
             assert!(ids.contains(&id), "missing stable action id {id}: {ids:?}");
         }
+    }
+
+    #[test]
+    fn vcs_operation_controls_are_promoted_and_regular_writes_are_hidden() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::Directory], 1);
+        let path = context.target_set.targets[0].path.clone();
+        let operation = crate::vcs_menu::VcsOperationMenuState {
+            kind: crate::vcs_menu::VcsOperationKind::Rebase,
+            label: "Kite 变基已暂停".to_string(),
+            continue_available: true,
+            skip_available: true,
+            abort_available: true,
+            resolve_available: true,
+            cleanup_available: false,
+            custom_rebase: true,
+        };
+        context.vcs_menu = vcs_snapshot(
+            &path,
+            VcsMenuTool::Git,
+            Some(1),
+            1,
+            0,
+            1,
+            Some("origin/main"),
+            1,
+            0,
+            Some(operation),
+        );
+        let plan = compose_default_menu(&context).expect("recovery plan");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"git.conflicts.resolve"));
+        assert!(ids.contains(&"git.operation.continue"));
+        assert!(ids.contains(&"git.operation.skip"));
+        assert!(ids.contains(&"git.operation.abort"));
+        assert!(!ids.contains(&"git.commit"));
+        assert!(!ids.contains(&"git.clean-untracked"));
+        let git = plan.find_submenu(GIT_SUBMENU).expect("git submenu");
+        assert_eq!(git.sections[0].id, MenuSection::Recovery.id());
+        let continue_action = git
+            .sections
+            .iter()
+            .flat_map(|section| &section.entries)
+            .find(|action| action.action_id == "git.operation.continue")
+            .expect("continue action");
+        assert_eq!(continue_action.label, "继续 Kite 变基");
+    }
+
+    #[test]
+    fn vcs_upstream_missing_is_not_rendered_as_upstream_equal() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::Directory], 1);
+        let path = context.target_set.targets[0].path.clone();
+        context.vcs_menu =
+            vcs_snapshot(&path, VcsMenuTool::Git, Some(0), 0, 0, 0, None, 0, 0, None);
+        context.policy.hide_unavailable = false;
+        let plan = compose_default_menu(&context).expect("no upstream plan");
+        let pull = plan
+            .find_submenu(GIT_SUBMENU)
+            .and_then(|submenu| {
+                submenu
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.entries)
+                    .find(|action| action.action_id == "git.pull")
+            })
+            .expect("pull action");
+        assert!(!pull.enabled);
+        assert_eq!(
+            pull.disabled_reason_code.as_deref(),
+            Some("UPSTREAM_NOT_CONFIGURED")
+        );
+
+        context.vcs_menu = vcs_snapshot(
+            &path,
+            VcsMenuTool::Git,
+            Some(0),
+            0,
+            0,
+            0,
+            Some("origin/main"),
+            0,
+            0,
+            None,
+        );
+        let plan = compose_default_menu(&context).expect("equal upstream plan");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"git.pull"));
+        assert!(ids.contains(&"git.push"));
+    }
+
+    #[test]
+    fn vcs_actions_are_hidden_when_targets_span_repositories() {
+        let mut context = snapshot(
+            ContextSurface::BrowserList,
+            &[TargetKind::File, TargetKind::File],
+            2,
+        );
+        let path_a = context.target_set.targets[0].path.clone();
+        let path_b = context.target_set.targets[1].path.clone();
+        context.vcs_menu = vcs_snapshot(
+            &path_a,
+            VcsMenuTool::Git,
+            Some(1),
+            0,
+            0,
+            0,
+            Some("origin/main"),
+            0,
+            0,
+            None,
+        );
+        let mut other = vcs_snapshot(
+            &path_b,
+            VcsMenuTool::Git,
+            Some(1),
+            0,
+            0,
+            0,
+            Some("origin/main"),
+            0,
+            0,
+            None,
+        );
+        context
+            .vcs_menu
+            .repositories
+            .append(&mut other.repositories);
+        context.vcs_menu.targets.append(&mut other.targets);
+        let plan = compose_default_menu(&context).expect("cross repository plan");
+        let ids = plan.visible_action_ids();
+        assert!(!ids.iter().any(|id| id.starts_with("git.")));
+    }
+
+    #[test]
+    fn svn_never_implies_staged_content() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::Directory], 1);
+        let path = context.target_set.targets[0].path.clone();
+        context.vcs_menu = vcs_snapshot(&path, VcsMenuTool::Svn, None, 2, 0, 0, None, 0, 0, None);
+        let plan = compose_default_menu(&context).expect("svn plan");
+        let ids = plan.visible_action_ids();
+        assert!(ids.contains(&"svn.commit"));
+        assert!(!ids.contains(&"git.commit"));
+        assert!(!ids.contains(&"git.unstage"));
     }
 
     fn tool_catalog(ids: &[&str]) -> crate::tool_registry::ToolCatalog {

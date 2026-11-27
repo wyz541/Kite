@@ -16,6 +16,7 @@ use kite_core::context_menu_model::{
 use crate::actions::{ContextMenuAction, ContextMenuActionPayload, ContextMenuCommand};
 use crate::archive;
 use crate::platform::HostPlatform;
+use kite_core::vcs_menu::load_vcs_menu_snapshot;
 
 #[cfg(target_os = "windows")]
 mod open_with_windows;
@@ -215,6 +216,15 @@ impl ContextMenuTarget {
             kite_core::context_menu_model::ActionPayload::Tool { tool_id } => {
                 ContextMenuActionPayload::Tool(tool_id.clone())
             }
+            kite_core::context_menu_model::ActionPayload::Vcs {
+                repository_root,
+                tool,
+                state_revision,
+            } => ContextMenuActionPayload::Vcs {
+                repository_root: repository_root.clone(),
+                tool: tool.clone(),
+                state_revision: state_revision.clone(),
+            },
             _ => ContextMenuActionPayload::None,
         };
         Some(ContextMenuAction {
@@ -268,6 +278,11 @@ impl ContextMenuTarget {
         } else {
             tool_registry_windows::catalog(self)
         };
+        let vcs_menu = if self.is_shell_namespace {
+            kite_core::vcs_menu::VcsMenuSnapshot::default()
+        } else {
+            load_vcs_menu_snapshot(&paths, &self.working_directory)
+        };
         ContextSnapshot {
             schema_version: kite_core::context_menu_model::CONTEXT_MENU_SCHEMA_VERSION,
             snapshot_id: format!("windows-context-menu:{}", self.path.display()),
@@ -291,8 +306,8 @@ impl ContextMenuTarget {
                 supports_delete: self.supports_delete,
                 supports_favorite: self.supports_favorite,
                 is_favorite: false,
-                git_available: self.git_available,
-                svn_available: self.svn_available,
+                git_available: self.git_available || vcs_menu.git_available,
+                svn_available: self.svn_available || vcs_menu.svn_available,
                 agent_available: self.agent_available,
                 quick_look_available: false,
                 reveal_available: false,
@@ -307,6 +322,7 @@ impl ContextMenuTarget {
             open_with,
             tool_catalog,
             tool_policy: tool_registry_windows::policy(),
+            vcs_menu,
             policy: policy.core_policy(),
         }
     }

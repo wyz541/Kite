@@ -44,3 +44,4 @@ pub mod updater;
 #[cfg(windows)]
 pub mod usn_journal;
 pub mod vcs;
+pub mod vcs_menu;

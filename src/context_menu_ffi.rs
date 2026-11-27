@@ -4,7 +4,7 @@
 //! frozen Swift request into that model and flattens the depth-limited plan into
 //! UniFFI-safe records.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,8 +18,27 @@ use crate::tool_registry::{
     DiscoveredTool, ToolArgument, ToolAvailability, ToolCatalog, ToolCatalogStatus, ToolDefinition,
     ToolPlatform, ToolPolicy, builtin_tool_definitions,
 };
+use crate::vcs_menu::{
+    SvnWorkingCopyMenuState, VcsChangeSummary, VcsHeadKind, VcsHeadState, VcsMenuRepository,
+    VcsMenuSnapshot, VcsMenuTool, VcsOperationKind, VcsOperationMenuState, VcsTargetLink,
+    VcsTargetMenuState, VcsTargetRelation,
+};
 
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum VcsMenuError {
+    #[error("{message}")]
+    Operation { message: String },
+}
+
+impl VcsMenuError {
+    fn operation(message: impl Into<String>) -> Self {
+        Self::Operation {
+            message: message.into(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ContextMenuTargetDto {
@@ -112,6 +131,144 @@ pub struct ToolPolicyDto {
     pub recent_tool_ids: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VcsMenuToolDto {
+    Git,
+    Svn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VcsHeadKindDto {
+    None,
+    Branch,
+    Detached,
+    Unborn,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct VcsHeadStateDto {
+    pub kind: VcsHeadKindDto,
+    pub name: Option<String>,
+    pub oid: Option<String>,
+    pub short_oid: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct VcsChangeSummaryDto {
+    pub staged: Option<u32>,
+    pub unstaged: u32,
+    pub untracked: u32,
+    pub ignored: u32,
+    pub conflicted: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VcsOperationKindDto {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Bisect,
+    CleanupRequired,
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VcsOperationControlDto {
+    ContinueOperation,
+    Skip,
+    Abort,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct VcsOperationMenuStateDto {
+    pub kind: VcsOperationKindDto,
+    pub label: String,
+    pub continue_available: bool,
+    pub skip_available: bool,
+    pub abort_available: bool,
+    pub resolve_available: bool,
+    pub cleanup_available: bool,
+    pub custom_rebase: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SvnWorkingCopyMenuStateDto {
+    pub wc_root: String,
+    pub url: Option<String>,
+    pub revision: Option<u64>,
+    pub switched: bool,
+    pub property_modified: bool,
+    pub missing: u32,
+    pub conflicted: u32,
+    pub unversioned: u32,
+    pub cleanup_required: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct VcsMenuRepositoryDto {
+    pub id: String,
+    pub tool: VcsMenuToolDto,
+    pub repository_root: String,
+    pub worktree_root: String,
+    pub metadata_dir: Option<String>,
+    pub common_dir: Option<String>,
+    pub display_name: String,
+    pub head: VcsHeadStateDto,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub changes: VcsChangeSummaryDto,
+    pub conflicts: Vec<String>,
+    pub operation: Option<VcsOperationMenuStateDto>,
+    pub svn: Option<SvnWorkingCopyMenuStateDto>,
+    pub state_revision: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VcsTargetRelationDto {
+    Outside,
+    Root,
+    InsideDirectory,
+    Tracked,
+    Untracked,
+    Ignored,
+    Submodule,
+    SvnVersioned,
+    SvnUnversioned,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct VcsTargetLinkDto {
+    pub repository_id: String,
+    pub tool: VcsMenuToolDto,
+    pub relative_path: Option<String>,
+    pub relation: VcsTargetRelationDto,
+    pub staged: Option<bool>,
+    pub unstaged: bool,
+    pub conflicted: bool,
+    pub switched: bool,
+    pub property_modified: bool,
+    pub missing: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct VcsTargetMenuStateDto {
+    pub path: String,
+    pub links: Vec<VcsTargetLinkDto>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct VcsMenuSnapshotDto {
+    pub schema_version: u32,
+    pub observed_at_unix_ms: i64,
+    pub git_available: bool,
+    pub svn_available: bool,
+    pub repositories: Vec<VcsMenuRepositoryDto>,
+    pub targets: Vec<VcsTargetMenuStateDto>,
+    pub state_revision: String,
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ContextMenuRequestDto {
     pub surface: String,
@@ -145,6 +302,7 @@ pub struct ContextMenuRequestDto {
     pub open_with: OpenWithCatalogDto,
     pub tools: ToolCatalogDto,
     pub tool_policy: ToolPolicyDto,
+    pub vcs_menu: VcsMenuSnapshotDto,
     pub compact: bool,
     pub hide_unavailable: bool,
     pub confirm_high_risk: bool,
@@ -164,6 +322,7 @@ pub struct ContextMenuActionDto {
     pub target_paths: Vec<String>,
     pub payload_kind: String,
     pub payload_value: Option<String>,
+    pub payload_state_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -206,6 +365,43 @@ pub fn context_menu_tool_definitions(platform: String) -> Vec<ToolDefinitionDto>
         .into_iter()
         .map(tool_definition_dto)
         .collect()
+}
+
+#[uniffi::export]
+pub fn load_vcs_menu_snapshot(paths: Vec<String>, working_directory: String) -> VcsMenuSnapshotDto {
+    let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    vcs_menu_snapshot_dto(crate::vcs_menu::load_vcs_menu_snapshot(
+        &paths,
+        Path::new(&working_directory),
+    ))
+}
+
+#[uniffi::export]
+pub fn revalidate_vcs_revision(
+    path: String,
+    tool: VcsMenuToolDto,
+    expected_revision: String,
+) -> Result<(), VcsMenuError> {
+    crate::vcs_menu::revalidate_vcs_revision(
+        Path::new(&path),
+        vcs_menu_tool(tool),
+        &expected_revision,
+    )
+    .map_err(VcsMenuError::operation)
+}
+
+#[uniffi::export]
+pub fn run_git_menu_control(
+    path: String,
+    control: VcsOperationControlDto,
+) -> Result<String, VcsMenuError> {
+    let control = match control {
+        VcsOperationControlDto::ContinueOperation => crate::vcs_menu::VcsOperationControl::Continue,
+        VcsOperationControlDto::Skip => crate::vcs_menu::VcsOperationControl::Skip,
+        VcsOperationControlDto::Abort => crate::vcs_menu::VcsOperationControl::Abort,
+    };
+    crate::vcs_menu::run_git_menu_control(Path::new(&path), control)
+        .map_err(VcsMenuError::operation)
 }
 
 #[uniffi::export]
@@ -270,6 +466,7 @@ fn snapshot_from_request(request: ContextMenuRequestDto) -> ContextSnapshot {
         },
         tool_catalog: tool_catalog_from_dto(request.tools),
         tool_policy: tool_policy_from_dto(request.tool_policy),
+        vcs_menu: vcs_menu_from_dto(request.vcs_menu),
         open_with: OpenWithCatalog {
             status: match request.open_with.status {
                 OpenWithCatalogStatusDto::Ready => OpenWithCatalogStatus::Ready,
@@ -420,6 +617,262 @@ fn new_snapshot_id() -> String {
     format!("context-menu-{timestamp}-{sequence}")
 }
 
+fn vcs_menu_tool(tool: VcsMenuToolDto) -> VcsMenuTool {
+    match tool {
+        VcsMenuToolDto::Git => VcsMenuTool::Git,
+        VcsMenuToolDto::Svn => VcsMenuTool::Svn,
+    }
+}
+
+fn vcs_menu_tool_dto(tool: VcsMenuTool) -> VcsMenuToolDto {
+    match tool {
+        VcsMenuTool::Git => VcsMenuToolDto::Git,
+        VcsMenuTool::Svn => VcsMenuToolDto::Svn,
+    }
+}
+
+fn vcs_head_kind_from_dto(kind: VcsHeadKindDto) -> VcsHeadKind {
+    match kind {
+        VcsHeadKindDto::None => VcsHeadKind::None,
+        VcsHeadKindDto::Branch => VcsHeadKind::Branch,
+        VcsHeadKindDto::Detached => VcsHeadKind::Detached,
+        VcsHeadKindDto::Unborn => VcsHeadKind::Unborn,
+    }
+}
+
+fn vcs_head_kind_dto(kind: VcsHeadKind) -> VcsHeadKindDto {
+    match kind {
+        VcsHeadKind::None => VcsHeadKindDto::None,
+        VcsHeadKind::Branch => VcsHeadKindDto::Branch,
+        VcsHeadKind::Detached => VcsHeadKindDto::Detached,
+        VcsHeadKind::Unborn => VcsHeadKindDto::Unborn,
+    }
+}
+
+fn vcs_operation_kind_from_dto(kind: VcsOperationKindDto) -> VcsOperationKind {
+    match kind {
+        VcsOperationKindDto::Merge => VcsOperationKind::Merge,
+        VcsOperationKindDto::Rebase => VcsOperationKind::Rebase,
+        VcsOperationKindDto::CherryPick => VcsOperationKind::CherryPick,
+        VcsOperationKindDto::Revert => VcsOperationKind::Revert,
+        VcsOperationKindDto::Bisect => VcsOperationKind::Bisect,
+        VcsOperationKindDto::CleanupRequired => VcsOperationKind::CleanupRequired,
+        VcsOperationKindDto::Busy => VcsOperationKind::Busy,
+    }
+}
+
+fn vcs_operation_kind_dto(kind: VcsOperationKind) -> VcsOperationKindDto {
+    match kind {
+        VcsOperationKind::Merge => VcsOperationKindDto::Merge,
+        VcsOperationKind::Rebase => VcsOperationKindDto::Rebase,
+        VcsOperationKind::CherryPick => VcsOperationKindDto::CherryPick,
+        VcsOperationKind::Revert => VcsOperationKindDto::Revert,
+        VcsOperationKind::Bisect => VcsOperationKindDto::Bisect,
+        VcsOperationKind::CleanupRequired => VcsOperationKindDto::CleanupRequired,
+        VcsOperationKind::Busy => VcsOperationKindDto::Busy,
+    }
+}
+
+fn vcs_target_relation_from_dto(relation: VcsTargetRelationDto) -> VcsTargetRelation {
+    match relation {
+        VcsTargetRelationDto::Outside => VcsTargetRelation::Outside,
+        VcsTargetRelationDto::Root => VcsTargetRelation::Root,
+        VcsTargetRelationDto::InsideDirectory => VcsTargetRelation::InsideDirectory,
+        VcsTargetRelationDto::Tracked => VcsTargetRelation::Tracked,
+        VcsTargetRelationDto::Untracked => VcsTargetRelation::Untracked,
+        VcsTargetRelationDto::Ignored => VcsTargetRelation::Ignored,
+        VcsTargetRelationDto::Submodule => VcsTargetRelation::Submodule,
+        VcsTargetRelationDto::SvnVersioned => VcsTargetRelation::SvnVersioned,
+        VcsTargetRelationDto::SvnUnversioned => VcsTargetRelation::SvnUnversioned,
+    }
+}
+
+fn vcs_target_relation_dto(relation: VcsTargetRelation) -> VcsTargetRelationDto {
+    match relation {
+        VcsTargetRelation::Outside => VcsTargetRelationDto::Outside,
+        VcsTargetRelation::Root => VcsTargetRelationDto::Root,
+        VcsTargetRelation::InsideDirectory => VcsTargetRelationDto::InsideDirectory,
+        VcsTargetRelation::Tracked => VcsTargetRelationDto::Tracked,
+        VcsTargetRelation::Untracked => VcsTargetRelationDto::Untracked,
+        VcsTargetRelation::Ignored => VcsTargetRelationDto::Ignored,
+        VcsTargetRelation::Submodule => VcsTargetRelationDto::Submodule,
+        VcsTargetRelation::SvnVersioned => VcsTargetRelationDto::SvnVersioned,
+        VcsTargetRelation::SvnUnversioned => VcsTargetRelationDto::SvnUnversioned,
+    }
+}
+
+fn vcs_menu_from_dto(snapshot: VcsMenuSnapshotDto) -> VcsMenuSnapshot {
+    VcsMenuSnapshot {
+        schema_version: snapshot.schema_version,
+        observed_at_unix_ms: snapshot.observed_at_unix_ms,
+        git_available: snapshot.git_available,
+        svn_available: snapshot.svn_available,
+        repositories: snapshot
+            .repositories
+            .into_iter()
+            .map(|repository| VcsMenuRepository {
+                id: repository.id,
+                tool: vcs_menu_tool(repository.tool),
+                repository_root: repository.repository_root,
+                worktree_root: repository.worktree_root,
+                metadata_dir: repository.metadata_dir,
+                common_dir: repository.common_dir,
+                display_name: repository.display_name,
+                head: VcsHeadState {
+                    kind: vcs_head_kind_from_dto(repository.head.kind),
+                    name: repository.head.name,
+                    oid: repository.head.oid,
+                    short_oid: repository.head.short_oid,
+                },
+                upstream: repository.upstream,
+                ahead: repository.ahead,
+                behind: repository.behind,
+                changes: VcsChangeSummary {
+                    staged: repository.changes.staged,
+                    unstaged: repository.changes.unstaged,
+                    untracked: repository.changes.untracked,
+                    ignored: repository.changes.ignored,
+                    conflicted: repository.changes.conflicted,
+                },
+                conflicts: repository.conflicts,
+                operation: repository.operation.map(|operation| VcsOperationMenuState {
+                    kind: vcs_operation_kind_from_dto(operation.kind),
+                    label: operation.label,
+                    continue_available: operation.continue_available,
+                    skip_available: operation.skip_available,
+                    abort_available: operation.abort_available,
+                    resolve_available: operation.resolve_available,
+                    cleanup_available: operation.cleanup_available,
+                    custom_rebase: operation.custom_rebase,
+                }),
+                svn: repository.svn.map(|svn| SvnWorkingCopyMenuState {
+                    wc_root: svn.wc_root,
+                    url: svn.url,
+                    revision: svn.revision,
+                    switched: svn.switched,
+                    property_modified: svn.property_modified,
+                    missing: svn.missing,
+                    conflicted: svn.conflicted,
+                    unversioned: svn.unversioned,
+                    cleanup_required: svn.cleanup_required,
+                }),
+                state_revision: repository.state_revision,
+            })
+            .collect(),
+        targets: snapshot
+            .targets
+            .into_iter()
+            .map(|target| VcsTargetMenuState {
+                path: target.path,
+                links: target
+                    .links
+                    .into_iter()
+                    .map(|link| VcsTargetLink {
+                        repository_id: link.repository_id,
+                        tool: vcs_menu_tool(link.tool),
+                        relative_path: link.relative_path,
+                        relation: vcs_target_relation_from_dto(link.relation),
+                        staged: link.staged,
+                        unstaged: link.unstaged,
+                        conflicted: link.conflicted,
+                        switched: link.switched,
+                        property_modified: link.property_modified,
+                        missing: link.missing,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        state_revision: snapshot.state_revision,
+    }
+}
+
+fn vcs_menu_snapshot_dto(snapshot: VcsMenuSnapshot) -> VcsMenuSnapshotDto {
+    VcsMenuSnapshotDto {
+        schema_version: snapshot.schema_version,
+        observed_at_unix_ms: snapshot.observed_at_unix_ms,
+        git_available: snapshot.git_available,
+        svn_available: snapshot.svn_available,
+        repositories: snapshot
+            .repositories
+            .into_iter()
+            .map(|repository| VcsMenuRepositoryDto {
+                id: repository.id,
+                tool: vcs_menu_tool_dto(repository.tool),
+                repository_root: repository.repository_root,
+                worktree_root: repository.worktree_root,
+                metadata_dir: repository.metadata_dir,
+                common_dir: repository.common_dir,
+                display_name: repository.display_name,
+                head: VcsHeadStateDto {
+                    kind: vcs_head_kind_dto(repository.head.kind),
+                    name: repository.head.name,
+                    oid: repository.head.oid,
+                    short_oid: repository.head.short_oid,
+                },
+                upstream: repository.upstream,
+                ahead: repository.ahead,
+                behind: repository.behind,
+                changes: VcsChangeSummaryDto {
+                    staged: repository.changes.staged,
+                    unstaged: repository.changes.unstaged,
+                    untracked: repository.changes.untracked,
+                    ignored: repository.changes.ignored,
+                    conflicted: repository.changes.conflicted,
+                },
+                conflicts: repository.conflicts,
+                operation: repository
+                    .operation
+                    .map(|operation| VcsOperationMenuStateDto {
+                        kind: vcs_operation_kind_dto(operation.kind),
+                        label: operation.label,
+                        continue_available: operation.continue_available,
+                        skip_available: operation.skip_available,
+                        abort_available: operation.abort_available,
+                        resolve_available: operation.resolve_available,
+                        cleanup_available: operation.cleanup_available,
+                        custom_rebase: operation.custom_rebase,
+                    }),
+                svn: repository.svn.map(|svn| SvnWorkingCopyMenuStateDto {
+                    wc_root: svn.wc_root,
+                    url: svn.url,
+                    revision: svn.revision,
+                    switched: svn.switched,
+                    property_modified: svn.property_modified,
+                    missing: svn.missing,
+                    conflicted: svn.conflicted,
+                    unversioned: svn.unversioned,
+                    cleanup_required: svn.cleanup_required,
+                }),
+                state_revision: repository.state_revision,
+            })
+            .collect(),
+        targets: snapshot
+            .targets
+            .into_iter()
+            .map(|target| VcsTargetMenuStateDto {
+                path: target.path,
+                links: target
+                    .links
+                    .into_iter()
+                    .map(|link| VcsTargetLinkDto {
+                        repository_id: link.repository_id,
+                        tool: vcs_menu_tool_dto(link.tool),
+                        relative_path: link.relative_path,
+                        relation: vcs_target_relation_dto(link.relation),
+                        staged: link.staged,
+                        unstaged: link.unstaged,
+                        conflicted: link.conflicted,
+                        switched: link.switched,
+                        property_modified: link.property_modified,
+                        missing: link.missing,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        state_revision: snapshot.state_revision,
+    }
+}
+
 fn plan_dto(plan: MenuPlan) -> ContextMenuPlanDto {
     ContextMenuPlanDto {
         schema_version: plan.schema_version,
@@ -449,6 +902,10 @@ fn plan_dto(plan: MenuPlan) -> ContextMenuPlanDto {
                                 target_paths: action.targets,
                                 payload_kind: action.payload.kind().to_string(),
                                 payload_value: action.payload.value().map(str::to_string),
+                                payload_state_revision: action
+                                    .payload
+                                    .state_revision()
+                                    .map(str::to_string),
                             }),
                             submenu_id: None,
                             label: String::new(),
@@ -497,6 +954,10 @@ fn plan_dto(plan: MenuPlan) -> ContextMenuPlanDto {
                                     target_paths: action.targets,
                                     payload_kind: action.payload.kind().to_string(),
                                     payload_value: action.payload.value().map(str::to_string),
+                                    payload_state_revision: action
+                                        .payload
+                                        .state_revision()
+                                        .map(str::to_string),
                                 }),
                                 submenu_id: None,
                                 label: String::new(),
@@ -565,6 +1026,15 @@ mod tests {
                 hidden_tool_ids: Vec::new(),
                 user_order: Vec::new(),
                 recent_tool_ids: Vec::new(),
+            },
+            vcs_menu: VcsMenuSnapshotDto {
+                schema_version: crate::vcs_menu::VCS_MENU_SCHEMA_VERSION,
+                observed_at_unix_ms: 0,
+                git_available: false,
+                svn_available: false,
+                repositories: Vec::new(),
+                targets: Vec::new(),
+                state_revision: String::new(),
             },
             compact: true,
             hide_unavailable: true,

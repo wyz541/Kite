@@ -106,6 +106,11 @@ pub enum ContextMenuActionPayload {
     None,
     Application(String),
     Tool(String),
+    Vcs {
+        repository_root: String,
+        tool: String,
+        state_revision: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Action)]
@@ -169,6 +174,10 @@ impl ContextMenuCommand {
             "git.diff" => Self::Vcs(VcsMenuCommand::GitDiff),
             "git.log" => Self::Vcs(VcsMenuCommand::GitLog),
             "git.rebase.interactive" => Self::Vcs(VcsMenuCommand::GitRebase),
+            "git.conflicts.resolve" => Self::Vcs(VcsMenuCommand::GitResolveConflicts),
+            "git.operation.continue" => Self::Vcs(VcsMenuCommand::GitOperationContinue),
+            "git.operation.skip" => Self::Vcs(VcsMenuCommand::GitOperationSkip),
+            "git.operation.abort" => Self::Vcs(VcsMenuCommand::GitOperationAbort),
             "git.discard" => Self::Vcs(VcsMenuCommand::GitRevert),
             "git.clean-untracked" => Self::Vcs(VcsMenuCommand::GitClean),
             "svn.update" => Self::Vcs(VcsMenuCommand::SvnUpdate),
@@ -180,6 +189,7 @@ impl ContextMenuCommand {
             "svn.log" => Self::Vcs(VcsMenuCommand::SvnLog),
             "svn.revert" => Self::Vcs(VcsMenuCommand::SvnRevert),
             "svn.cleanup" => Self::Vcs(VcsMenuCommand::SvnCleanup),
+            "svn.resolve-conflicts" => Self::Vcs(VcsMenuCommand::SvnResolveConflicts),
             _ => return None,
         };
         if variant_key.is_some()
@@ -256,6 +266,10 @@ pub enum VcsMenuCommand {
     GitDiff,
     GitLog,
     GitRebase,
+    GitResolveConflicts,
+    GitOperationContinue,
+    GitOperationSkip,
+    GitOperationAbort,
     GitRevert,
     GitClean,
     SvnUpdate,

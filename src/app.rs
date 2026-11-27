@@ -3641,9 +3641,14 @@ impl KiteApp {
                 }
                 cx.notify();
             }
-            ContextMenuCommand::Vcs(command) => {
-                self.run_vcs_command(command, action.target.clone(), window, cx)
-            }
+            ContextMenuCommand::Vcs(command) => match self.validate_vcs_action(action) {
+                Ok(()) => self.run_vcs_command(command, action.target.clone(), window, cx),
+                Err(error) => {
+                    self.notice = None;
+                    self.error = Some(error.into());
+                    cx.notify();
+                }
+            },
             ContextMenuCommand::SystemMenu => {
                 self.open_system_menu(action.paths.clone(), window, cx)
             }
@@ -3686,6 +3691,28 @@ impl KiteApp {
             self.error = Some(error.into());
             cx.notify();
         }
+    }
+
+    fn validate_vcs_action(&self, action: &ContextMenuAction) -> Result<(), String> {
+        let ContextMenuActionPayload::Vcs {
+            tool,
+            state_revision,
+            repository_root: _,
+        } = &action.payload
+        else {
+            return Ok(());
+        };
+        let tool = match tool.as_str() {
+            "git" => kite_core::vcs_menu::VcsMenuTool::Git,
+            "svn" => kite_core::vcs_menu::VcsMenuTool::Svn,
+            _ => return Err("未知的版本控制工具".to_string()),
+        };
+        let path = action
+            .paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| action.target.clone());
+        kite_core::vcs_menu::revalidate_vcs_revision(&path, tool, state_revision)
     }
 
     fn open_with_dialog(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -4122,6 +4149,25 @@ impl KiteApp {
                 }
                 cx.notify();
             }
+            VcsMenuCommand::GitResolveConflicts => self.open_git_client_at_path(path, window, cx),
+            VcsMenuCommand::GitOperationContinue => self.run_git_menu_control_task(
+                path,
+                kite_core::vcs_menu::VcsOperationControl::Continue,
+                window,
+                cx,
+            ),
+            VcsMenuCommand::GitOperationSkip => self.run_git_menu_control_task(
+                path,
+                kite_core::vcs_menu::VcsOperationControl::Skip,
+                window,
+                cx,
+            ),
+            VcsMenuCommand::GitOperationAbort => self.run_git_menu_control_task(
+                path,
+                kite_core::vcs_menu::VcsOperationControl::Abort,
+                window,
+                cx,
+            ),
             VcsMenuCommand::GitRevert => self.confirm_vcs_revert(VcsTool::Git, path, window, cx),
             VcsMenuCommand::GitClean => self.confirm_git_clean(path, window, cx),
             VcsMenuCommand::SvnUpdate => {
@@ -4145,7 +4191,41 @@ impl KiteApp {
             VcsMenuCommand::SvnCleanup => {
                 self.run_vcs_task(VcsTool::Svn, VcsOperation::Cleanup, path, window, cx)
             }
+            VcsMenuCommand::SvnResolveConflicts => {
+                self.run_vcs_query_task(VcsTool::Svn, VcsQuery::Diff, path, window, cx)
+            }
         }
+    }
+
+    fn run_git_menu_control_task(
+        &mut self,
+        path: PathBuf,
+        control: kite_core::vcs_menu::VcsOperationControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = None;
+        self.notice = Some("正在继续版本控制操作…".into());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    kite_core::vcs_menu::run_git_menu_control(&path, control)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(message) => {
+                    this.notice = Some(message.into());
+                    this.refresh(window, cx);
+                }
+                Err(error) => {
+                    this.notice = None;
+                    this.error = Some(error.into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn run_vcs_task(
