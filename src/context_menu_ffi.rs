@@ -1055,7 +1055,10 @@ mod tests {
         assert_eq!(last.id, "G99");
         assert!(matches!(
             last.entries.last().and_then(|entry| entry.action.as_ref()),
-            Some(action) if action.action_id == "system.native-menu" && action.enabled
+            Some(action)
+                if action.action_id == "system.native-menu"
+                    && !action.enabled
+                    && action.disabled_reason_code.as_deref() == Some("NATIVE_PLANE_UNAVAILABLE")
         ));
         assert!(
             plan.submenus

@@ -1903,7 +1903,10 @@ mod review_batch_tests {
         let mut change = review.file_changes[0].clone();
         change.target_path = dir.path().join("other.txt");
         let outcome = apply_file_change(&change, true).unwrap();
-        assert_eq!(outcome.path, dir.path().join("real.txt"));
+        assert_eq!(
+            outcome.path,
+            dunce::canonicalize(dir.path().join("real.txt")).unwrap()
+        );
         assert_eq!(
             fs::read_to_string(dir.path().join("real.txt")).unwrap(),
             "after\n"

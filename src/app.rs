@@ -11760,6 +11760,72 @@ mod clipboard_destination_tests {
 }
 
 #[cfg(test)]
+mod context_menu_target_validation_tests {
+    use super::validate_context_action_targets;
+    use crate::actions::{ContextMenuAction, ContextMenuActionPayload, ContextMenuCommand};
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn action(path: PathBuf, kind: &str) -> ContextMenuAction {
+        ContextMenuAction {
+            target: path.clone(),
+            paths: vec![path],
+            working_directory: std::env::temp_dir(),
+            command: ContextMenuCommand::Open,
+            action_id: "open.default".to_string(),
+            variant_key: None,
+            target_kinds: vec![kind.to_string()],
+            payload: ContextMenuActionPayload::None,
+        }
+    }
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "kite-context-target-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn dispatch_rejects_a_missing_frozen_target() {
+        let action = action(temporary_directory("missing").join("file.txt"), "file");
+        assert!(
+            validate_context_action_targets(&action)
+                .expect_err("missing target")
+                .contains("已不存在")
+        );
+    }
+
+    #[test]
+    fn dispatch_rejects_a_changed_target_kind() {
+        let root = temporary_directory("changed");
+        std::fs::create_dir_all(&root).expect("create root");
+        let file = root.join("target.txt");
+        std::fs::write(&file, "content").expect("write target");
+        assert!(
+            validate_context_action_targets(&action(file, "directory"))
+                .expect_err("changed kind")
+                .contains("类型已变化")
+        );
+        std::fs::remove_dir_all(root).expect("remove root");
+    }
+
+    #[test]
+    fn dispatch_accepts_an_unchanged_frozen_target() {
+        let root = temporary_directory("valid");
+        std::fs::create_dir_all(&root).expect("create root");
+        let file = root.join("target.txt");
+        std::fs::write(&file, "content").expect("write target");
+        assert!(validate_context_action_targets(&action(file, "file")).is_ok());
+        std::fs::remove_dir_all(Path::new(&root)).expect("remove root");
+    }
+}
+
+#[cfg(test)]
 mod clipboard_tests {
     use super::{ClipboardMode, FileClipboard, SharedClipboard};
     use std::cell::RefCell;

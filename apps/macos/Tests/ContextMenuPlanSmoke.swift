@@ -137,7 +137,7 @@ struct ContextMenuPlanSmoke {
             mindmapAvailable: false,
             mindmapImportAvailable: false,
             isShellNamespace: false,
-            nativePlaneAvailable: false,
+            nativePlaneAvailable: true,
             openWith: OpenWithCatalogDto(
                 status: .loading,
                 applications: []

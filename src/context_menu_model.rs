@@ -1089,47 +1089,62 @@ impl ContextMenuComposer {
                         RootGroup::Destructive
                     };
                 }
+                let precedence = candidate.precedence;
                 let label = candidate.label.unwrap_or(descriptor.label);
                 let icon_key = candidate.icon_key.unwrap_or(descriptor.icon_key);
                 let order = candidate.order.unwrap_or(descriptor.order);
-                resolved.push(ResolvedAction {
-                    action_id: descriptor.action_id,
-                    variant_key: candidate.variant_key,
-                    label,
-                    icon_key,
-                    scope: descriptor.scope,
-                    plane: descriptor.plane,
-                    owner: descriptor.owner,
-                    effect: descriptor.effect,
-                    risk,
-                    target_rule: descriptor.target_rule,
-                    confirmation: descriptor.confirmation,
-                    requires_confirmation,
-                    feedback: descriptor.feedback,
-                    root_group,
-                    section: descriptor.section,
-                    order,
-                    targets,
-                    enabled,
-                    disabled_reason_code: reason_code,
-                    disabled_reason: reason,
-                    payload: candidate.payload,
-                });
+                resolved.push((
+                    ResolvedAction {
+                        action_id: descriptor.action_id,
+                        variant_key: candidate.variant_key,
+                        label,
+                        icon_key,
+                        scope: descriptor.scope,
+                        plane: descriptor.plane,
+                        owner: descriptor.owner,
+                        effect: descriptor.effect,
+                        risk,
+                        target_rule: descriptor.target_rule,
+                        confirmation: descriptor.confirmation,
+                        requires_confirmation,
+                        feedback: descriptor.feedback,
+                        root_group,
+                        section: descriptor.section,
+                        order,
+                        targets,
+                        enabled,
+                        disabled_reason_code: reason_code,
+                        disabled_reason: reason,
+                        payload: candidate.payload,
+                    },
+                    precedence,
+                ));
             }
         }
 
-        let mut deduplicated: HashMap<String, (u8, usize, ResolvedAction)> = HashMap::new();
-        for (provider_order, action) in resolved.into_iter().enumerate() {
+        // Enabled candidates win first. Among candidates in the same state,
+        // explicit evidence precedence wins before provider registration order.
+        let mut deduplicated: HashMap<String, (u8, u8, usize, ResolvedAction)> = HashMap::new();
+        for (provider_order, (action, precedence)) in resolved.into_iter().enumerate() {
             let key = action.instance_key();
             let enabled_rank = u8::from(action.enabled);
-            let replacement = (enabled_rank, usize::MAX - provider_order, action);
+            let replacement = (
+                enabled_rank,
+                precedence,
+                usize::MAX - provider_order,
+                action,
+            );
             match deduplicated.get_mut(&key) {
                 Some(existing)
                     if replacement.0 > existing.0
-                        || (replacement.0 == existing.0 && replacement.1 > existing.1) => {}
-                Some(_) => {
+                        || (replacement.0 == existing.0 && replacement.1 > existing.1)
+                        || (replacement.0 == existing.0
+                            && replacement.1 == existing.1
+                            && replacement.2 > existing.2) =>
+                {
                     deduplicated.insert(key, replacement);
                 }
+                Some(_) => {}
                 None => {
                     deduplicated.insert(key, replacement);
                 }
@@ -1137,7 +1152,7 @@ impl ContextMenuComposer {
         }
         let mut actions = deduplicated
             .into_values()
-            .map(|(_, _, action)| action)
+            .map(|(_, _, _, action)| action)
             .collect::<Vec<_>>();
         actions.sort_by(|left, right| {
             left.root_group
@@ -1385,6 +1400,8 @@ fn surface_allows_action(context: &ContextSnapshot, action_id: &str) -> bool {
 fn validate_plan(context: &ContextSnapshot, plan: &MenuPlan) -> Result<(), ComposerError> {
     let mut previous_group_order = None;
     let mut native_count = 0;
+    let mut action_instances = HashSet::new();
+    let mut ordinary_root_count = 0usize;
     for group in &plan.groups {
         let group_order = group
             .id
@@ -1404,15 +1421,17 @@ fn validate_plan(context: &ContextSnapshot, plan: &MenuPlan) -> Result<(), Compo
                 message: format!("empty context-menu group: {}", group.id),
             });
         }
-        let mut keys = HashSet::new();
+        if group.id != RootGroup::Destructive.id() && group.id != RootGroup::Native.id() {
+            ordinary_root_count = ordinary_root_count.saturating_add(group.entries.len());
+        }
         for entry in &group.entries {
             match entry {
                 MenuEntryPlan::Action(action) => {
                     validate_action(context, action)?;
-                    if !keys.insert(action.instance_key()) {
+                    if !action_instances.insert(action.instance_key()) {
                         return Err(ComposerError {
                             message: format!(
-                                "duplicate root action instance: {}",
+                                "duplicate action instance: {}",
                                 action.instance_key()
                             ),
                         });
@@ -1422,12 +1441,16 @@ fn validate_plan(context: &ContextSnapshot, plan: &MenuPlan) -> Result<(), Compo
                     }
                 }
                 MenuEntryPlan::Submenu(submenu) => {
+                    if submenu.label.trim().is_empty() {
+                        return Err(ComposerError {
+                            message: format!("submenu has no accessible label: {}", submenu.id),
+                        });
+                    }
                     if submenu.sections.is_empty() {
                         return Err(ComposerError {
                             message: format!("empty submenu: {}", submenu.id),
                         });
                     }
-                    let mut submenu_keys = HashSet::new();
                     for section in &submenu.sections {
                         if section.entries.is_empty() {
                             return Err(ComposerError {
@@ -1436,10 +1459,10 @@ fn validate_plan(context: &ContextSnapshot, plan: &MenuPlan) -> Result<(), Compo
                         }
                         for action in &section.entries {
                             validate_action(context, action)?;
-                            if !submenu_keys.insert(action.instance_key()) {
+                            if !action_instances.insert(action.instance_key()) {
                                 return Err(ComposerError {
                                     message: format!(
-                                        "duplicate submenu action instance: {}",
+                                        "duplicate action instance: {}",
                                         action.instance_key()
                                     ),
                                 });
@@ -1449,6 +1472,13 @@ fn validate_plan(context: &ContextSnapshot, plan: &MenuPlan) -> Result<(), Compo
                 }
             }
         }
+    }
+    if ordinary_root_count > 16 {
+        return Err(ComposerError {
+            message: format!(
+                "ordinary root context-menu entries exceed the hard limit: {ordinary_root_count} > 16"
+            ),
+        });
     }
     if native_count != 1 {
         return Err(ComposerError {
@@ -1474,6 +1504,31 @@ fn validate_action(
     context: &ContextSnapshot,
     action: &ResolvedAction,
 ) -> Result<(), ComposerError> {
+    if action.label.trim().is_empty() {
+        return Err(ComposerError {
+            message: format!(
+                "context-menu action has no accessible label: {}",
+                action.action_id
+            ),
+        });
+    }
+    if !action.enabled
+        && (action
+            .disabled_reason_code
+            .as_deref()
+            .is_none_or(|reason| reason.trim().is_empty())
+            || action
+                .disabled_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty()))
+    {
+        return Err(ComposerError {
+            message: format!(
+                "disabled context-menu action has no accessible reason: {}",
+                action.action_id
+            ),
+        });
+    }
     if context.target_set.targets.is_empty()
         && matches!(action.scope, ActionScope::Entity | ActionScope::Collection)
     {
@@ -1558,12 +1613,20 @@ fn fallback_plan(context: &ContextSnapshot) -> MenuPlan {
         });
     }
     if let Some(descriptor) = descriptor(context, "system.native-menu") {
+        let availability = if context.capabilities.native_plane_available {
+            CandidateAvailability::Available
+        } else {
+            CandidateAvailability::disabled(
+                "NATIVE_PLANE_UNAVAILABLE",
+                "系统原生菜单在当前环境不可用",
+            )
+        };
         groups.push(MenuGroupPlan {
             id: RootGroup::Native.id().to_string(),
             entries: vec![MenuEntryPlan::Action(resolved_action(
                 descriptor,
                 context,
-                CandidateAvailability::Available,
+                availability,
                 ActionPayload::None,
             ))],
         });
@@ -2458,7 +2521,14 @@ impl ActionProvider for SystemActionProvider {
         }
         candidates.push(ActionCandidate::with_availability(
             "system.native-menu",
-            CandidateAvailability::Available,
+            if context.capabilities.native_plane_available {
+                CandidateAvailability::Available
+            } else {
+                CandidateAvailability::disabled(
+                    "NATIVE_PLANE_UNAVAILABLE",
+                    "系统原生菜单在当前环境不可用",
+                )
+            },
         ));
         candidates
     }
@@ -3583,6 +3653,25 @@ mod tests {
         ids
     }
 
+    fn all_actions(plan: &MenuPlan) -> Vec<&ResolvedAction> {
+        let mut actions = plan
+            .groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .filter_map(|entry| match entry {
+                MenuEntryPlan::Action(action) => Some(action),
+                MenuEntryPlan::Submenu(_) => None,
+            })
+            .collect::<Vec<_>>();
+        actions.extend(
+            plan.submenus
+                .iter()
+                .flat_map(|submenu| &submenu.sections)
+                .flat_map(|section| &section.entries),
+        );
+        actions
+    }
+
     #[test]
     fn file_menu_is_deduplicated_and_ordered() {
         let context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
@@ -3626,48 +3715,52 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_candidates_are_resolved_by_precedence_independent_of_provider_order() {
-        struct DuplicateProvider {
-            first: bool,
-        }
-        impl ActionProvider for DuplicateProvider {
+    fn duplicate_candidates_prefer_enabled_then_precedence_independent_of_provider_order() {
+        struct SingleCandidateProvider(ActionCandidate);
+        impl ActionProvider for SingleCandidateProvider {
             fn candidates(&self, _: &ContextSnapshot) -> Vec<ActionCandidate> {
-                if self.first {
-                    vec![
-                        ActionCandidate::with_availability(
-                            "clipboard.copy",
-                            CandidateAvailability::disabled("TEST", "disabled"),
-                        ),
-                        ActionCandidate::available("system.native-menu"),
-                    ]
-                } else {
-                    vec![
-                        ActionCandidate::available("clipboard.copy").precedence(10),
-                        ActionCandidate::available("system.native-menu"),
-                    ]
-                }
+                vec![self.0.clone()]
             }
         }
+
+        let candidates = [
+            ActionCandidate::with_availability(
+                "clipboard.copy",
+                CandidateAvailability::disabled("TEST", "disabled"),
+            )
+            .precedence(255)
+            .label("disabled"),
+            ActionCandidate::available("clipboard.copy")
+                .precedence(1)
+                .label("low"),
+            ActionCandidate::available("clipboard.copy")
+                .precedence(10)
+                .label("high"),
+            ActionCandidate::available("system.native-menu"),
+        ];
         let context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
-        let left = ContextMenuComposer::new(vec![
-            Box::new(DuplicateProvider { first: true }),
-            Box::new(DuplicateProvider { first: false }),
-        ])
-        .compose(&context)
-        .expect("left plan");
-        let right = ContextMenuComposer::new(vec![
-            Box::new(DuplicateProvider { first: false }),
-            Box::new(DuplicateProvider { first: true }),
-        ])
-        .compose(&context)
-        .expect("right plan");
-        assert_eq!(left, right);
-        let copy = left
-            .visible_action_ids()
-            .into_iter()
-            .find(|id| *id == "clipboard.copy")
-            .expect("copy action");
-        assert_eq!(copy, "clipboard.copy");
+        for order in [[0, 1, 2, 3], [2, 0, 3, 1], [1, 3, 2, 0]] {
+            let providers = order
+                .into_iter()
+                .map(|index| {
+                    Box::new(SingleCandidateProvider(candidates[index].clone()))
+                        as Box<dyn ActionProvider>
+                })
+                .collect::<Vec<_>>();
+            let plan = ContextMenuComposer::new(providers)
+                .compose(&context)
+                .expect("deduplicated plan");
+            let copy = all_actions(&plan)
+                .into_iter()
+                .find(|action| action.action_id == "clipboard.copy")
+                .expect("copy action");
+            assert!(copy.enabled);
+            assert_eq!(copy.label, "high");
+            assert_eq!(
+                plan.visible_action_ids().last().copied(),
+                Some("system.native-menu")
+            );
+        }
     }
 
     #[test]
@@ -4474,7 +4567,7 @@ mod tests {
     }
 
     #[test]
-    fn native_entry_remains_available_when_platform_probe_is_unavailable() {
+    fn native_entry_remains_visible_with_reason_when_platform_is_unavailable() {
         let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
         context.capabilities.native_plane_available = false;
         context.policy.hide_unavailable = true;
@@ -4487,10 +4580,127 @@ mod tests {
         match native {
             MenuEntryPlan::Action(action) => {
                 assert_eq!(action.action_id, "system.native-menu");
-                assert!(action.enabled);
-                assert_eq!(action.disabled_reason_code, None);
+                assert!(!action.enabled);
+                assert_eq!(
+                    action.disabled_reason_code.as_deref(),
+                    Some("NATIVE_PLANE_UNAVAILABLE")
+                );
+                assert!(
+                    action
+                        .disabled_reason
+                        .as_deref()
+                        .is_some_and(|reason| !reason.trim().is_empty())
+                );
             }
             _ => panic!("native entry must be an action"),
+        }
+    }
+
+    #[test]
+    fn safe_fallback_keeps_native_entry_last_when_platform_is_unavailable() {
+        let mut context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        context.capabilities.native_plane_available = false;
+        let plan = fallback_plan(&context);
+        let native = plan
+            .groups
+            .last()
+            .and_then(|group| group.entries.last())
+            .and_then(|entry| match entry {
+                MenuEntryPlan::Action(action) => Some(action),
+                MenuEntryPlan::Submenu(_) => None,
+            })
+            .expect("native fallback entry");
+        assert_eq!(native.action_id, "system.native-menu");
+        assert!(!native.enabled);
+        assert_eq!(
+            native.disabled_reason_code.as_deref(),
+            Some("NATIVE_PLANE_UNAVAILABLE")
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.contains("safe fallback") })
+        );
+    }
+
+    #[test]
+    fn ordinary_root_menu_entries_have_a_hard_limit() {
+        let context = snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1);
+        let descriptor = descriptor(&context, "clipboard.copy").expect("copy descriptor");
+        let entries = (0..17)
+            .map(|index| {
+                let mut action = resolved_action(
+                    descriptor.clone(),
+                    &context,
+                    CandidateAvailability::Available,
+                    ActionPayload::None,
+                );
+                action.variant_key = Some(format!("test-{index}"));
+                MenuEntryPlan::Action(action)
+            })
+            .collect::<Vec<_>>();
+        let plan = MenuPlan {
+            schema_version: CONTEXT_MENU_SCHEMA_VERSION,
+            snapshot_id: context.snapshot_id.clone(),
+            title: context.title(),
+            target_kinds: vec!["file".to_string()],
+            groups: vec![MenuGroupPlan {
+                id: RootGroup::Transfer.id().to_string(),
+                entries,
+            }],
+            submenus: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let error = validate_plan(&context, &plan).expect_err("root hard limit");
+        assert!(error.message.contains("exceed the hard limit"));
+    }
+
+    #[test]
+    fn all_visible_actions_have_accessible_labels_and_disabled_reasons() {
+        let contexts = [
+            snapshot(ContextSurface::BrowserList, &[TargetKind::File], 1),
+            snapshot(ContextSurface::BrowserColumns, &[TargetKind::Directory], 1),
+            snapshot(
+                ContextSurface::BrowserList,
+                &[TargetKind::File, TargetKind::File],
+                2,
+            ),
+            snapshot(ContextSurface::Background, &[TargetKind::Directory], 0),
+            snapshot(ContextSurface::SearchResults, &[TargetKind::File], 1),
+            snapshot(
+                ContextSurface::SidebarFavorites,
+                &[TargetKind::Directory],
+                1,
+            ),
+            snapshot(ContextSurface::Preview, &[TargetKind::File], 1),
+            snapshot(
+                ContextSurface::DeviceNamespace,
+                &[TargetKind::DeviceItem],
+                1,
+            ),
+        ];
+        for context in contexts {
+            let plan = compose_default_menu(&context).expect("accessible plan");
+            for action in all_actions(&plan) {
+                assert!(
+                    !action.label.trim().is_empty(),
+                    "empty label for {}",
+                    action.action_id
+                );
+                if !action.enabled {
+                    assert!(
+                        action
+                            .disabled_reason
+                            .as_deref()
+                            .is_some_and(|reason| !reason.trim().is_empty()),
+                        "missing disabled reason for {}",
+                        action.action_id
+                    );
+                }
+            }
+            for submenu in &plan.submenus {
+                assert!(!submenu.label.trim().is_empty());
+            }
         }
     }
 }

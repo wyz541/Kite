@@ -7,9 +7,13 @@ enum KiteNativeMenuBridge {
         return !services.items.isEmpty
     }
 
-    static func showServices() {
-        guard let services = NSApp?.servicesMenu else { return }
+    @discardableResult
+    static func showServices() -> Bool {
+        guard let services = NSApp?.servicesMenu, !services.items.isEmpty else {
+            return false
+        }
         services.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        return true
     }
 }
 
@@ -155,11 +159,19 @@ struct KiteContextMenuView: View {
     @ObservedObject private var toolPolicy = KiteToolPolicyStore.shared
     @EnvironmentObject private var agent: KiteAgentPanelModel
     @State private var context: KiteFrozenContextMenuContext
+    @State private var vcsMenu: VcsMenuSnapshotDto
 
     @MainActor
     init(model: KiteModel, target: KiteContextMenuTarget) {
         self.model = model
-        _context = State(initialValue: KiteFrozenContextMenuContext(model: model, target: target))
+        let context = KiteFrozenContextMenuContext(model: model, target: target)
+        _context = State(initialValue: context)
+        // VCS state is part of the menu snapshot. Keep one snapshot for the
+        // lifetime of the menu and revalidate it again before any write.
+        _vcsMenu = State(initialValue: loadVcsMenuSnapshot(
+            paths: context.toolPaths,
+            workingDirectory: context.workingDirectory
+        ))
     }
 
     var body: some View {
@@ -173,10 +185,6 @@ struct KiteContextMenuView: View {
     }
 
     private func makePlan() -> ContextMenuPlanDto {
-        let vcsMenu = loadVcsMenuSnapshot(
-            paths: context.toolPaths,
-            workingDirectory: context.workingDirectory
-        )
         let textEditorAvailable = context.targets.count == 1
             && !(context.primaryTarget?.isDirectory ?? false)
             && KitePlatform.isEditableTextFile(context.primaryTarget?.path ?? "")
@@ -225,7 +233,7 @@ struct KiteContextMenuView: View {
                 && !(context.primaryTarget?.isDirectory ?? false)
                 && KitePlatform.isMindmapImportFile(context.primaryTarget?.path ?? ""),
             isShellNamespace: false,
-            nativePlaneAvailable: true,
+            nativePlaneAvailable: KiteNativeMenuBridge.isAvailable,
             openWith: openWithCatalog.catalog(
                 for: context.targets.count == 1 && !(context.primaryTarget?.isDirectory ?? false)
                     ? context.primaryTarget?.path
@@ -540,7 +548,9 @@ private struct KiteContextMenuRunner {
         case "svn.resolve-conflicts":
             Task { await model.openVcsDiff(tool: .svn, path: primaryPath) }
         case "system.native-menu":
-            KiteNativeMenuBridge.showServices()
+            if !KiteNativeMenuBridge.showServices() {
+                model.errorMessage = "系统原生菜单当前不可用。"
+            }
         default:
             model.errorMessage = "未实现的上下文菜单动作：\(action.actionId)"
         }
