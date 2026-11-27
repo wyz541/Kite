@@ -16,6 +16,11 @@ on:
       - src/mindmap_import_window.rs
       - src/mindmap_ui_model.rs
       - src/mindmap_window.rs
+      - apps/macos/Sources/KiteMindmapWindow.swift
+      - apps/macos/Sources/MindmapTreeCanonicalizer.swift
+      - apps/macos/Tests/MindmapTreeParitySmoke.swift
+      - apps/macos/Tests/run-mindmap-tree-parity-smoke.sh
+      - apps/macos/verify.sh
       - tests/fixtures/mindmap/**
       - tests/mindmap_*.rs
       - .gitattributes
@@ -35,6 +40,11 @@ on:
       - src/mindmap_import_window.rs
       - src/mindmap_ui_model.rs
       - src/mindmap_window.rs
+      - apps/macos/Sources/KiteMindmapWindow.swift
+      - apps/macos/Sources/MindmapTreeCanonicalizer.swift
+      - apps/macos/Tests/MindmapTreeParitySmoke.swift
+      - apps/macos/Tests/run-mindmap-tree-parity-smoke.sh
+      - apps/macos/verify.sh
       - tests/fixtures/mindmap/**
       - tests/mindmap_*.rs
       - .gitattributes
@@ -77,3 +87,6 @@ jobs:
           do
             cargo test --locked --test "$test" -- --test-threads=1
           done
+
+      - name: Run macOS UI tree canonical parity smoke
+        run: bash apps/macos/Tests/run-mindmap-tree-parity-smoke.sh
