@@ -1,0 +1,14 @@
+[
+  {
+    "rootTopic": {
+      "id": "root",
+      "title": "Duplicate child id",
+      "children": {
+        "attached": [
+          {"id": "duplicate", "title": "First"},
+          {"id": "duplicate", "title": "Second"}
+        ]
+      }
+    }
+  }
+]
