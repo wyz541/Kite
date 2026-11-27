@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "description": "Fixed cross-platform Mindmap import corpus. Do not update without reviewing expected hierarchy and warnings.",
+  "corpusSha256": "72866d19a4552f251121a098fba8830586de918bee4683eb97fbe6cc8efbe9df",
+  "fixtures": [
+    {
+      "path": "docx-edge.docx",
+      "format": "docx",
+      "role": "edge",
+      "bytes": 3112,
+      "sha256": "db9fd08e74b8be24a5240e118ddb336d7e4249ae97d33462a38d3641dd4f5984"
+    },
+    {
+      "path": "docx-malformed.docx",
+      "format": "docx",
+      "role": "malformed",
+      "bytes": 18,
+      "sha256": "c5890f367678a84ca964472751f7a3802b7f966a5abf0b1365dce66dfed0a925"
+    },
+    {
+      "path": "docx-normal.docx",
+      "format": "docx",
+      "role": "normal",
+      "bytes": 1715,
+      "sha256": "568cecf353d2f0f20e13fc9d065110ff52978e86579e1cf9b737cb4b7f4192c6"
+    },
+    {
+      "path": "html-edge.html",
+      "format": "html",
+      "role": "edge",
+      "bytes": 270,
+      "sha256": "ab4c7379789647bd0665c0ef721ac02d594d6b486e3b03d16a4f82bcbcbcd632"
+    },
+    {
+      "path": "html-malformed.html",
+      "format": "html",
+      "role": "malformed",
+      "bytes": 28,
+      "sha256": "852d10d9f92303a66b69dcff5351bd378136a9f3a2e8219092563d4ebfdd1fe1"
+    },
+    {
+      "path": "html-normal.html",
+      "format": "html",
+      "role": "normal",
+      "bytes": 529,
+      "sha256": "88e7bed1cb9c9ad79806afb21e48a969741b7c2035f68297b12af1456b28c2c0"
+    },
+    {
+      "path": "markdown-edge.md",
+      "format": "markdown",
+      "role": "edge",
+      "bytes": 278,
+      "sha256": "4b56ba47c8435f994b34b3b3a31c0b91f51397eb372f095506a6ac25dfecc88e"
+    },
+    {
+      "path": "markdown-malformed.md",
+      "format": "markdown",
+      "role": "malformed",
+      "bytes": 12,
+      "sha256": "7b19e4e0e3a9c6204ff249840a7fcb26b0a73aa21f2e50acfe187546988ba124"
+    },
+    {
+      "path": "markdown-normal.md",
+      "format": "markdown",
+      "role": "normal",
+      "bytes": 404,
+      "sha256": "5de3439d386c34a187095a439e1047cf0b319dab4e7829843c5c1d9a21e1dab2"
+    },
+    {
+      "path": "opml-edge.opml",
+      "format": "opml",
+      "role": "edge",
+      "bytes": 339,
+      "sha256": "b7ef310c5153863e225717b5a54b6a407e5a42796b728ab457332ee2fa64a46d"
+    },
+    {
+      "path": "opml-malformed.opml",
+      "format": "opml",
+      "role": "malformed",
+      "bytes": 55,
+      "sha256": "63014b37cb6f4493daa829649faff49e71646b26ea8498e28335b7cb9ac35eea"
+    },
+    {
+      "path": "opml-normal.opml",
+      "format": "opml",
+      "role": "normal",
+      "bytes": 453,
+      "sha256": "48a0335a4ba70f5fd17f35f21dde420f4867cfe6dfe1cfbebb7abdd96c270f40"
+    },
+    {
+      "path": "text-edge.txt",
+      "format": "text",
+      "role": "edge",
+      "bytes": 419,
+      "sha256": "2a08845475a8573aa3fa7596e14925d5c487772a7c6f1bc089e1bf15ad6cc31f"
+    },
+    {
+      "path": "text-malformed.txt",
+      "format": "text",
+      "role": "malformed",
+      "bytes": 15,
+      "sha256": "00abb251ec057f12d8ab99f5a6f92cb6e59a23dac784c41a93f84746571778fc"
+    },
+    {
+      "path": "text-normal.txt",
+      "format": "text",
+      "role": "normal",
+      "bytes": 218,
+      "sha256": "c1121d77c3f217a7ac63376b53cee129d2e7a7a3bb2323ef8fa5ec15bc81df49"
+    }
+  ],
+  "performanceSanity": {
+    "syntheticTopics": 3000,
+    "maxPackageBytes": 8388608,
+    "maxElapsedMs": 30000,
+    "expectedOutlineNodes": 3001,
+    "expectedPackageTopics": 3002
+  }
+}

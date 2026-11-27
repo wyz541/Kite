@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="1.0">
+  <head><title>OPML Edge Corpus</title></head>
+  <body>
+    <foo>Ignored direct element.</foo>
+    <outline text="Kept" xmlUrl="https://example.com/feed.xml">
+      <unsupported>Ignored child element.</unsupported>
+      <outline text="Child" />
+    </outline>
+  </body>
+</opml>
