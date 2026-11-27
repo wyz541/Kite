@@ -5,13 +5,17 @@
 //! validation for every supported source format.
 
 mod adapter_support;
+mod docx;
 mod html;
 mod markdown;
 mod model;
 mod opml;
 mod segment;
+mod text;
+mod tree_builder;
 mod writer;
 
+pub use docx::{DocxAdapter, DocxAdapterOptions};
 pub use html::HtmlAdapter;
 pub use markdown::MarkdownAdapter;
 pub use model::{
@@ -26,6 +30,10 @@ pub use opml::OpmlAdapter;
 pub use segment::{
     ParagraphExpansionReport, SentenceSplitOptions, TextFragment, add_paragraph_as_content_nodes,
     segment_sentences,
+};
+pub use text::{
+    TextAdapter, TextAdapterOptions, TextAnalysis, TextConfidence, TextLineAnalysis, TextLineKind,
+    TextStrategy,
 };
 pub use writer::{
     CONTENT_ENTRY, MANIFEST_ENTRY, METADATA_ENTRY, XmindWriteResult, write_xmind_bytes,

@@ -45,10 +45,16 @@ impl std::fmt::Display for SourceFormat {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversionPreset {
+    /// Smart layering: honor explicit structure and infer only well-supported
+    /// short headings.
     #[default]
     StructureFirst,
+    /// Preserve structure while expanding longer paragraphs.
     ExpandedContent,
+    /// Preserve explicit structure and keep paragraph bodies in notes.
     StrictOutline,
+    /// Honor explicit structure and split all body paragraphs into sentences.
+    SentenceSplit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +94,20 @@ impl ConversionOptions {
             preset: ConversionPreset::StrictOutline,
             split_content: false,
             preserve_original_paragraphs: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn smart_layering() -> Self {
+        Self::default()
+    }
+
+    pub fn sentence_split() -> Self {
+        Self {
+            preset: ConversionPreset::SentenceSplit,
+            split_content: true,
+            preserve_original_paragraphs: true,
+            merge_short_fragments: false,
             ..Self::default()
         }
     }

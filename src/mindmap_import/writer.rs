@@ -323,6 +323,7 @@ fn preset_name(preset: &crate::mindmap_import::model::ConversionPreset) -> &'sta
         ConversionPreset::StructureFirst => "structure-first",
         ConversionPreset::ExpandedContent => "expanded-content",
         ConversionPreset::StrictOutline => "strict-outline",
+        ConversionPreset::SentenceSplit => "sentence-split",
     }
 }
 
