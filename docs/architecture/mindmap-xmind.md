@@ -100,7 +100,11 @@ AtomicFile 原子写入
 
 入口：
 
-- 菜单 `Mindmap > 打开 XMind…`，快捷键 `Command+Shift+M`。
+- 主窗口工具栏 `打开 Mindmap` 按钮。
+- `文件 > 打开 Mindmap…`，快捷键 `Command+Shift+M`。
+- `.xmind` 文件右键菜单 `使用 Mindmap 编辑`。
+- 双击 `.xmind` 文件直接在 Kite Mindmap 中打开。
+- 菜单 `Mindmap > 打开 XMind…`。
 - 菜单 `Mindmap > 打开示例`。
 - Finder 或其他应用通过 `.xmind` 打开 Kite。
 - 开发启动参数 `--mindmap <path>`。
