@@ -234,6 +234,11 @@ struct KiteMacApp: App {
 
                 Divider()
 
+                Button("打开 Git Graph…") {
+                    model.openGitLog(path: model.currentPath, scope: .repository)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .option])
+
                 Button("打开 Git 客户端…") {
                     KiteGitClientWindowController.show(model: model, repositoryPath: model.currentPath)
                 }

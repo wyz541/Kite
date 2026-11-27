@@ -331,6 +331,12 @@ struct ContentView: View {
 
             if model.columns.last?.gitAvailable == true {
                 KiteToolbarIconButton(
+                    systemName: "point.3.connected.trianglepath.dotted",
+                    title: "打开 Git Graph"
+                ) {
+                    model.openGitLog(path: model.currentPath, scope: .repository)
+                }
+                KiteToolbarIconButton(
                     systemName: "arrow.triangle.branch",
                     title: "打开 Git 客户端 (⌘⇧G)"
                 ) {

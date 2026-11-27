@@ -142,6 +142,12 @@ Windows UI 和 FFI 都读取同一个 `GitService` 控制台快照。
 - `git_commit_details(path, hash)`
 - `git_commit_tree(path, hash)`
 - `git_file_history(path, relative_path, cursor, page_size)`
+- `resolve_git_graph_scope(repository_path, scope)`
+- `git_graph_context(repository_path, scope)`
+- `git_graph_page(repository_path, scope, filter, cursor, page_size)`
+- `git_graph_commit_details(repository_path, scope, hash)`
+- `git_graph_commit_tree(repository_path, scope, hash)`
+- `git_graph_file_history(repository_path, relative_path, cursor, page_size)`
 
 这些接口由 `src/git/log.rs` 生成，底层命令统一经过 `GitService` 的共享执行器。
 
@@ -232,10 +238,25 @@ Git 客户端变更列表下方仍保留快速提交区，快捷键为 Windows `
 
 ## 提交历史与提交图
 
+### Graph scope
+
+`GitGraphScope` 是 Git Graph/Log 共用的路径范围模型：
+
+- `Repository`：完整仓库生命周期，不设置 pathspec。
+- `Directory(PathBuf)`：当前目录及所有递归子目录，映射为 `git log -- <directory>`。
+- `File(PathBuf)`：单个文件路径。
+
+Scope 解析接受仓库内绝对路径，也接受相对仓库根目录的路径。Core 会 canonicalize 现有路径并解析最近存在的父目录，从而安全处理已删除或重命名后的当前路径；空路径、NUL、`..` 越界、仓库外路径和目录/文件类型不匹配会返回结构化错误。返回的 `ResolvedGitGraphScope` 始终使用仓库相对 pathspec。
+
+目录 scope 使用 `--full-history`，保留路径过滤下的 merge 提交和分支拓扑；文件 scope 保持 Git 默认历史简化。首版不追踪目录重命名，只查询当前路径。仓库级 `git_log_page` 保持原有默认简化行为，新 UI 应使用 `git_graph_page`。
+
+分页游标包含仓库根、规范化 scope 和完整筛选条件。仓库、scope 或筛选任一变化，旧游标都会以 `InvalidCursor` 拒绝。空仓库或 scope 没有任何提交时返回 `NoHistory`；非仓库、仓库外、路径不存在和非法路径分别使用 `NotRepository`、`OutsideRepository`、`PathNotFound` 和 `InvalidPath`。
+
 ### 分页
 
 `git_log_page(path, filter, cursor, page_size)` 每页最多返回 1,000 条，UI 默认使用 200 条。游标是 Core 生成的 JSON 字符串，包含：
 
+- 规范化 Graph scope；
 - 当前筛选条件；
 - 已读取的提交数量；
 - 活跃泳道的待处理父提交哈希；
@@ -249,7 +270,7 @@ Git 客户端变更列表下方仍保留快速提交区，快捷键为 Windows `
 
 首屏加载第一页后，UI 立即后台预取第二页。Windows 使用 `uniform_list`，macOS 使用 `LazyVStack`，仅渲染可见行。
 
-性能数据见 [Git 提交历史性能](../performance/git-log-v0.6.88.md)。
+性能数据见 [Git 提交历史性能](../performance/git-log-v0.6.88.md) 和 [Git Graph scope 性能](../performance/git-graph-v0.6.97.md)。
 
 ### 图布局
 

@@ -3965,7 +3965,7 @@ impl KiteApp {
                 match git_log_window::open_git_log_window(path, cx) {
                     Ok(()) => {
                         self.error = None;
-                        self.notice = Some("已打开提交历史窗口".into());
+                        self.notice = Some("已打开 Git Workspace".into());
                     }
                     Err(error) => {
                         self.notice = None;
@@ -5698,6 +5698,27 @@ impl KiteApp {
                         .tooltip("打开 Git 客户端 (Ctrl+Shift+G)")
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.open_git_client_for_current(&OpenGitClient, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("open-git-graph")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::GitCommitHorizontal)
+                        .tooltip("打开根仓库 Git Graph")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            match git_log_window::open_git_log_window(this.current_dir.clone(), cx)
+                            {
+                                Ok(()) => {
+                                    this.error = None;
+                                    this.notice = Some("已打开 Git Graph".into());
+                                }
+                                Err(error) => {
+                                    this.notice = None;
+                                    this.error = Some(error.into());
+                                }
+                            }
+                            cx.notify();
                         })),
                 )
             })

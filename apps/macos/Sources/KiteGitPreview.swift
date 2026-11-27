@@ -192,7 +192,12 @@ struct KiteGitPreviewSection: View {
     }
 
     private func showLog() {
-        model.openGitLog(path: entry.path)
+        model.openGitLog(
+            path: entry.path,
+            scope: entry.isDirectory
+                ? .directory(path: entry.path)
+                : .file(path: entry.path)
+        )
     }
 
     private func branchLine(_ summary: GitPathSummaryDto) -> String {

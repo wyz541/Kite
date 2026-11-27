@@ -6,6 +6,11 @@ use std::path::PathBuf;
 pub enum GitErrorKind {
     NotInstalled,
     NotRepository,
+    OutsideRepository,
+    PathNotFound,
+    InvalidPath,
+    NoHistory,
+    InvalidCursor,
     Authentication,
     Conflict,
     Rejected,
@@ -23,6 +28,11 @@ impl GitErrorKind {
         match self {
             Self::NotInstalled => "未找到 Git",
             Self::NotRepository => "不是 Git 仓库",
+            Self::OutsideRepository => "范围超出仓库",
+            Self::PathNotFound => "路径不存在",
+            Self::InvalidPath => "路径无效",
+            Self::NoHistory => "没有提交历史",
+            Self::InvalidCursor => "提交历史游标失效",
             Self::Authentication => "认证失败",
             Self::Conflict => "存在冲突",
             Self::Rejected => "远程拒绝",
@@ -118,6 +128,11 @@ impl GitError {
                 "当前 Git 版本低于 Kite 支持的最低版本。请升级 Git。".to_string()
             }
             GitErrorKind::NotRepository => "所选路径不在 Git 仓库中。".to_string(),
+            GitErrorKind::OutsideRepository => "所选范围超出 Git 仓库。".to_string(),
+            GitErrorKind::PathNotFound => "所选路径不存在。".to_string(),
+            GitErrorKind::InvalidPath => "所选路径无效。".to_string(),
+            GitErrorKind::NoHistory => "所选范围没有可显示的提交历史。".to_string(),
+            GitErrorKind::InvalidCursor => "提交历史游标已失效，请重新加载。".to_string(),
             _ if detail.is_empty() => {
                 format!("Git 操作失败，退出码 {}", exit_code.unwrap_or(-1))
             }

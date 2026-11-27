@@ -1,30 +1,66 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::resizable::{ResizableState, resizable_panel, v_resizable};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kite_core::diff::DiffEndpoint;
+
+use crate::diff_viewer_window::{DiffLogScope, DiffViewer};
+use kite_core::git::GitService;
 use kite_core::git::log::{
-    self, GitCommitDetails, GitGraphEdge, GitGraphRow, GitLogCommit, GitLogContext, GitLogFilter,
-    GitLogPage, GitRef, GitRefKind, GitTreeEntry,
+    self, GitCommitDetails, GitGraphContext, GitGraphEdge, GitGraphRow, GitGraphScope,
+    GitLogCommit, GitLogFilter, GitLogPage, GitRef, GitRefKind, GitTreeEntry,
 };
-use std::path::PathBuf;
 
 const PAGE_SIZE: u32 = 200;
-const REFERENCE_TREE_WIDTH: f32 = 218.0;
+const NAVIGATION_WIDTH: f32 = 220.0;
 const ROW_HEIGHT: f32 = 30.0;
+const DETAIL_HEIGHT: f32 = 300.0;
 const GRAPH_LEFT_PADDING: f32 = 4.0;
 const GRAPH_LANE_MIN_WIDTH: f32 = 4.0;
 const GRAPH_LANE_MAX_WIDTH: f32 = 13.0;
 const GRAPH_EDGE_WIDTH: f32 = 2.0;
 const GRAPH_NODE_SIZE: f32 = 8.0;
+const GRAPH_COLUMN_WIDTH: f32 = 112.0;
+const REFS_COLUMN_WIDTH: f32 = 210.0;
+const AUTHOR_COLUMN_WIDTH: f32 = 120.0;
+const DATE_COLUMN_WIDTH: f32 = 125.0;
+const HASH_COLUMN_WIDTH: f32 = 74.0;
+const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const GRAPH_COLORS: [u32; 10] = [
     0x5e9cff, 0x55b978, 0xf0a45c, 0xc678dd, 0x56b6c2, 0xe06c75, 0xe5c07b, 0x7f9cf5, 0x64d1a7,
     0xd884e0,
 ];
+
+static OPEN_WINDOWS: OnceLock<Mutex<HashMap<String, WindowHandle<GitLogWindow>>>> = OnceLock::new();
+
+fn open_windows() -> &'static Mutex<HashMap<String, WindowHandle<GitLogWindow>>> {
+    OPEN_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn repository_key(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.into_owned()
+    }
+}
+
+fn forget_open_window(key: &str) {
+    if let Ok(mut windows) = open_windows().lock() {
+        windows.remove(key);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SearchMode {
@@ -94,23 +130,34 @@ impl DateRange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailTab {
     Commit,
-    Files,
-    Tree,
+    Changes,
+    FileTree,
+}
+
+impl DetailTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Commit => "Commit",
+            Self::Changes => "Changes",
+            Self::FileTree => "File Tree",
+        }
+    }
 }
 
 struct GitLogWindow {
-    path: PathBuf,
-    context: Option<GitLogContext>,
+    repository_root: PathBuf,
+    scope: GitGraphScope,
+    context: Option<GitGraphContext>,
     commits: Vec<GitLogCommit>,
     selected_hash: Option<String>,
     details: Option<GitCommitDetails>,
+    selected_change_path: Option<String>,
     tree_entries: Vec<GitTreeEntry>,
     detail_tab: DetailTab,
     search_mode: SearchMode,
     search_regex: bool,
     branch: Option<String>,
     date_range: DateRange,
-    history_path: Option<String>,
     cursor: Option<String>,
     has_more: bool,
     loading: bool,
@@ -125,11 +172,18 @@ struct GitLogWindow {
     query_input: Entity<InputState>,
     row_scroll: UniformListScrollHandle,
     detail_scroll: ScrollHandle,
+    detail_resize_state: Entity<ResizableState>,
+    diff_viewer: Option<Entity<DiffViewer>>,
     _subscription: Subscription,
 }
 
 impl GitLogWindow {
-    fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        repository_root: PathBuf,
+        scope: GitGraphScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let query_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(SearchMode::Text.placeholder())
@@ -145,18 +199,19 @@ impl GitLogWindow {
             },
         );
         let mut this = Self {
-            path,
+            repository_root,
+            scope,
             context: None,
             commits: Vec::new(),
             selected_hash: None,
             details: None,
+            selected_change_path: None,
             tree_entries: Vec::new(),
             detail_tab: DetailTab::Commit,
             search_mode: SearchMode::Text,
             search_regex: false,
             branch: None,
             date_range: DateRange::Any,
-            history_path: None,
             cursor: None,
             has_more: false,
             loading: true,
@@ -171,12 +226,36 @@ impl GitLogWindow {
             query_input,
             row_scroll: UniformListScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
+            detail_resize_state: cx.new(|_| ResizableState::default()),
+            diff_viewer: None,
             _subscription: subscription,
         };
+        this.register_close_cleanup(window, cx);
+        window.set_window_title(&this.window_title());
         this.refresh(window, cx);
         this.query_input
             .update(cx, |input, cx| input.focus(window, cx));
         this
+    }
+
+    fn register_close_cleanup(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = repository_key(&self.repository_root);
+        window.on_window_should_close(cx, move |_window, _app| {
+            forget_open_window(&key);
+            true
+        });
+    }
+
+    fn window_title(&self) -> String {
+        window_title_for(&self.repository_root, &self.scope)
+    }
+
+    fn scope_label(&self) -> String {
+        scope_label(&self.scope)
+    }
+
+    fn scope_path(&self) -> Option<&Path> {
+        self.scope.path()
     }
 
     fn current_filter(&self, cx: &App) -> GitLogFilter {
@@ -195,16 +274,14 @@ impl GitLogWindow {
                 SearchMode::Hash => filter.hash = Some(query),
             }
         }
-        if let Some(path) = self.history_path.as_ref() {
-            filter.path = Some(path.clone());
-        }
         filter
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
-        let path = self.path.clone();
+        let repository_root = self.repository_root.clone();
+        let scope = self.scope.clone();
         let filter = self.current_filter(cx);
         self.loading = true;
         self.loading_more = false;
@@ -213,18 +290,24 @@ impl GitLogWindow {
         self.commits.clear();
         self.selected_hash = None;
         self.details = None;
+        self.selected_change_path = None;
+        self.diff_viewer = None;
         self.tree_entries.clear();
         self.cursor = None;
         self.has_more = false;
         self.error = None;
         self.notice = Some("正在加载提交历史…".into());
+        window.set_window_title(&self.window_title());
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let context = log::git_log_context(&path)?;
-                    let page = log::git_log_page(&path, filter, None, PAGE_SIZE)?;
+                    let context = log::git_graph_context(&repository_root, &scope)
+                        .map_err(|error| error.to_string())?;
+                    let page =
+                        log::git_graph_page(&repository_root, &scope, filter, None, PAGE_SIZE)
+                            .map_err(|error| error.to_string());
                     Ok::<_, String>((context, page))
                 })
                 .await;
@@ -235,14 +318,28 @@ impl GitLogWindow {
                 this.loading = false;
                 match result {
                     Ok((context, page)) => {
+                        this.scope = context.scope.clone();
                         this.context = Some(context);
-                        this.notice = Some(format!("已加载 {} 个提交", page.commits.len()).into());
-                        this.apply_page(page);
-                        if let Some(hash) = this.selected_hash.clone() {
-                            this.select_commit(hash, window, cx);
-                        }
-                        if this.has_more {
-                            this.load_more(window, cx);
+                        match page {
+                            Ok(page) => {
+                                this.notice =
+                                    Some(format!("已加载 {} 个提交", page.commits.len()).into());
+                                this.apply_page(page);
+                                if let Some(hash) = this.selected_hash.clone() {
+                                    this.select_commit(hash, false, window, cx);
+                                }
+                                if this.has_more {
+                                    this.load_more(window, cx);
+                                }
+                            }
+                            Err(error) if error.contains("没有可显示的提交历史") => {
+                                this.error = None;
+                                this.notice = Some(error.into());
+                            }
+                            Err(error) => {
+                                this.error = Some(error.into());
+                                this.notice = None;
+                            }
                         }
                     }
                     Err(error) => {
@@ -266,14 +363,16 @@ impl GitLogWindow {
         self.loading_more = true;
         self.error = None;
         let generation = self.generation;
-        let path = self.path.clone();
+        let repository_root = self.repository_root.clone();
+        let scope = self.scope.clone();
         let filter = self.current_filter(cx);
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    log::git_log_page(&path, filter, Some(&cursor), PAGE_SIZE)
+                    log::git_graph_page(&repository_root, &scope, filter, Some(&cursor), PAGE_SIZE)
+                        .map_err(|error| error.to_string())
                 })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
@@ -305,13 +404,25 @@ impl GitLogWindow {
         }
     }
 
-    fn select_commit(&mut self, hash: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_commit(
+        &mut self,
+        hash: String,
+        open_changes: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_hash.as_deref() != Some(hash.as_str()) {
             self.selected_hash = Some(hash.clone());
             self.details = None;
+            self.selected_change_path = None;
+            self.diff_viewer = None;
             self.tree_entries.clear();
-            self.detail_tab = DetailTab::Commit;
         }
+        self.detail_tab = if open_changes {
+            DetailTab::Changes
+        } else {
+            DetailTab::Commit
+        };
         self.load_details(hash, window, cx);
         cx.notify();
     }
@@ -323,12 +434,16 @@ impl GitLogWindow {
         self.details_loading = true;
         self.details_loading_hash = Some(hash.clone());
         let generation = self.generation;
-        let path = self.path.clone();
+        let repository_root = self.repository_root.clone();
+        let scope = self.scope.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn({
                     let hash = hash.clone();
-                    async move { log::git_commit_details(&path, &hash) }
+                    async move {
+                        log::git_graph_commit_details(&repository_root, &scope, &hash)
+                            .map_err(|error| error.to_string())
+                    }
                 })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
@@ -342,7 +457,11 @@ impl GitLogWindow {
                     this.details_loading_hash = None;
                 }
                 match result {
-                    Ok(details) => this.details = Some(details),
+                    Ok(details) => {
+                        this.selected_change_path =
+                            details.changed_files.first().map(|file| file.path.clone());
+                        this.details = Some(details);
+                    }
                     Err(error) => this.error = Some(error.into()),
                 }
                 cx.notify();
@@ -358,19 +477,25 @@ impl GitLogWindow {
         if self.selected_hash.as_deref() != Some(hash.as_str()) {
             self.selected_hash = Some(hash.clone());
             self.details = None;
+            self.selected_change_path = None;
+            self.diff_viewer = None;
             self.tree_entries.clear();
         }
         self.tree_loading = true;
         self.tree_loading_hash = Some(hash.clone());
-        self.detail_tab = DetailTab::Tree;
+        self.detail_tab = DetailTab::FileTree;
         let generation = self.generation;
-        let path = self.path.clone();
+        let repository_root = self.repository_root.clone();
+        let scope = self.scope.clone();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn({
                     let hash = hash.clone();
-                    async move { log::git_commit_tree(&path, &hash) }
+                    async move {
+                        log::git_graph_commit_tree(&repository_root, &scope, &hash)
+                            .map_err(|error| error.to_string())
+                    }
                 })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
@@ -384,7 +509,12 @@ impl GitLogWindow {
                     this.tree_loading_hash = None;
                 }
                 match result {
-                    Ok(entries) => this.tree_entries = entries,
+                    Ok(entries) => {
+                        this.tree_entries = entries;
+                        if let Some(index) = this.scope_tree_index() {
+                            this.detail_scroll.scroll_to_item(index);
+                        }
+                    }
                     Err(error) => this.error = Some(error.into()),
                 }
                 cx.notify();
@@ -393,27 +523,148 @@ impl GitLogWindow {
         .detach();
     }
 
-    fn show_file_history(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.history_path = Some(path);
-        self.search_mode = SearchMode::Path;
+    fn set_scope(&mut self, scope: GitGraphScope, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scope == scope {
+            self.refresh(window, cx);
+            return;
+        }
+        self.scope = scope;
+        self.selected_hash = None;
+        self.details = None;
+        self.selected_change_path = None;
+        self.tree_entries.clear();
         self.refresh(window, cx);
     }
 
-    fn clear_history_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.history_path = None;
+    fn clear_scope(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_scope(GitGraphScope::Repository, window, cx);
+    }
+
+    fn set_branch_filter(
+        &mut self,
+        branch: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.branch == branch {
+            return;
+        }
+        self.branch = branch;
         self.refresh(window, cx);
+    }
+
+    fn show_file_history(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_scope(GitGraphScope::file(PathBuf::from(path)), window, cx);
+    }
+
+    fn focus_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.query_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
     fn selected_commit(&self) -> Option<&GitLogCommit> {
         let hash = self.selected_hash.as_deref()?;
         self.commits.iter().find(|commit| commit.hash == hash)
     }
+
+    fn scope_tree_index(&self) -> Option<usize> {
+        let scope_path = self.scope_path()?.to_string_lossy().replace('\\', "/");
+        self.tree_entries.iter().position(|entry| {
+            entry.path == scope_path || entry.path.starts_with(&format!("{scope_path}/"))
+        })
+    }
+
+    fn scope_contains_path(&self, path: &str) -> bool {
+        let Some(scope_path) = self.scope_path() else {
+            return false;
+        };
+        let scope_path = scope_path.to_string_lossy().replace('\\', "/");
+        path == scope_path || path.starts_with(&format!("{scope_path}/"))
+    }
+
+    fn show_embedded_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (old, new, relative_path) = {
+            let Some(details) = self.details.as_ref() else {
+                return;
+            };
+            let Some(relative_path) = self.selected_change_path.clone() else {
+                return;
+            };
+            let old = details
+                .commit
+                .parents
+                .first()
+                .cloned()
+                .map(DiffEndpoint::Revision)
+                .unwrap_or_else(|| DiffEndpoint::Revision(EMPTY_TREE_HASH.to_string()));
+            let new = DiffEndpoint::Revision(details.commit.hash.clone());
+            (old, new, relative_path)
+        };
+        let path = self.repository_root.join(relative_path);
+        let log_scope = DiffLogScope::from_path(&path);
+
+        if let Some(viewer) = self.diff_viewer.as_mut() {
+            viewer.update(cx, |viewer, cx| {
+                viewer.show(path, old, new, Some(log_scope), window, cx);
+            });
+        } else {
+            let workspace = cx.entity().downgrade();
+            let callback: crate::diff_viewer_window::DiffLogNavigation =
+                Box::new(move |scope, window, cx| {
+                    let _ = workspace.update(cx, |this, cx| {
+                        this.scope = match scope {
+                            DiffLogScope::File(path) => GitGraphScope::File(path),
+                            DiffLogScope::Directory(path) => GitGraphScope::Directory(path),
+                        };
+                        this.refresh(window, cx);
+                    });
+                });
+            let viewer = cx.new(|cx| {
+                DiffViewer::new(path, old, new, Some(log_scope), Some(callback), window, cx)
+            });
+            self.diff_viewer = Some(viewer);
+        }
+
+        self.detail_tab = DetailTab::Changes;
+        self.error = None;
+        self.notice = Some("已加载内嵌并排 Diff".into());
+        cx.notify();
+    }
+
+    fn open_selected_file_diff_window(&mut self, cx: &mut Context<Self>) {
+        let Some(details) = self.details.as_ref() else {
+            return;
+        };
+        let Some(relative_path) = self.selected_change_path.clone() else {
+            return;
+        };
+        let old = details
+            .commit
+            .parents
+            .first()
+            .cloned()
+            .map(DiffEndpoint::Revision)
+            .unwrap_or_else(|| DiffEndpoint::Revision(EMPTY_TREE_HASH.to_string()));
+        let new = DiffEndpoint::Revision(details.commit.hash.clone());
+        let path = self.repository_root.join(relative_path);
+        match crate::diff_viewer_window::open_diff_viewer_window(path, old, new, cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("已打开独立 Diff 查看器".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
 }
 
 impl Render for GitLogWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let foreground = cx.theme().foreground;
-        let muted = cx.theme().muted_foreground;
         let border = cx.theme().border;
         v_flex()
             .size_full()
@@ -425,33 +676,12 @@ impl Render for GitLogWindow {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_reference_tree(cx))
+                    .child(self.render_navigation(cx))
                     .child(div().w(px(1.)).h_full().bg(border))
-                    .child(self.render_log_pane(window, cx))
-                    .child(div().w(px(1.)).h_full().bg(border))
-                    .child(self.render_detail_pane(cx)),
+                    .child(self.render_workspace(window, cx)),
             )
             .child(div().h(px(1.)).w_full().bg(border))
-            .child(
-                h_flex()
-                    .h(px(28.))
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(self.notice.clone().unwrap_or_else(|| "就绪".into())),
-                    )
-                    .child(format!(
-                        "{} 个提交  ·  双栏提交图由 Rust Core 计算",
-                        self.commits.len()
-                    )),
-            )
+            .child(self.render_status_bar(cx))
     }
 }
 
@@ -464,22 +694,21 @@ impl GitLogWindow {
             .and_then(|full_name| {
                 self.context
                     .as_ref()?
+                    .log
                     .refs
                     .iter()
                     .find(|reference| reference.full_name == full_name)
                     .map(|reference| reference.name.clone())
             })
             .unwrap_or_else(|| "全部分支".to_string());
-        let repository_root = self
-            .context
-            .as_ref()
-            .map(|context| context.repository_root.display().to_string())
-            .unwrap_or_else(|| self.path.display().to_string());
         let current_branch = self
             .context
             .as_ref()
-            .and_then(|context| context.current_branch.clone())
+            .and_then(|context| context.log.current_branch.clone())
             .unwrap_or_else(|| "分离 HEAD".to_string());
+        let repository_root = self.repository_root.display().to_string();
+        let scope_label = self.scope_label();
+        let is_repository = self.scope.is_repository();
 
         v_flex()
             .w_full()
@@ -518,7 +747,7 @@ impl GitLogWindow {
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .child("提交历史"),
+                                            .child("Git Workspace"),
                                     )
                                     .child(self.branch_badge(&current_branch, cx)),
                             )
@@ -531,7 +760,45 @@ impl GitLogWindow {
                             ),
                     )
                     .child(
-                        Button::new("git-log-refresh")
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(cx.theme().muted.opacity(0.2))
+                            .child(
+                                Icon::new(if is_repository {
+                                    IconName::GitBranch
+                                } else {
+                                    IconName::Folder
+                                })
+                                .size_3p5()
+                                .text_color(cx.theme().primary),
+                            )
+                            .child(
+                                div()
+                                    .max_w(px(360.))
+                                    .truncate()
+                                    .text_xs()
+                                    .child(scope_label),
+                            )
+                            .when(!is_repository, |this| {
+                                this.child(
+                                    Button::new("git-workspace-clear-scope")
+                                        .ghost()
+                                        .compact()
+                                        .label("清除范围")
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                this.clear_scope(window, cx)
+                                            },
+                                        )),
+                                )
+                            }),
+                    )
+                    .child(
+                        Button::new("git-workspace-refresh")
                             .ghost()
                             .compact()
                             .icon(IconName::RefreshCw)
@@ -547,7 +814,7 @@ impl GitLogWindow {
                     .gap_2()
                     .items_center()
                     .child(
-                        Button::new("git-log-search-mode")
+                        Button::new("git-workspace-search-mode")
                             .ghost()
                             .compact()
                             .label(format!("筛选 · {}", self.search_mode.label()))
@@ -561,9 +828,7 @@ impl GitLogWindow {
                                         cx,
                                     )
                                 });
-                                this.query_input
-                                    .update(cx, |input, cx| input.focus(window, cx));
-                                cx.notify();
+                                this.focus_filter(window, cx);
                             })),
                     )
                     .child(
@@ -575,7 +840,7 @@ impl GitLogWindow {
                         ),
                     )
                     .child(
-                        Button::new("git-log-regex")
+                        Button::new("git-workspace-regex")
                             .ghost()
                             .compact()
                             .label("正则")
@@ -589,36 +854,50 @@ impl GitLogWindow {
                     .child(self.render_branch_menu(branch_label, cx))
                     .child(self.render_date_menu(cx)),
             )
-            .when_some(self.history_path.clone(), |this, path| {
-                this.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(cx.theme().muted.opacity(0.28))
-                        .child(Icon::new(IconName::File).size_3p5().text_color(muted))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .child(format!("文件历史 · {path}")),
-                        )
-                        .child(
-                            Button::new("git-log-clear-history")
-                                .ghost()
-                                .compact()
-                                .label("清除")
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.clear_history_path(window, cx)
-                                })),
-                        ),
-                )
-            })
+            .into_any_element()
+    }
+
+    fn render_status_bar(&self, cx: &App) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .h(px(28.))
+            .w_full()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .text_xs()
+            .text_color(muted)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(self.notice.clone().unwrap_or_else(|| "就绪".into())),
+            )
+            .child(format!(
+                "{} 个提交  ·  {}",
+                self.commits.len(),
+                self.scope_label()
+            ))
+            .into_any_element()
+    }
+
+    fn render_workspace(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(
+                v_resizable("git-workspace-vertical")
+                    .with_state(&self.detail_resize_state)
+                    .child(resizable_panel().child(self.render_log_pane(cx)))
+                    .child(
+                        resizable_panel()
+                            .size(px(DETAIL_HEIGHT))
+                            .size_range(px(180.)..px(520.))
+                            .fixed()
+                            .child(self.render_detail_pane(cx)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -634,61 +913,39 @@ impl GitLogWindow {
             .into_any_element()
     }
 
-    fn set_branch_filter(
-        &mut self,
-        branch: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.branch == branch {
-            return;
-        }
-        self.branch = branch;
-        self.refresh(window, cx);
-    }
-
-    fn render_reference_tree(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let refs = self
             .context
             .as_ref()
-            .map(|context| context.refs.clone())
+            .map(|context| context.log.refs.clone())
             .unwrap_or_default();
-        let mut rows = vec![self.render_reference_tree_row(
-            "全部分支".to_string(),
-            None,
-            IconName::GitBranch,
-            self.branch.is_none(),
-            false,
-            cx,
-        )];
-        for (title, kind, icon) in [
-            ("本地分支", GitRefKind::LocalBranch, IconName::GitBranch),
-            ("远程分支", GitRefKind::RemoteBranch, IconName::Cloud),
-            ("标签", GitRefKind::Tag, IconName::Tag),
-        ] {
-            let group = refs
-                .iter()
-                .filter(|reference| reference.kind == kind)
-                .collect::<Vec<_>>();
-            rows.push(Self::render_reference_tree_section(title, group.len(), cx));
-            for reference in group {
-                let selected = self.branch.as_deref() == Some(reference.full_name.as_str());
-                rows.push(self.render_reference_tree_row(
-                    reference.name.clone(),
-                    Some(reference.full_name.clone()),
-                    icon,
-                    selected,
-                    reference.is_head,
-                    cx,
-                ));
-            }
-        }
+        let local_branches = refs
+            .iter()
+            .filter(|reference| reference.kind == GitRefKind::LocalBranch)
+            .cloned()
+            .collect::<Vec<_>>();
+        let remote_branches = refs
+            .iter()
+            .filter(|reference| reference.kind == GitRefKind::RemoteBranch)
+            .cloned()
+            .collect::<Vec<_>>();
+        let tags = refs
+            .iter()
+            .filter(|reference| reference.kind == GitRefKind::Tag)
+            .cloned()
+            .collect::<Vec<_>>();
+        let worktree_name = self
+            .repository_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.repository_root.display().to_string());
 
         div()
-            .id("git-log-reference-tree")
-            .w(px(REFERENCE_TREE_WIDTH))
+            .id("git-workspace-navigation")
+            .w(px(NAVIGATION_WIDTH))
             .h_full()
             .min_h_0()
             .flex_shrink_0()
@@ -700,97 +957,127 @@ impl GitLogWindow {
                     .w_full()
                     .gap_1()
                     .p_2()
+                    .child(nav_section_label("Worktrees", cx))
                     .child(
                         h_flex()
+                            .h(px(28.))
                             .w_full()
                             .items_center()
                             .gap_2()
                             .px_2()
-                            .pb_1()
+                            .rounded_md()
+                            .bg(cx.theme().primary.opacity(0.08))
                             .child(
-                                Icon::new(IconName::GitBranch)
+                                Icon::new(IconName::Folder)
                                     .size_3p5()
                                     .text_color(cx.theme().primary),
                             )
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("分支树"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(refs.len().to_string()),
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(worktree_name),
                             ),
                     )
-                    .children(rows),
+                    .child(nav_section_label("Local Changes", cx))
+                    .child(
+                        Button::new("git-workspace-local-changes")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::GitCommitHorizontal)
+                            .label("Local Changes")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                match crate::git_client_window::open_git_client_window(
+                                    this.repository_root.clone(),
+                                    window,
+                                    cx,
+                                ) {
+                                    Ok(()) => {
+                                        this.error = None;
+                                        this.notice = Some("Git 客户端已打开".into());
+                                    }
+                                    Err(error) => {
+                                        this.notice = None;
+                                        this.error = Some(error.into());
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(nav_section_label("All Commits", cx))
+                    .child(
+                        Button::new("git-workspace-all-commits")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::GitBranch)
+                            .label("All Commits")
+                            .selected(self.scope.is_repository() && self.branch.is_none())
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.branch = None;
+                                this.clear_scope(window, cx);
+                            })),
+                    )
+                    .child(nav_section_label("Branches", cx))
+                    .children(
+                        local_branches.into_iter().map(|reference| {
+                            self.render_nav_ref(reference, IconName::GitBranch, cx)
+                        }),
+                    )
+                    .children(
+                        remote_branches
+                            .into_iter()
+                            .map(|reference| self.render_nav_ref(reference, IconName::Cloud, cx)),
+                    )
+                    .child(nav_section_label("Tags", cx))
+                    .children(
+                        tags.into_iter()
+                            .map(|reference| self.render_nav_ref(reference, IconName::Tag, cx)),
+                    )
+                    .child(nav_section_label("Filter", cx))
+                    .child(
+                        Button::new("git-workspace-focus-filter")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Search)
+                            .label("聚焦筛选")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.focus_filter(window, cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .pt_2()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Graph / Log / Diff 共用同一仓库工作台"),
+                    ),
             )
             .into_any_element()
     }
 
-    fn render_reference_tree_section(title: &'static str, count: usize, cx: &App) -> AnyElement {
-        h_flex()
-            .mt_2()
-            .h(px(20.))
-            .w_full()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(div().flex_1().child(title))
-            .child(count.to_string())
-            .into_any_element()
-    }
-
-    fn render_reference_tree_row(
+    fn render_nav_ref(
         &self,
-        label: String,
-        full_name: Option<String>,
+        reference: GitRef,
         icon: IconName,
-        selected: bool,
-        is_head: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let accent = cx.theme().primary;
-        let muted = cx.theme().muted_foreground;
-        let hover = cx.theme().muted.opacity(0.12);
-        let row_key = full_name.clone().unwrap_or_else(|| "all".to_string());
-        h_flex()
-            .id(SharedString::from(format!("git-log-ref-{row_key}")))
-            .h(px(26.))
-            .w_full()
-            .min_w_0()
-            .items_center()
-            .gap_1p5()
-            .pl_2()
-            .pr_2()
-            .rounded_md()
-            .when(selected, |this| this.bg(accent.opacity(0.15)))
-            .when(!selected, |this| this.hover(move |style| style.bg(hover)))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.set_branch_filter(full_name.clone(), window, cx);
-            }))
-            .child(
-                Icon::new(icon)
-                    .size_3p5()
-                    .text_color(if selected { accent } else { muted }),
-            )
-            .child(div().flex_1().min_w_0().truncate().text_sm().child(label))
-            .when(is_head, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(accent)
-                        .child("HEAD"),
-                )
-            })
-            .into_any_element()
+        let selected = self.branch.as_deref() == Some(reference.full_name.as_str());
+        let full_name = reference.full_name.clone();
+        Button::new(SharedString::from(format!(
+            "git-workspace-ref-{}",
+            reference.full_name
+        )))
+        .ghost()
+        .compact()
+        .icon(icon)
+        .label(reference.name)
+        .selected(selected)
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.set_branch_filter(Some(full_name.clone()), window, cx)
+        }))
+        .into_any_element()
     }
 
     fn render_branch_menu(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
@@ -800,6 +1087,7 @@ impl GitLogWindow {
             .as_ref()
             .map(|context| {
                 context
+                    .log
                     .refs
                     .iter()
                     .filter(|reference| {
@@ -813,7 +1101,7 @@ impl GitLogWindow {
             })
             .unwrap_or_default();
         let entity = cx.entity().downgrade();
-        Button::new("git-log-branch")
+        Button::new("git-workspace-branch")
             .ghost()
             .compact()
             .icon(IconName::GitBranch)
@@ -861,7 +1149,7 @@ impl GitLogWindow {
     fn render_date_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.date_range;
         let entity = cx.entity().downgrade();
-        Button::new("git-log-date")
+        Button::new("git-workspace-date")
             .ghost()
             .compact()
             .icon(IconName::Calendar)
@@ -891,13 +1179,11 @@ impl GitLogWindow {
             })
             .into_any_element()
     }
-}
 
-impl GitLogWindow {
-    fn render_log_pane(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_log_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
-        let list_id = SharedString::from("git-log-commit-list");
+        let list_id = SharedString::from("git-workspace-commit-list");
         let count = self.commits.len();
         let selected = self.selected_hash.clone();
         let scroll = self.row_scroll.clone();
@@ -917,12 +1203,22 @@ impl GitLogWindow {
                     .border_color(border)
                     .text_xs()
                     .text_color(muted)
-                    .child(div().w(px(88.)).flex_shrink_0().child("提交图"))
-                    .child(div().w(px(210.)).flex_shrink_0().child("引用"))
-                    .child(div().flex_1().min_w_0().child("提交"))
-                    .child(div().w(px(120.)).flex_shrink_0().child("作者"))
-                    .child(div().w(px(125.)).flex_shrink_0().child("日期"))
-                    .child(div().w(px(74.)).flex_shrink_0().child("哈希")),
+                    .child(
+                        div()
+                            .w(px(GRAPH_COLUMN_WIDTH))
+                            .flex_shrink_0()
+                            .child("Graph"),
+                    )
+                    .child(div().w(px(REFS_COLUMN_WIDTH)).flex_shrink_0().child("Refs"))
+                    .child(div().flex_1().min_w_0().child("Subject"))
+                    .child(
+                        div()
+                            .w(px(AUTHOR_COLUMN_WIDTH))
+                            .flex_shrink_0()
+                            .child("Author"),
+                    )
+                    .child(div().w(px(DATE_COLUMN_WIDTH)).flex_shrink_0().child("Date"))
+                    .child(div().w(px(HASH_COLUMN_WIDTH)).flex_shrink_0().child("Hash")),
             )
             .child(
                 div()
@@ -978,7 +1274,24 @@ impl GitLogWindow {
                                     .text_xs()
                                     .text_color(muted)
                                     .child(Icon::new(IconName::GitBranch).size_8())
-                                    .child("没有匹配的提交"),
+                                    .child(if self.scope.is_repository() {
+                                        "没有匹配的提交"
+                                    } else {
+                                        "该目录没有可显示的提交历史"
+                                    })
+                                    .when(!self.scope.is_repository(), |this| {
+                                        this.child(
+                                            Button::new("git-workspace-empty-clear-scope")
+                                                .ghost()
+                                                .compact()
+                                                .label("清除目录范围")
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, window, cx| {
+                                                        this.clear_scope(window, cx)
+                                                    },
+                                                )),
+                                        )
+                                    }),
                             )
                         },
                     )
@@ -1037,7 +1350,7 @@ impl GitLogWindow {
                         " "
                     })
                     .child(
-                        Button::new("git-log-load-more")
+                        Button::new("git-workspace-load-more")
                             .ghost()
                             .compact()
                             .label("加载更多")
@@ -1065,8 +1378,13 @@ impl GitLogWindow {
         let tree_entity = cx.entity().downgrade();
         let tree_hash = hash.clone();
         let copy_hash = hash.clone();
+        let changes_hash = hash.clone();
+        let scope_file = match &self.scope {
+            GitGraphScope::File(path) => Some(path.to_string_lossy().replace('\\', "/")),
+            _ => None,
+        };
         h_flex()
-            .id(("git-log-row", index))
+            .id(("git-workspace-row", index))
             .h(px(ROW_HEIGHT))
             .w_full()
             .min_w_0()
@@ -1078,10 +1396,36 @@ impl GitLogWindow {
             .when(selected, |this| this.bg(accent.opacity(0.13)))
             .when(!selected, |this| this.hover(move |style| style.bg(hover)))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.select_commit(hash.clone(), window, cx)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.select_commit(hash.clone(), event.click_count() >= 2, window, cx)
             }))
             .context_menu(move |mut menu, _, _| {
+                menu = menu.item(
+                    PopupMenuItem::new("查看变更")
+                        .icon(IconName::GitCommitHorizontal)
+                        .on_click({
+                            let changes_entity = tree_entity.clone();
+                            let changes_hash = changes_hash.clone();
+                            move |_, window, cx| {
+                                let _ = changes_entity.update(cx, |this, cx| {
+                                    this.select_commit(changes_hash.clone(), true, window, cx);
+                                });
+                            }
+                        }),
+                );
+                if let Some(scope_file) = scope_file.clone() {
+                    let history_entity = tree_entity.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new("查看文件历史")
+                            .icon(IconName::GitBranch)
+                            .on_click(move |_, window, cx| {
+                                let path = scope_file.clone();
+                                let _ = history_entity.update(cx, |this, cx| {
+                                    this.show_file_history(path.clone(), window, cx);
+                                });
+                            }),
+                    );
+                }
                 menu = menu.item(
                     PopupMenuItem::new("复制完整哈希")
                         .icon(IconName::Copy)
@@ -1109,7 +1453,7 @@ impl GitLogWindow {
             })
             .child(
                 div()
-                    .w(px(88.))
+                    .w(px(GRAPH_COLUMN_WIDTH))
                     .h_full()
                     .flex_shrink_0()
                     .flex()
@@ -1118,7 +1462,7 @@ impl GitLogWindow {
             )
             .child(
                 h_flex()
-                    .w(px(210.))
+                    .w(px(REFS_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .min_w_0()
                     .gap_1()
@@ -1149,7 +1493,7 @@ impl GitLogWindow {
             )
             .child(
                 div()
-                    .w(px(120.))
+                    .w(px(AUTHOR_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .truncate()
                     .text_xs()
@@ -1158,7 +1502,7 @@ impl GitLogWindow {
             )
             .child(
                 div()
-                    .w(px(125.))
+                    .w(px(DATE_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .text_xs()
                     .text_color(muted)
@@ -1166,7 +1510,7 @@ impl GitLogWindow {
             )
             .child(
                 div()
-                    .w(px(74.))
+                    .w(px(HASH_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .text_xs()
                     .font_family("monospace")
@@ -1222,7 +1566,7 @@ impl GitLogWindow {
         let lane_width = graph_lane_width(row);
         let mut graph = div()
             .relative()
-            .w(px(88.))
+            .w(px(GRAPH_COLUMN_WIDTH))
             .h_full()
             .flex_shrink_0()
             .overflow_hidden();
@@ -1245,6 +1589,7 @@ impl GitLogWindow {
         );
         graph.into_any_element()
     }
+
     fn render_graph_edge(&self, edge: &GitGraphEdge, row: &GitGraphRow) -> AnyElement {
         let lane_color = graph_color(edge.color_index);
         let lane_width = graph_lane_width(row);
@@ -1313,9 +1658,8 @@ impl GitLogWindow {
             .unwrap_or_else(|| "提交详情".to_string());
 
         v_flex()
-            .w(px(390.))
-            .flex_shrink_0()
-            .h_full()
+            .w_full()
+            .flex_1()
             .min_h_0()
             .bg(cx.theme().background.opacity(0.88))
             .child(
@@ -1339,7 +1683,7 @@ impl GitLogWindow {
                     .when_some(selected_hash.clone(), |this, hash| {
                         let hash_for_copy = hash.clone();
                         this.child(
-                            Button::new("git-log-copy-hash")
+                            Button::new("git-workspace-copy-hash")
                                 .ghost()
                                 .compact()
                                 .icon(IconName::Copy)
@@ -1353,7 +1697,7 @@ impl GitLogWindow {
                     })
                     .when_some(selected_hash, |this, hash| {
                         this.child(
-                            Button::new("git-log-browse-tree")
+                            Button::new("git-workspace-browse-tree")
                                 .ghost()
                                 .compact()
                                 .icon(IconName::FolderOpen)
@@ -1373,21 +1717,21 @@ impl GitLogWindow {
                     .px_2()
                     .border_b_1()
                     .border_color(border)
-                    .child(self.detail_tab_button("提交", DetailTab::Commit, cx))
-                    .child(self.detail_tab_button("变更文件", DetailTab::Files, cx))
-                    .child(self.detail_tab_button("文件树", DetailTab::Tree, cx)),
+                    .child(self.detail_tab_button(DetailTab::Commit, cx))
+                    .child(self.detail_tab_button(DetailTab::Changes, cx))
+                    .child(self.detail_tab_button(DetailTab::FileTree, cx)),
             )
             .child(
                 div()
-                    .id("git-log-detail-scroll")
+                    .id("git-workspace-detail-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.detail_scroll)
                     .child(match self.detail_tab {
                         DetailTab::Commit => self.render_commit_details(cx),
-                        DetailTab::Files => self.render_changed_files(cx),
-                        DetailTab::Tree => self.render_commit_tree(cx),
+                        DetailTab::Changes => self.render_changed_files(cx),
+                        DetailTab::FileTree => self.render_commit_tree(cx),
                     }),
             )
             .child(
@@ -1403,40 +1747,38 @@ impl GitLogWindow {
                     } else if self.tree_loading {
                         "正在读取提交文件树…"
                     } else {
-                        "选择左侧提交查看详情"
+                        "选择提交查看详情；双击提交打开 Changes"
                     }),
             )
             .into_any_element()
     }
 
-    fn detail_tab_button(
-        &self,
-        label: &'static str,
-        tab: DetailTab,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        Button::new(SharedString::from(format!("git-log-detail-tab-{label}")))
-            .ghost()
-            .compact()
-            .label(label)
-            .selected(self.detail_tab == tab)
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.detail_tab = tab;
-                if tab == DetailTab::Commit
-                    && this.details.is_none()
-                    && let Some(hash) = this.selected_hash.clone()
-                {
-                    this.load_details(hash, window, cx);
-                }
-                if tab == DetailTab::Tree
-                    && this.tree_entries.is_empty()
-                    && let Some(hash) = this.selected_hash.clone()
-                {
-                    this.load_tree(hash, window, cx);
-                }
-                cx.notify();
-            }))
-            .into_any_element()
+    fn detail_tab_button(&self, tab: DetailTab, cx: &mut Context<Self>) -> AnyElement {
+        Button::new(SharedString::from(format!(
+            "git-workspace-detail-tab-{}",
+            tab.label()
+        )))
+        .ghost()
+        .compact()
+        .label(tab.label())
+        .selected(self.detail_tab == tab)
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.detail_tab = tab;
+            if tab == DetailTab::Commit
+                && this.details.is_none()
+                && let Some(hash) = this.selected_hash.clone()
+            {
+                this.load_details(hash, window, cx);
+            }
+            if tab == DetailTab::FileTree
+                && this.tree_entries.is_empty()
+                && let Some(hash) = this.selected_hash.clone()
+            {
+                this.load_tree(hash, window, cx);
+            }
+            cx.notify();
+        }))
+        .into_any_element()
     }
 
     fn render_commit_details(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1451,7 +1793,6 @@ impl GitLogWindow {
             );
         };
         let commit = &details.commit;
-        let muted = cx.theme().muted_foreground;
         let message = if details.body.trim().is_empty() {
             commit.subject.clone()
         } else {
@@ -1565,12 +1906,12 @@ impl GitLogWindow {
                 .gap_2()
                 .pt_1()
                 .child(
-                    Button::new("git-log-files-tab-from-detail")
+                    Button::new("git-workspace-files-tab-from-detail")
                         .ghost()
                         .compact()
                         .label(format!("{} 个变更文件", details.changed_files.len()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.detail_tab = DetailTab::Files;
+                            this.detail_tab = DetailTab::Changes;
                             cx.notify();
                         })),
                 )
@@ -1591,7 +1932,6 @@ impl GitLogWindow {
                     )
                 }),
         );
-        let _ = muted;
         content.into_any_element()
     }
 
@@ -1602,7 +1942,10 @@ impl GitLogWindow {
         if details.changed_files.is_empty() {
             return empty_detail_state("此提交没有变更文件", cx);
         }
-        let mut list = v_flex().w_full().p_2();
+
+        let selected_path = self.selected_change_path.clone();
+        let entity = cx.entity().downgrade();
+        let mut rows = v_flex().w_full().p_2();
         for file in &details.changed_files {
             let path = file.path.clone();
             let label = file
@@ -1612,20 +1955,80 @@ impl GitLogWindow {
                 .unwrap_or_else(|| file.path.clone());
             let status = file.status.chars().next().unwrap_or('M');
             let color: Hsla = rgb(change_status_color(status)).into();
-            list = list.child(
+            let selected = selected_path.as_deref() == Some(file.path.as_str());
+            let history_path = file.path.clone();
+            let embedded_path = file.path.clone();
+            let window_path = file.path.clone();
+            let diff_entity = entity.clone();
+            let history_entity = entity.clone();
+            rows = rows.child(
                 h_flex()
-                    .id(SharedString::from(format!("git-log-file-{path}")))
+                    .id(SharedString::from(format!("git-workspace-change-{path}")))
                     .h(px(32.))
                     .w_full()
                     .gap_2()
                     .items_center()
                     .px_2()
                     .rounded_md()
+                    .when(selected, |this| this.bg(cx.theme().primary.opacity(0.12)))
                     .cursor_pointer()
                     .hover(|style| style.bg(cx.theme().muted.opacity(0.15)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.show_file_history(path.clone(), window, cx)
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.selected_change_path = Some(path.clone());
+                        this.diff_viewer = None;
+                        if event.click_count() >= 2 {
+                            this.show_embedded_diff(window, cx);
+                        }
+                        cx.notify();
                     }))
+                    .context_menu(move |mut menu, _, _| {
+                        menu = menu.item(
+                            PopupMenuItem::new("显示内嵌并排 Diff")
+                                .icon(IconName::FileDiff)
+                                .on_click({
+                                    let entity = diff_entity.clone();
+                                    let embedded_path = embedded_path.clone();
+                                    move |_, window, cx| {
+                                        let _ = entity.update(cx, |this, cx| {
+                                            this.selected_change_path = Some(embedded_path.clone());
+                                            this.show_embedded_diff(window, cx);
+                                        });
+                                    }
+                                }),
+                        );
+                        menu = menu.item(
+                            PopupMenuItem::new("在独立窗口打开 Diff")
+                                .icon(IconName::FileDiff)
+                                .on_click({
+                                    let entity = diff_entity.clone();
+                                    let window_path = window_path.clone();
+                                    move |_, _, cx| {
+                                        let _ = entity.update(cx, |this, cx| {
+                                            this.selected_change_path = Some(window_path.clone());
+                                            this.open_selected_file_diff_window(cx);
+                                        });
+                                    }
+                                }),
+                        );
+                        menu = menu.item(
+                            PopupMenuItem::new("查看文件历史")
+                                .icon(IconName::GitBranch)
+                                .on_click({
+                                    let entity = history_entity.clone();
+                                    let history_path = history_path.clone();
+                                    move |_, window, cx| {
+                                        let _ = entity.update(cx, |this, cx| {
+                                            this.show_file_history(
+                                                history_path.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        );
+                        menu
+                    })
                     .child(
                         div()
                             .w(px(20.))
@@ -1636,13 +2039,66 @@ impl GitLogWindow {
                     )
                     .child(div().flex_1().min_w_0().truncate().text_xs().child(label))
                     .child(
-                        Icon::new(IconName::Search)
+                        Icon::new(IconName::File)
                             .size_3p5()
                             .text_color(cx.theme().muted_foreground),
                     ),
             );
         }
-        list.into_any_element()
+
+        let detail = if let Some(viewer) = self.diff_viewer.clone() {
+            v_flex()
+                .flex_1()
+                .h_full()
+                .min_h_0()
+                .child(viewer)
+                .into_any_element()
+        } else {
+            v_flex()
+                .flex_1()
+                .h_full()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .p_4()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("双击变更文件或点击“显示内嵌 Diff”"),
+                )
+                .child(
+                    Button::new("git-workspace-open-file-diff")
+                        .outline()
+                        .compact()
+                        .icon(IconName::FileDiff)
+                        .label("显示内嵌 Diff")
+                        .disabled(selected_path.is_none())
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_embedded_diff(window, cx)
+                        })),
+                )
+                .into_any_element()
+        };
+
+        h_flex()
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .child(
+                v_flex()
+                    .id("git-workspace-changed-tree")
+                    .w(px(330.))
+                    .h_full()
+                    .min_h_0()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+                    .overflow_y_scroll()
+                    .child(rows),
+            )
+            .child(detail)
+            .into_any_element()
     }
 
     fn render_commit_tree(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1650,25 +2106,31 @@ impl GitLogWindow {
             return empty_detail_state("正在读取提交文件树…", cx);
         }
         if self.tree_entries.is_empty() {
-            return empty_detail_state("选择“文件树”加载此提交的内容", cx);
+            return empty_detail_state("选择“File Tree”加载此提交的内容", cx);
         }
         let mut list = v_flex().w_full().p_2();
         for entry in &self.tree_entries {
             let path = entry.path.clone();
+            let highlighted = self.scope_contains_path(&entry.path);
             list = list.child(
                 h_flex()
-                    .id(SharedString::from(format!("git-log-tree-{path}")))
+                    .id(SharedString::from(format!("git-workspace-tree-{path}")))
                     .h(px(28.))
                     .w_full()
                     .gap_2()
                     .items_center()
                     .px_2()
                     .rounded_md()
+                    .when(highlighted, |this| this.bg(cx.theme().primary.opacity(0.1)))
                     .hover(|style| style.bg(cx.theme().muted.opacity(0.12)))
                     .child(
                         Icon::new(IconName::File)
                             .size_3p5()
-                            .text_color(cx.theme().muted_foreground),
+                            .text_color(if highlighted {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
                     )
                     .child(
                         div()
@@ -1688,6 +2150,17 @@ impl GitLogWindow {
         }
         list.into_any_element()
     }
+}
+
+fn nav_section_label(label: &'static str, cx: &App) -> AnyElement {
+    div()
+        .mt_2()
+        .px_2()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
+        .into_any_element()
 }
 
 fn empty_detail_state(message: &'static str, cx: &App) -> AnyElement {
@@ -1782,24 +2255,132 @@ fn change_status_color(status: char) -> u32 {
     }
 }
 
-pub(crate) fn open_git_log_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
-    let name = path
+fn scope_label(scope: &GitGraphScope) -> String {
+    match scope {
+        GitGraphScope::Repository => "Repository".to_string(),
+        GitGraphScope::Directory(path) => format!("Directory: {}", path.display()),
+        GitGraphScope::File(path) => format!("File: {}", path.display()),
+    }
+}
+
+fn window_title_for(repository_root: &Path, scope: &GitGraphScope) -> String {
+    let repository_name = repository_root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Git".to_string());
+        .unwrap_or_else(|| repository_root.display().to_string());
+    match scope {
+        GitGraphScope::Repository => format!("Git Graph — {repository_name}"),
+        GitGraphScope::Directory(path) => {
+            format!("Git Log — {} — {repository_name}", path.display())
+        }
+        GitGraphScope::File(path) => format!("Git Log — {} — {repository_name}", path.display()),
+    }
+}
+
+fn scope_for_path(path: &Path, repository_root: &Path) -> GitGraphScope {
+    let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let relative = canonical
+        .strip_prefix(repository_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    if relative.as_os_str().is_empty() {
+        GitGraphScope::Repository
+    } else if canonical.is_dir() {
+        GitGraphScope::Directory(relative)
+    } else {
+        GitGraphScope::File(relative)
+    }
+}
+
+pub(crate) fn open_git_log_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
+    let repository = GitService::shared()
+        .discover_repository(&path)
+        .map_err(|error| error.to_string())?;
+    let repository_root = repository.work_tree;
+    let scope = scope_for_path(&path, &repository_root);
+    let key = repository_key(&repository_root);
+    let existing = {
+        let windows = open_windows()
+            .lock()
+            .map_err(|_| "无法读取 Git Workspace 窗口状态".to_string())?;
+        windows.get(&key).copied()
+    };
+    if let Some(handle) = existing {
+        let scope_for_update = scope.clone();
+        if handle
+            .update(cx, |this, window, cx| {
+                this.set_scope(scope_for_update, window, cx);
+                window.activate_window();
+            })
+            .is_ok()
+        {
+            return Ok(());
+        }
+        forget_open_window(&key);
+    }
+
+    let title = window_title_for(&repository_root, &scope);
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
-            title: Some(format!("Kite 提交历史 — {name}").into()),
+            title: Some(title.into()),
             ..Default::default()
         }),
         window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
         window_min_size: Some(size(px(1180.), px(600.))),
         ..Default::default()
     };
-    gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| GitLogWindow::new(path, window, cx))
+    let root_for_view = repository_root.clone();
+    let scope_for_view = scope.clone();
+    let (handle, _) = gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| GitLogWindow::new(root_for_view, scope_for_view, window, cx))
     })
-    .map(|_| ())
-    .map_err(|error| format!("无法打开提交历史窗口：{error}"))
+    .map_err(|error| format!("无法打开 Git Workspace 窗口：{error}"))?;
+    let handle = handle
+        .downcast::<GitLogWindow>()
+        .ok_or_else(|| "Git Workspace 窗口类型不匹配".to_string())?;
+    open_windows()
+        .lock()
+        .map_err(|_| "无法保存 Git Workspace 窗口状态".to_string())?
+        .insert(key, handle);
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GitGraphScope, scope_for_path, scope_label, window_title_for};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn scope_labels_distinguish_repository_directory_and_file() {
+        assert_eq!(scope_label(&GitGraphScope::Repository), "Repository");
+        assert_eq!(
+            scope_label(&GitGraphScope::Directory(PathBuf::from("src/git"))),
+            "Directory: src/git"
+        );
+        assert_eq!(
+            scope_label(&GitGraphScope::File(PathBuf::from("src/git/log.rs"))),
+            "File: src/git/log.rs"
+        );
+    }
+
+    #[test]
+    fn repository_scope_has_graph_title_and_scoped_scope_has_log_title() {
+        let root = Path::new(r"D:\repo\kite");
+        assert_eq!(
+            window_title_for(root, &GitGraphScope::Repository),
+            "Git Graph — kite"
+        );
+        assert_eq!(
+            window_title_for(root, &GitGraphScope::Directory(PathBuf::from("src/git"))),
+            "Git Log — src/git — kite"
+        );
+    }
+
+    #[test]
+    fn scope_for_root_is_repository() {
+        let root = PathBuf::from(r"D:\repo\kite");
+        assert_eq!(scope_for_path(&root, &root), GitGraphScope::Repository);
+    }
 }

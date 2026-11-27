@@ -33,6 +33,36 @@ enum DiffComparisonPreset: String, CaseIterable, Identifiable, Equatable {
     }
 }
 
+/// The Git Log scope requested from the reusable diff view.
+enum KiteDiffLogScope: Equatable {
+    case file(String)
+    case directory(String)
+
+    var path: String {
+        switch self {
+        case .file(let path), .directory(let path):
+            return path
+        }
+    }
+
+    static func infer(path: String) -> Self {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+           isDirectory.boolValue
+        {
+            return .directory(path)
+        }
+        return .file(path)
+    }
+}
+
+/// A future Git Workspace can implement this to receive scoped navigation
+/// requests without coupling the diff view to the workspace implementation.
+@MainActor
+protocol KiteDiffViewerHost: AnyObject {
+    func openGitLog(scope: KiteDiffLogScope)
+}
+
 @MainActor
 final class KiteDiffViewerModel: ObservableObject {
     @Published private(set) var document: GitDiffDocumentDto?
@@ -54,6 +84,8 @@ final class KiteDiffViewerModel: ObservableObject {
 
     private weak var appModel: KiteModel?
     private var path = ""
+    private var logScope: KiteDiffLogScope?
+    weak var host: KiteDiffViewerHost?
     private var generation = 0
     private var task: Task<Void, Never>?
 
@@ -78,11 +110,29 @@ final class KiteDiffViewerModel: ObservableObject {
         return "\(currentChange + 1) / \(changeCount)"
     }
 
-    func show(path: String, appModel: KiteModel, preset: DiffComparisonPreset) {
+    func show(
+        path: String,
+        appModel: KiteModel,
+        preset: DiffComparisonPreset,
+        logScope: KiteDiffLogScope? = nil
+    ) {
         self.appModel = appModel
         self.path = path
         self.preset = preset
+        self.logScope = logScope ?? .infer(path: path)
         reload()
+    }
+
+    /// Requests scoped Git Log navigation from the host. The standalone
+    /// controller falls back to the existing Git Log entry point; an embedded
+    /// workspace can provide a scoped host implementation.
+    func openGitLog() {
+        guard let logScope else { return }
+        if let host {
+            host.openGitLog(scope: logScope)
+        } else {
+            appModel?.openGitLog(path: logScope.path)
+        }
     }
 
     func reload() {
@@ -214,7 +264,8 @@ final class KiteDiffViewerWindowController: NSWindowController, NSWindowDelegate
         appModel: KiteModel,
         preset: DiffComparisonPreset,
         oldRevision: String? = nil,
-        newRevision: String? = nil
+        newRevision: String? = nil,
+        logScope: KiteDiffLogScope? = nil
     ) {
         if window?.contentViewController == nil {
             let state = KiteDiffViewerModel()
@@ -225,7 +276,7 @@ final class KiteDiffViewerWindowController: NSWindowController, NSWindowDelegate
         }
         if let oldRevision { model?.oldRevision = oldRevision }
         if let newRevision { model?.newRevision = newRevision }
-        model?.show(path: path, appModel: appModel, preset: preset)
+        model?.show(path: path, appModel: appModel, preset: preset, logScope: logScope)
         window?.title = "Diff 查看器 — \((path as NSString).lastPathComponent)"
         installKeyMonitor()
         if window?.isMiniaturized == true {
@@ -264,7 +315,7 @@ final class KiteDiffViewerWindowController: NSWindowController, NSWindowDelegate
     }
 }
 
-private struct KiteDiffViewerView: View {
+struct KiteDiffViewerView: View {
     @ObservedObject var model: KiteDiffViewerModel
 
     var body: some View {
@@ -301,6 +352,15 @@ private struct KiteDiffViewerView: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .controlSize(.small)
+
+                Button {
+                    model.openGitLog()
+                } label: {
+                    Label("打开 Git Log", systemImage: "arrow.triangle.branch")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("在 Git 工作台中打开当前文件或目录历史")
 
                 Spacer(minLength: 12)
 

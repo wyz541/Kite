@@ -795,6 +795,11 @@ pub struct GitCloneResultDto {
 pub enum GitErrorKindDto {
     NotInstalled,
     NotRepository,
+    OutsideRepository,
+    PathNotFound,
+    InvalidPath,
+    NoHistory,
+    InvalidCursor,
     Authentication,
     Conflict,
     Rejected,
@@ -959,6 +964,20 @@ pub struct GitLogContextDto {
     pub head_hash: Option<String>,
     pub head_short_hash: Option<String>,
     pub refs: Vec<GitRefDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GitGraphScopeDto {
+    Repository,
+    Directory { path: String },
+    File { path: String },
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GitGraphContextDto {
+    pub log: GitLogContextDto,
+    pub scope: GitGraphScopeDto,
+    pub pathspec: Option<String>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -2316,6 +2335,82 @@ impl KiteCore {
             .map_err(KiteError::operation)
     }
 
+    pub fn git_graph_context(
+        &self,
+        repository_path: String,
+        scope: GitGraphScopeDto,
+    ) -> Result<GitGraphContextDto, KiteError> {
+        git_log::git_graph_context(&PathBuf::from(repository_path), &git_graph_scope(scope))
+            .map(git_graph_context_dto)
+            .map_err(KiteError::from_git)
+    }
+
+    pub fn git_graph_page(
+        &self,
+        repository_path: String,
+        scope: GitGraphScopeDto,
+        filter: GitLogFilterDto,
+        cursor: Option<String>,
+        page_size: u32,
+    ) -> Result<GitLogPageDto, KiteError> {
+        git_log::git_graph_page(
+            &PathBuf::from(repository_path),
+            &git_graph_scope(scope),
+            git_log_filter(filter),
+            cursor.as_deref(),
+            page_size,
+        )
+        .map(git_log_page_dto)
+        .map_err(KiteError::from_git)
+    }
+
+    pub fn git_graph_commit_details(
+        &self,
+        repository_path: String,
+        scope: GitGraphScopeDto,
+        hash: String,
+    ) -> Result<GitCommitDetailsDto, KiteError> {
+        git_log::git_graph_commit_details(
+            &PathBuf::from(repository_path),
+            &git_graph_scope(scope),
+            &hash,
+        )
+        .map(git_commit_details_dto)
+        .map_err(KiteError::from_git)
+    }
+
+    pub fn git_graph_commit_tree(
+        &self,
+        repository_path: String,
+        scope: GitGraphScopeDto,
+        hash: String,
+    ) -> Result<Vec<GitTreeEntryDto>, KiteError> {
+        git_log::git_graph_commit_tree(
+            &PathBuf::from(repository_path),
+            &git_graph_scope(scope),
+            &hash,
+        )
+        .map(|entries| entries.into_iter().map(git_tree_entry_dto).collect())
+        .map_err(KiteError::from_git)
+    }
+
+    pub fn git_graph_file_history(
+        &self,
+        repository_path: String,
+        relative_path: String,
+        cursor: Option<String>,
+        page_size: u32,
+    ) -> Result<GitLogPageDto, KiteError> {
+        git_log::git_graph_file_history(
+            &PathBuf::from(repository_path),
+            &relative_path,
+            cursor.as_deref(),
+            page_size,
+        )
+        .map(git_log_page_dto)
+        .map_err(KiteError::from_git)
+    }
+
     pub fn git_log_page(
         &self,
         path: String,
@@ -3517,6 +3612,11 @@ fn git_error_kind_dto(kind: git::GitErrorKind) -> GitErrorKindDto {
     match kind {
         git::GitErrorKind::NotInstalled => GitErrorKindDto::NotInstalled,
         git::GitErrorKind::NotRepository => GitErrorKindDto::NotRepository,
+        git::GitErrorKind::OutsideRepository => GitErrorKindDto::OutsideRepository,
+        git::GitErrorKind::PathNotFound => GitErrorKindDto::PathNotFound,
+        git::GitErrorKind::InvalidPath => GitErrorKindDto::InvalidPath,
+        git::GitErrorKind::NoHistory => GitErrorKindDto::NoHistory,
+        git::GitErrorKind::InvalidCursor => GitErrorKindDto::InvalidCursor,
         git::GitErrorKind::Authentication => GitErrorKindDto::Authentication,
         git::GitErrorKind::Conflict => GitErrorKindDto::Conflict,
         git::GitErrorKind::Rejected => GitErrorKindDto::Rejected,
@@ -4196,6 +4296,36 @@ fn git_log_context_dto(context: git_log::GitLogContext) -> GitLogContextDto {
         head_hash: context.head_hash,
         head_short_hash: context.head_short_hash,
         refs: context.refs.into_iter().map(git_ref_dto).collect(),
+    }
+}
+
+fn git_graph_scope(scope: GitGraphScopeDto) -> git_log::GitGraphScope {
+    match scope {
+        GitGraphScopeDto::Repository => git_log::GitGraphScope::Repository,
+        GitGraphScopeDto::Directory { path } => {
+            git_log::GitGraphScope::Directory(PathBuf::from(path))
+        }
+        GitGraphScopeDto::File { path } => git_log::GitGraphScope::File(PathBuf::from(path)),
+    }
+}
+
+fn git_graph_scope_dto(scope: git_log::GitGraphScope) -> GitGraphScopeDto {
+    match scope {
+        git_log::GitGraphScope::Repository => GitGraphScopeDto::Repository,
+        git_log::GitGraphScope::Directory(path) => GitGraphScopeDto::Directory {
+            path: path.to_string_lossy().into_owned(),
+        },
+        git_log::GitGraphScope::File(path) => GitGraphScopeDto::File {
+            path: path.to_string_lossy().into_owned(),
+        },
+    }
+}
+
+fn git_graph_context_dto(context: git_log::GitGraphContext) -> GitGraphContextDto {
+    GitGraphContextDto {
+        log: git_log_context_dto(context.log),
+        scope: git_graph_scope_dto(context.scope),
+        pathspec: context.pathspec,
     }
 }
 
@@ -5215,6 +5345,22 @@ mod tests {
         assert_eq!(dto.commits[0].graph.edges[0].to_lane, 1);
         assert_eq!(dto.commits[0].refs[0].kind, GitRefKindDto::LocalBranch);
         assert_eq!(dto.next_cursor.as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn git_graph_scope_dto_round_trips_all_variants() {
+        for scope in [
+            GitGraphScopeDto::Repository,
+            GitGraphScopeDto::Directory {
+                path: "src/git".to_string(),
+            },
+            GitGraphScopeDto::File {
+                path: "src/git/log.rs".to_string(),
+            },
+        ] {
+            let native = git_graph_scope(scope.clone());
+            assert_eq!(git_graph_scope_dto(native), scope);
+        }
     }
 }
 
