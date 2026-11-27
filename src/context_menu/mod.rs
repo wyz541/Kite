@@ -294,6 +294,16 @@ struct VcsMenuProvider;
 struct SystemMenuProvider;
 struct RefreshMenuProvider;
 
+fn is_xmind_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xmind"))
+}
+
+fn is_supported_mindmap_import_path(path: &std::path::Path) -> bool {
+    kite_core::mindmap_import::detect_source(path).is_some_and(|source| source.format.supported)
+}
+
 impl ContextMenuProvider for CoreMenuProvider {
     fn append(
         &self,
@@ -313,6 +323,22 @@ impl ContextMenuProvider for CoreMenuProvider {
             ContextMenuCommand::Open,
             !disabled,
         );
+        if !target.is_dir && is_xmind_path(&target.path) {
+            model.item(
+                "使用 Mindmap 编辑",
+                IconName::Pencil,
+                ContextMenuCommand::OpenMindmap,
+                !disabled,
+            );
+        }
+        if !target.is_dir && is_supported_mindmap_import_path(&target.path) {
+            model.item(
+                "转换为 Mindmap…",
+                IconName::FileText,
+                ContextMenuCommand::ConvertDocumentToMindmap,
+                !disabled,
+            );
+        }
         model.separator();
         model.item(
             "复制",
@@ -953,6 +979,41 @@ mod tests {
                 _ => None,
             })
             .expect("submenu")
+    }
+
+    #[test]
+    fn mindmap_and_document_conversion_entries_are_extension_scoped() {
+        let mut xmind = file_target();
+        xmind.path = PathBuf::from(r"C:\repo\map.xmind");
+        let model = build_model(&xmind, windows_policy());
+        assert!(model.entries.iter().any(|entry| matches!(
+            entry,
+            ContextMenuNode::Item {
+                command: ContextMenuCommand::OpenMindmap,
+                ..
+            }
+        )));
+
+        let mut markdown = file_target();
+        markdown.path = PathBuf::from(r"C:\repo\notes.md");
+        let model = build_model(&markdown, windows_policy());
+        assert!(model.entries.iter().any(|entry| matches!(
+            entry,
+            ContextMenuNode::Item {
+                command: ContextMenuCommand::ConvertDocumentToMindmap,
+                ..
+            }
+        )));
+
+        let model = build_model(&file_target(), windows_policy());
+        assert!(!model.entries.iter().any(|entry| matches!(
+            entry,
+            ContextMenuNode::Item {
+                command: ContextMenuCommand::OpenMindmap
+                    | ContextMenuCommand::ConvertDocumentToMindmap,
+                ..
+            }
+        )));
     }
 
     #[test]

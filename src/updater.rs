@@ -99,6 +99,7 @@ pub fn download_progress() -> UpdateDownloadProgress {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum UpdateTarget {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     WindowsX64,

@@ -29,6 +29,8 @@ use crate::git_branches_window;
 use crate::git_client_window;
 use crate::git_log_window;
 use crate::global_search_window;
+use crate::mindmap_import_window;
+use crate::mindmap_window;
 use crate::platform::{default_root_path, root_directory};
 use crate::preview_window::{PreviewWindow, preview_render_image};
 use crate::settings_window;
@@ -1971,6 +1973,67 @@ impl KiteApp {
             KeyBinding::new("secondary-j", GitClientToggleConsole, Some("GitClient")),
             KeyBinding::new("f1", GitClientShowShortcuts, Some("GitClient")),
             KeyBinding::new("escape", GitClientDismiss, Some("GitClient")),
+            KeyBinding::new("enter", MindmapAddSibling, Some("KiteMindmap")),
+            KeyBinding::new("tab", MindmapAddChild, Some("KiteMindmap")),
+            KeyBinding::new(
+                "shift-enter",
+                MindmapInsertSiblingBefore,
+                Some("KiteMindmap"),
+            ),
+            KeyBinding::new(
+                "secondary-shift-enter",
+                MindmapNewParent,
+                Some("KiteMindmap"),
+            ),
+            KeyBinding::new("f2", MindmapEditTopic, Some("KiteMindmap")),
+            KeyBinding::new("space", MindmapEditTopic, Some("KiteMindmap")),
+            KeyBinding::new("delete", MindmapDeleteTopic, Some("KiteMindmap")),
+            KeyBinding::new("backspace", MindmapDeleteTopic, Some("KiteMindmap")),
+            KeyBinding::new("alt-up", MindmapMoveTopicUp, Some("KiteMindmap")),
+            KeyBinding::new("alt-down", MindmapMoveTopicDown, Some("KiteMindmap")),
+            KeyBinding::new("secondary-c", MindmapCopyTopic, Some("KiteMindmap")),
+            KeyBinding::new("secondary-x", MindmapCutTopic, Some("KiteMindmap")),
+            KeyBinding::new("secondary-v", MindmapPasteTopic, Some("KiteMindmap")),
+            KeyBinding::new(
+                "secondary-shift-v",
+                MindmapPasteTextAsTopic,
+                Some("KiteMindmap"),
+            ),
+            KeyBinding::new(
+                "secondary-alt-c",
+                MindmapCopyTopicStyle,
+                Some("KiteMindmap"),
+            ),
+            KeyBinding::new(
+                "secondary-alt-v",
+                MindmapPasteTopicStyle,
+                Some("KiteMindmap"),
+            ),
+            KeyBinding::new("secondary-plus", MindmapZoomIn, Some("KiteMindmap")),
+            KeyBinding::new("secondary-=", MindmapZoomIn, Some("KiteMindmap")),
+            KeyBinding::new("secondary-minus", MindmapZoomOut, Some("KiteMindmap")),
+            KeyBinding::new("secondary-0", MindmapResetZoom, Some("KiteMindmap")),
+            KeyBinding::new("secondary-f5", MindmapFitCanvas, Some("KiteMindmap")),
+            KeyBinding::new("secondary-home", MindmapCenterRoot, Some("KiteMindmap")),
+            KeyBinding::new("/", MindmapToggleBranch, Some("KiteMindmap")),
+            KeyBinding::new("shift-8", MindmapExpandBranch, Some("KiteMindmap")),
+            KeyBinding::new("f8", MindmapToggleZenMode, Some("KiteMindmap")),
+            KeyBinding::new(
+                "secondary-alt-f",
+                MindmapToggleInspector,
+                Some("KiteMindmap"),
+            ),
+            KeyBinding::new("secondary-f", MindmapFindTopic, Some("KiteMindmap")),
+            KeyBinding::new("secondary-s", MindmapSave, Some("KiteMindmap")),
+            KeyBinding::new("secondary-z", MindmapUndo, Some("KiteMindmap")),
+            KeyBinding::new("secondary-shift-z", MindmapRedo, Some("KiteMindmap")),
+            KeyBinding::new("secondary-y", MindmapRedo, Some("KiteMindmap")),
+            KeyBinding::new("secondary-l", MindmapAddRelation, Some("KiteMindmap")),
+            KeyBinding::new("secondary-b", MindmapAddBoundary, Some("KiteMindmap")),
+            KeyBinding::new("secondary-]", MindmapAddSummary, Some("KiteMindmap")),
+            KeyBinding::new("secondary-shift-n", MindmapInsertNote, Some("KiteMindmap")),
+            KeyBinding::new("secondary-k", MindmapInsertLink, Some("KiteMindmap")),
+            KeyBinding::new("secondary-shift-m", OpenMindmap, Some("Kite")),
             KeyBinding::new("secondary-s", SaveEditor, Some("KiteEditor")),
             KeyBinding::new("f7", DiffNextChange, Some("KiteDiff")),
             KeyBinding::new("shift-f7", DiffPreviousChange, Some("KiteDiff")),
@@ -1982,6 +2045,9 @@ impl KiteApp {
                 MenuItem::action("新建页签", NewTab),
                 MenuItem::action("关闭页签", CloseTab),
                 MenuItem::separator(),
+                MenuItem::action("打开 Mindmap…", OpenMindmap),
+                MenuItem::action("转换文档为 Mindmap…", ConvertDocumentToMindmap),
+                MenuItem::separator(),
                 MenuItem::action("下一个页签", NextTab),
                 MenuItem::action("上一个页签", PreviousTab),
             ]),
@@ -1991,6 +2057,10 @@ impl KiteApp {
                 MenuItem::action("全局搜索…", OpenGlobalSearch),
             ]),
             Menu::new("Git").items([MenuItem::action("打开 Git 客户端…", OpenGitClient)]),
+            Menu::new("Mindmap").items([
+                MenuItem::action("打开 XMind…", OpenMindmap),
+                MenuItem::action("转换文档为 Mindmap…", ConvertDocumentToMindmap),
+            ]),
             Menu::new("Agent").items([MenuItem::action("审阅结构化结果…", OpenAgentReview)]),
             Menu::new("显示").items([
                 MenuItem::action("列表视图", ShowListView),
@@ -3417,7 +3487,119 @@ impl KiteApp {
         self.refresh(window, cx);
     }
 
+    pub(crate) fn open_mindmap_path(
+        &mut self,
+        path: PathBuf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match mindmap_window::open_mindmap_window(path, cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("Mindmap 编辑器已打开".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn open_mindmap_import_path(
+        &mut self,
+        path: PathBuf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match mindmap_import_window::open_mindmap_import_window(path, cx) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some("Mindmap 转换预览已打开".into());
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_mindmap_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("打开 XMind 文件".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.open_mindmap_path(path, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn convert_selected_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry(cx) else {
+            self.notice = None;
+            self.error = Some("请先选择一个 Markdown、DOCX、TXT、HTML 或 OPML 文件".into());
+            cx.notify();
+            return;
+        };
+        self.open_mindmap_import_path(entry.path, window, cx);
+    }
+
+    fn open_mindmap_action(
+        &mut self,
+        _: &OpenMindmap,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_mindmap_dialog(window, cx);
+    }
+
+    fn convert_document_action(
+        &mut self,
+        _: &ConvertDocumentToMindmap,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("选择要转换为 Mindmap 的文档".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.open_mindmap_import_path(path, window, cx)
+            });
+        })
+        .detach();
+    }
+
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("xmind"))
+        {
+            self.open_mindmap_path(path, window, cx);
+            return;
+        }
         let shell_path = shell_fs::is_shell_namespace_path(&path);
         if path.is_dir() || (shell_path && shell_fs::is_directory(&path)) {
             self.navigate_to(path, NavigationIntent::Push, window, cx);
@@ -3530,6 +3712,12 @@ impl KiteApp {
     ) {
         match action.command {
             ContextMenuCommand::Open => self.open_path(action.target.clone(), window, cx),
+            ContextMenuCommand::OpenMindmap => {
+                self.open_mindmap_path(action.target.clone(), window, cx)
+            }
+            ContextMenuCommand::ConvertDocumentToMindmap => {
+                self.open_mindmap_import_path(action.target.clone(), window, cx)
+            }
             ContextMenuCommand::Agent(command) => {
                 self.open_agent_context(command, action, window, cx)
             }
@@ -5670,6 +5858,28 @@ impl KiteApp {
                     })
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.toggle_current_favorite(cx)
+                    })),
+            )
+            .child(
+                Button::new("open-mindmap")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::FilePen)
+                    .label("Mindmap")
+                    .tooltip("打开或新建 Mindmap (Ctrl+Shift+M)")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_mindmap_dialog(window, cx)
+                    })),
+            )
+            .child(
+                Button::new("convert-to-mindmap")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::FileText)
+                    .tooltip("将选中文档转换为 Mindmap")
+                    .disabled(!has_selection)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.convert_selected_document(window, cx)
                     })),
             )
             .when_some(git_head, |this, head| {
@@ -11334,6 +11544,14 @@ impl Render for KiteApp {
             .on_action(cx.listener(|this, action: &OpenGitClient, window, cx| {
                 this.open_git_client_for_current(action, window, cx)
             }))
+            .on_action(cx.listener(|this, action: &OpenMindmap, window, cx| {
+                this.open_mindmap_action(action, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, action: &ConvertDocumentToMindmap, window, cx| {
+                    this.convert_document_action(action, window, cx)
+                }),
+            )
             .on_action(
                 cx.listener(|this, _: &CreateFolder, window, cx| this.begin_new_folder(window, cx)),
             )
