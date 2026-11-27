@@ -6,6 +6,8 @@ pub mod agent_permission_ui;
 pub mod agent_review;
 pub mod archive;
 pub mod content_search;
+pub mod context_menu_ffi;
+pub mod context_menu_model;
 pub mod control;
 pub mod core_api;
 pub mod devices;

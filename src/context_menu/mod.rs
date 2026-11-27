@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
@@ -7,11 +7,15 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
 use gpui_kit::prelude::StatefulInteractiveElement as _;
 use gpui_kit::*;
+use kite_core::context_menu_model::{
+    ContainerSnapshot, ContextCapabilities, ContextPlatform, ContextPolicy, ContextSnapshot,
+    ContextSurface, ContextTarget, MenuEntryPlan, MenuPlan, ResolvedAction, TargetKind, TargetSet,
+    compose_menu_with_fallback,
+};
 
-use crate::actions::{ContextMenuAction, ContextMenuCommand, VcsMenuCommand};
+use crate::actions::{ContextMenuAction, ContextMenuCommand};
 use crate::archive;
 use crate::platform::HostPlatform;
-use kite_core::agent::{AgentMenuCommand, is_text_like_path};
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -24,7 +28,6 @@ pub(crate) struct ContextMenuPolicy {
     pub platform: HostPlatform,
     pub compact: bool,
     pub hide_unavailable: bool,
-    system_menu_label: &'static str,
 }
 
 impl ContextMenuPolicy {
@@ -38,20 +41,20 @@ impl ContextMenuPolicy {
                 platform,
                 compact: false,
                 hide_unavailable: false,
-                system_menu_label: "显示更多选项 (Show more options)",
             },
-            HostPlatform::MacOS => Self {
+            HostPlatform::MacOS | HostPlatform::Other => Self {
                 platform,
                 compact: true,
                 hide_unavailable: true,
-                system_menu_label: "macOS 系统菜单…",
             },
-            HostPlatform::Other => Self {
-                platform,
-                compact: true,
-                hide_unavailable: true,
-                system_menu_label: "系统菜单…",
-            },
+        }
+    }
+
+    fn core_policy(self) -> ContextPolicy {
+        ContextPolicy {
+            compact: self.compact,
+            hide_unavailable: self.hide_unavailable,
+            confirm_high_risk: true,
         }
     }
 }
@@ -70,29 +73,9 @@ pub(crate) struct ContextMenuCapabilities {
     pub is_shell_namespace: bool,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ContextMenuTarget {
-    pub path: PathBuf,
-    pub paths: Vec<PathBuf>,
-    pub working_directory: PathBuf,
-    pub title: String,
-    pub is_dir: bool,
-    pub loading: bool,
-    pub can_paste: bool,
-    pub git_available: bool,
-    pub svn_available: bool,
-    pub supports_transfer_ops: bool,
-    pub supports_cut: bool,
-    pub supports_rename: bool,
-    pub supports_delete: bool,
-    pub supports_favorite: bool,
-    pub is_shell_namespace: bool,
-    pub agent_available: bool,
-}
-
 impl ContextMenuCapabilities {
     pub(crate) fn for_path(
-        path: &std::path::Path,
+        path: &Path,
         loading: bool,
         can_paste: bool,
         git_available: bool,
@@ -121,6 +104,27 @@ impl ContextMenuCapabilities {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ContextMenuTarget {
+    pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
+    pub working_directory: PathBuf,
+    pub title: String,
+    pub is_dir: bool,
+    pub loading: bool,
+    pub can_paste: bool,
+    pub git_available: bool,
+    pub svn_available: bool,
+    pub supports_transfer_ops: bool,
+    pub supports_cut: bool,
+    pub supports_rename: bool,
+    pub supports_delete: bool,
+    pub supports_favorite: bool,
+    pub is_shell_namespace: bool,
+    pub agent_available: bool,
+    pub container_is_primary_target: bool,
+}
+
 impl ContextMenuTarget {
     pub(crate) fn directory(
         path: PathBuf,
@@ -144,6 +148,7 @@ impl ContextMenuTarget {
             supports_favorite: capabilities.supports_favorite,
             is_shell_namespace: capabilities.is_shell_namespace,
             agent_available: false,
+            container_is_primary_target: true,
         }
     }
 
@@ -171,15 +176,7 @@ impl ContextMenuTarget {
             supports_favorite: capabilities.supports_favorite,
             is_shell_namespace: capabilities.is_shell_namespace,
             agent_available: false,
-        }
-    }
-
-    fn action(&self, command: ContextMenuCommand) -> ContextMenuAction {
-        ContextMenuAction {
-            target: self.path.clone(),
-            paths: self.paths.clone(),
-            working_directory: self.working_directory.clone(),
-            command,
+            container_is_primary_target: false,
         }
     }
 
@@ -194,640 +191,267 @@ impl ContextMenuTarget {
         }
         self
     }
-}
 
-#[derive(Clone, Debug)]
-enum ContextMenuNode {
-    Separator,
-    Item {
-        label: &'static str,
-        icon: IconName,
-        command: ContextMenuCommand,
-        enabled: bool,
-    },
-    Submenu {
-        label: &'static str,
-        icon: IconName,
-        enabled: bool,
-        entries: Vec<ContextMenuNode>,
-    },
-}
-
-#[derive(Clone, Debug, Default)]
-struct ContextMenuModel {
-    entries: Vec<ContextMenuNode>,
-}
-
-impl ContextMenuModel {
-    fn separator(&mut self) {
-        self.entries.push(ContextMenuNode::Separator);
-    }
-
-    fn item(
-        &mut self,
-        label: &'static str,
-        icon: IconName,
-        command: ContextMenuCommand,
-        enabled: bool,
-    ) {
-        self.entries.push(ContextMenuNode::Item {
-            label,
-            icon,
+    fn action(&self, plan_action: &ResolvedAction) -> Option<ContextMenuAction> {
+        let command = ContextMenuCommand::from_action_id(
+            &plan_action.action_id,
+            plan_action.variant_key.as_deref(),
+        )?;
+        let paths = plan_action
+            .targets
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        Some(ContextMenuAction {
+            target: paths.first().cloned().unwrap_or_else(|| self.path.clone()),
+            paths,
+            working_directory: self.working_directory.clone(),
             command,
-            enabled,
-        });
+            action_id: plan_action.action_id.clone(),
+            variant_key: plan_action.variant_key.clone(),
+        })
     }
 
-    fn submenu(
-        &mut self,
-        label: &'static str,
-        icon: IconName,
-        enabled: bool,
-        entries: Vec<ContextMenuNode>,
-    ) {
-        self.entries.push(ContextMenuNode::Submenu {
-            label,
-            icon,
-            enabled,
-            entries,
-        });
-    }
-
-    fn normalize(&mut self, policy: ContextMenuPolicy) {
-        let mut normalized = Vec::with_capacity(self.entries.len());
-        for entry in self.entries.drain(..) {
-            if matches!(entry, ContextMenuNode::Separator)
-                && (normalized.is_empty()
-                    || matches!(normalized.last(), Some(ContextMenuNode::Separator)))
-            {
-                continue;
-            }
-            if policy.hide_unavailable {
-                match &entry {
-                    ContextMenuNode::Item { enabled: false, .. }
-                    | ContextMenuNode::Submenu { enabled: false, .. } => continue,
-                    _ => {}
-                }
-            }
-            normalized.push(entry);
-        }
-        while matches!(normalized.last(), Some(ContextMenuNode::Separator)) {
-            normalized.pop();
-        }
-        self.entries = normalized;
-    }
-}
-
-trait ContextMenuProvider {
-    fn append(
-        &self,
-        target: &ContextMenuTarget,
-        policy: ContextMenuPolicy,
-        model: &mut ContextMenuModel,
-    );
-}
-
-struct CoreMenuProvider;
-struct ArchiveMenuProvider;
-struct AgentMenuProvider;
-struct VcsMenuProvider;
-struct SystemMenuProvider;
-struct RefreshMenuProvider;
-
-impl ContextMenuProvider for CoreMenuProvider {
-    fn append(
-        &self,
-        target: &ContextMenuTarget,
-        policy: ContextMenuPolicy,
-        model: &mut ContextMenuModel,
-    ) {
-        let disabled = target.loading;
-        let open_label = if target.is_dir {
-            "打开文件夹"
+    fn context_snapshot(&self, policy: ContextMenuPolicy) -> ContextSnapshot {
+        let paths = if self.paths.is_empty() {
+            vec![self.path.clone()]
         } else {
-            "打开文件"
+            self.paths.clone()
         };
-        model.item(
-            open_label,
-            IconName::FolderOpen,
-            ContextMenuCommand::Open,
-            !disabled,
+        let targets = paths
+            .iter()
+            .map(|path| self.context_target(path))
+            .collect::<Vec<_>>();
+        let primary = targets
+            .iter()
+            .find(|target| target.path == self.path.display().to_string())
+            .or_else(|| targets.first())
+            .map(|target| target.id.clone());
+        let mut target_set = TargetSet::new(
+            primary,
+            targets,
+            self.working_directory.display().to_string(),
         );
-        model.separator();
-        model.item(
-            "复制",
-            IconName::Copy,
-            ContextMenuCommand::Copy,
-            !disabled && target.supports_transfer_ops,
+        target_set.selection_relation = if paths.len() > 1 {
+            kite_core::context_menu_model::SelectionRelation::ClickedInSelection
+        } else {
+            kite_core::context_menu_model::SelectionRelation::None
+        };
+        let mut container = ContainerSnapshot::for_path(
+            self.working_directory.display().to_string(),
+            self.container_is_primary_target,
         );
-        model.item(
-            "拷贝到…",
-            IconName::FolderInput,
-            ContextMenuCommand::CopyTo,
-            !disabled && target.supports_transfer_ops,
-        );
-        model.item(
-            "复制完整路径",
-            IconName::Link,
-            ContextMenuCommand::CopyPath,
-            !disabled,
-        );
-        model.item(
-            "剪切",
-            IconName::Scissors,
-            ContextMenuCommand::Cut,
-            !disabled && target.supports_transfer_ops && target.supports_cut,
-        );
-        model.item(
-            "粘贴",
-            IconName::ClipboardPaste,
-            ContextMenuCommand::Paste,
-            !disabled && target.can_paste && target.supports_transfer_ops,
-        );
-        if !policy.compact {
-            model.separator();
-        }
-        model.item(
-            "新建文件夹",
-            IconName::FolderPlus,
-            ContextMenuCommand::NewFolder,
-            !disabled && target.supports_transfer_ops,
-        );
-        model.item(
-            "新建文件",
-            IconName::FileText,
-            ContextMenuCommand::NewFile,
-            !disabled && target.supports_transfer_ops,
-        );
-        model.item(
-            "添加到收藏",
-            IconName::StarPlus,
-            ContextMenuCommand::AddFavorite,
-            !disabled && target.supports_favorite,
-        );
-        model.item(
-            "重命名",
-            IconName::Pencil,
-            ContextMenuCommand::Rename,
-            !disabled && target.supports_rename,
-        );
-        model.item(
-            if target.is_shell_namespace {
-                "删除设备项目"
+        container.writable = self.supports_transfer_ops && !self.is_shell_namespace;
+        ContextSnapshot {
+            schema_version: kite_core::context_menu_model::CONTEXT_MENU_SCHEMA_VERSION,
+            snapshot_id: format!("windows-context-menu:{}", self.path.display()),
+            platform: ContextPlatform::Windows,
+            surface: if self.container_is_primary_target {
+                ContextSurface::BrowserColumns
             } else {
-                "移到回收站"
+                ContextSurface::BrowserList
             },
-            IconName::Trash,
-            ContextMenuCommand::Recycle,
-            !disabled && target.supports_delete,
-        );
-        if !policy.compact {
-            model.separator();
-        }
-        model.item(
-            "属性",
-            IconName::Info,
-            ContextMenuCommand::ShowProperties,
-            !disabled,
-        );
-    }
-}
-
-impl ContextMenuProvider for ArchiveMenuProvider {
-    fn append(
-        &self,
-        target: &ContextMenuTarget,
-        _: ContextMenuPolicy,
-        model: &mut ContextMenuModel,
-    ) {
-        let can_compress = !target.loading
-            && target.supports_transfer_ops
-            && !target.is_shell_namespace
-            && target.path.parent().is_some();
-        let can_extract = !target.loading
-            && target.supports_transfer_ops
-            && !target.is_shell_namespace
-            && !target.is_dir
-            && archive::is_supported_archive(&target.path);
-
-        model.separator();
-        model.submenu(
-            "压缩",
-            IconName::FileArchive,
-            can_compress,
-            vec![
-                archive_menu_item("ZIP (.zip)", ContextMenuCommand::CompressZip, can_compress),
-                archive_menu_item(
-                    "TAR.GZ (.tar.gz)",
-                    ContextMenuCommand::CompressTarGz,
-                    can_compress,
-                ),
-            ],
-        );
-        model.submenu(
-            "解压",
-            IconName::FolderOpen,
-            can_extract,
-            vec![
-                archive_menu_item(
-                    "解压到当前文件夹",
-                    ContextMenuCommand::ExtractHere,
-                    can_extract,
-                ),
-                archive_menu_item("解压到…", ContextMenuCommand::ExtractTo, can_extract),
-            ],
-        );
-    }
-}
-
-impl ContextMenuProvider for AgentMenuProvider {
-    fn append(
-        &self,
-        target: &ContextMenuTarget,
-        _: ContextMenuPolicy,
-        model: &mut ContextMenuModel,
-    ) {
-        let agent_enabled = target.agent_available && !target.loading && !target.is_shell_namespace;
-        let is_text_like = !target.is_dir && is_text_like_path(&target.path);
-        let mut entries = vec![agent_menu_item(
-            AgentMenuCommand::Ask,
-            IconName::MessageCircle,
-            agent_enabled,
-        )];
-        if AgentMenuCommand::ExplainFile.is_available_for(
-            target.is_dir,
-            is_text_like,
-            target.git_available,
-        ) {
-            entries.push(agent_menu_item(
-                AgentMenuCommand::ExplainFile,
-                IconName::FileText,
-                agent_enabled,
-            ));
-        }
-        if AgentMenuCommand::SummarizeFolder.is_available_for(
-            target.is_dir,
-            false,
-            target.git_available,
-        ) {
-            entries.push(agent_menu_item(
-                AgentMenuCommand::SummarizeFolder,
-                IconName::Folder,
-                agent_enabled,
-            ));
-        }
-        if AgentMenuCommand::ReviewChanges.is_available_for(
-            target.is_dir,
-            is_text_like,
-            target.git_available,
-        ) {
-            entries.push(agent_menu_item(
-                AgentMenuCommand::ReviewChanges,
-                IconName::GitBranch,
-                agent_enabled,
-            ));
-            entries.push(agent_menu_item(
-                AgentMenuCommand::GenerateCommitMessage,
-                IconName::GitCommitHorizontal,
-                agent_enabled,
-            ));
-        }
-        entries.push(ContextMenuNode::Separator);
-        entries.push(agent_menu_item(
-            AgentMenuCommand::Configure,
-            IconName::Settings,
-            !target.loading,
-        ));
-
-        model.separator();
-        model.submenu("使用 Agent", IconName::Sparkles, !target.loading, entries);
-    }
-}
-
-fn agent_menu_item(command: AgentMenuCommand, icon: IconName, enabled: bool) -> ContextMenuNode {
-    ContextMenuNode::Item {
-        label: command.label(),
-        icon,
-        command: ContextMenuCommand::Agent(command),
-        enabled,
-    }
-}
-
-impl ContextMenuProvider for VcsMenuProvider {
-    fn append(
-        &self,
-        target: &ContextMenuTarget,
-        _: ContextMenuPolicy,
-        model: &mut ContextMenuModel,
-    ) {
-        model.separator();
-        model.submenu(
-            "Git",
-            IconName::GitBranch,
-            !target.loading && target.git_available,
-            git_menu_entries(!target.loading && target.git_available, target.is_dir),
-        );
-        model.submenu(
-            "SVN",
-            IconName::Boxes,
-            !target.loading && target.svn_available,
-            svn_menu_entries(!target.loading && target.svn_available),
-        );
-    }
-}
-
-impl ContextMenuProvider for SystemMenuProvider {
-    fn append(
-        &self,
-        target: &ContextMenuTarget,
-        policy: ContextMenuPolicy,
-        model: &mut ContextMenuModel,
-    ) {
-        model.separator();
-        model.item(
-            policy.system_menu_label,
-            IconName::Ellipsis,
-            ContextMenuCommand::SystemMenu,
-            !target.loading,
-        );
-    }
-}
-
-impl ContextMenuProvider for RefreshMenuProvider {
-    fn append(
-        &self,
-        _: &ContextMenuTarget,
-        policy: ContextMenuPolicy,
-        model: &mut ContextMenuModel,
-    ) {
-        if policy.compact {
-            return;
-        }
-        model.item(
-            "刷新",
-            IconName::RotateCw,
-            ContextMenuCommand::Refresh,
-            true,
-        );
-    }
-}
-
-fn git_menu_entries(enabled: bool, is_dir: bool) -> Vec<ContextMenuNode> {
-    vec![
-        menu_item(
-            "打开 Git 客户端",
-            IconName::GitBranch,
-            VcsMenuCommand::GitOpenClient,
-            enabled,
-        ),
-        menu_item(
-            "克隆仓库…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitClone,
-            true,
-        ),
-        menu_item(
-            "初始化仓库",
-            IconName::GitBranch,
-            VcsMenuCommand::GitInit,
-            true,
-        ),
-        ContextMenuNode::Separator,
-        menu_item("添加", IconName::GitBranch, VcsMenuCommand::GitAdd, enabled),
-        menu_item(
-            "取消暂存",
-            IconName::GitBranch,
-            VcsMenuCommand::GitUnstage,
-            enabled,
-        ),
-        menu_item(
-            "提交…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitCommit,
-            enabled,
-        ),
-        ContextMenuNode::Separator,
-        menu_item(
-            "拉取…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitPull,
-            enabled,
-        ),
-        menu_item(
-            "推送…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitPush,
-            enabled,
-        ),
-        menu_item(
-            "获取当前远程",
-            IconName::GitBranch,
-            VcsMenuCommand::GitFetch,
-            enabled,
-        ),
-        menu_item(
-            "获取全部远程",
-            IconName::GitBranch,
-            VcsMenuCommand::GitFetchAll,
-            enabled,
-        ),
-        menu_item(
-            "管理远程…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitManageRemotes,
-            enabled,
-        ),
-        ContextMenuNode::Separator,
-        menu_item(
-            "显示差异",
-            IconName::GitBranch,
-            VcsMenuCommand::GitDiff,
-            enabled,
-        ),
-        menu_item(
-            if is_dir {
-                "查看目录历史"
-            } else {
-                "查看文件历史"
+            target_set,
+            container,
+            capabilities: ContextCapabilities {
+                loading: self.loading,
+                can_paste: self.can_paste,
+                can_create: self.supports_transfer_ops
+                    && !self.is_shell_namespace
+                    && self.container_is_primary_target,
+                supports_transfer_ops: self.supports_transfer_ops,
+                supports_cut: self.supports_cut,
+                supports_rename: self.supports_rename,
+                supports_delete: self.supports_delete,
+                supports_favorite: self.supports_favorite,
+                is_favorite: false,
+                git_available: self.git_available,
+                svn_available: self.svn_available,
+                agent_available: self.agent_available,
+                quick_look_available: false,
+                reveal_available: false,
+                share_available: false,
+                properties_available: true,
+                text_editor_available: false,
+                mindmap_available: false,
+                mindmap_import_available: false,
+                is_shell_namespace: self.is_shell_namespace,
+                native_plane_available: true,
             },
-            IconName::GitBranch,
-            VcsMenuCommand::GitLog,
-            enabled,
-        ),
-        menu_item(
-            "交互式 Rebase…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitRebase,
-            enabled,
-        ),
-        ContextMenuNode::Separator,
-        menu_item(
-            "还原…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitRevert,
-            enabled,
-        ),
-        menu_item(
-            "清理工作区…",
-            IconName::GitBranch,
-            VcsMenuCommand::GitClean,
-            enabled,
-        ),
-    ]
-}
+            policy: policy.core_policy(),
+        }
+    }
 
-fn svn_menu_entries(enabled: bool) -> Vec<ContextMenuNode> {
-    vec![
-        menu_item("更新", IconName::Boxes, VcsMenuCommand::SvnUpdate, enabled),
-        menu_item("添加", IconName::Boxes, VcsMenuCommand::SvnAdd, enabled),
-        menu_item("提交…", IconName::Boxes, VcsMenuCommand::SvnCommit, enabled),
-        ContextMenuNode::Separator,
-        menu_item("锁定", IconName::Boxes, VcsMenuCommand::SvnLock, enabled),
-        menu_item("解锁", IconName::Boxes, VcsMenuCommand::SvnUnlock, enabled),
-        ContextMenuNode::Separator,
-        menu_item(
-            "显示差异",
-            IconName::Boxes,
-            VcsMenuCommand::SvnDiff,
-            enabled,
-        ),
-        menu_item("显示日志", IconName::Boxes, VcsMenuCommand::SvnLog, enabled),
-        ContextMenuNode::Separator,
-        menu_item("还原…", IconName::Boxes, VcsMenuCommand::SvnRevert, enabled),
-        menu_item(
-            "清理工作副本",
-            IconName::Boxes,
-            VcsMenuCommand::SvnCleanup,
-            enabled,
-        ),
-    ]
-}
-
-fn archive_menu_item(
-    label: &'static str,
-    command: ContextMenuCommand,
-    enabled: bool,
-) -> ContextMenuNode {
-    ContextMenuNode::Item {
-        label,
-        icon: IconName::FileArchive,
-        command,
-        enabled,
+    fn context_target(&self, path: &Path) -> ContextTarget {
+        let kind = if archive::is_supported_archive(path) {
+            TargetKind::Archive
+        } else if path.is_dir() || (path == self.path && self.is_dir) {
+            TargetKind::Directory
+        } else if self.is_shell_namespace {
+            TargetKind::DeviceItem
+        } else {
+            TargetKind::File
+        };
+        let display_name = if path == self.path {
+            self.title.clone()
+        } else {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        };
+        ContextTarget::new(path.display().to_string(), display_name, kind)
     }
 }
 
-fn menu_item(
-    label: &'static str,
-    icon: IconName,
-    command: VcsMenuCommand,
-    enabled: bool,
-) -> ContextMenuNode {
-    ContextMenuNode::Item {
-        label,
-        icon,
-        command: ContextMenuCommand::Vcs(command),
-        enabled,
+fn build_plan(target: &ContextMenuTarget, policy: ContextMenuPolicy) -> MenuPlan {
+    compose_menu_with_fallback(&target.context_snapshot(policy))
+}
+
+fn popup_icon(icon_key: &str) -> IconName {
+    match icon_key {
+        "refresh" => IconName::RotateCw,
+        "open" => IconName::FolderOpen,
+        "quick-look" => IconName::Eye,
+        "copy" => IconName::Copy,
+        "cut" => IconName::Scissors,
+        "copy-to" => IconName::FolderInput,
+        "copy-path" => IconName::Link,
+        "paste" => IconName::ClipboardPaste,
+        "new-folder" => IconName::FolderPlus,
+        "new-file" => IconName::FileText,
+        "favorite" => IconName::StarPlus,
+        "rename" => IconName::Pencil,
+        "trash" => IconName::Trash,
+        "archive" | "extract" => IconName::FileArchive,
+        "agent" => IconName::Sparkles,
+        "vcs" => IconName::GitBranch,
+        "system" | "properties" => IconName::Info,
+        "reveal" => IconName::FolderOpen,
+        "share" => IconName::Share2,
+        "editor" => IconName::FileText,
+        "mindmap" => IconName::Network,
+        "native" => IconName::Ellipsis,
+        _ => IconName::Ellipsis,
     }
 }
 
-fn build_model(target: &ContextMenuTarget, policy: ContextMenuPolicy) -> ContextMenuModel {
-    let providers: [&dyn ContextMenuProvider; 6] = [
-        &RefreshMenuProvider,
-        &CoreMenuProvider,
-        &ArchiveMenuProvider,
-        &AgentMenuProvider,
-        &VcsMenuProvider,
-        &SystemMenuProvider,
-    ];
-    let mut model = ContextMenuModel::default();
-    for provider in providers {
-        provider.append(target, policy, &mut model);
-    }
-    model.normalize(policy);
-    model
-}
-
-fn append_nodes(
+fn append_action(
     mut menu: PopupMenu,
-    nodes: &[ContextMenuNode],
+    action: &ResolvedAction,
     target: &ContextMenuTarget,
     action_context: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) -> PopupMenu {
-    for node in nodes {
-        match node {
-            ContextMenuNode::Separator => menu = menu.separator(),
-            ContextMenuNode::Item {
-                label,
-                icon,
-                command,
-                enabled,
-            } => {
-                let action = target.action(*command);
-                let item = if matches!(command, ContextMenuCommand::SystemMenu) {
-                    let hover_action = action.clone();
-                    let hover_context = action_context.clone();
-                    let hover_triggered = Rc::new(Cell::new(false));
-                    let label = *label;
-                    let icon = *icon;
-                    PopupMenuItem::element(move |_, cx| {
-                        let hover_context = hover_context.clone();
-                        let hover_action = hover_action.clone();
-                        let hover_triggered = hover_triggered.clone();
-                        h_flex()
-                            .id("context-menu-show-more-hover")
-                            .w_full()
-                            .min_w_0()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .on_hover(move |hovered, window, cx| {
-                                if !*hovered {
-                                    hover_triggered.set(false);
-                                    return;
-                                }
-                                if hover_triggered.replace(true) {
-                                    return;
-                                }
-                                hover_context.focus(window, cx);
-                                window.dispatch_action(Box::new(hover_action.clone()), cx);
-                            })
-                            .child(label)
-                            .child(
-                                Icon::new(IconName::ChevronRight)
-                                    .xsmall()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                    })
-                    .icon(icon)
-                    .disabled(!enabled)
-                    .action(Box::new(action))
-                } else {
-                    PopupMenuItem::new(*label)
-                        .icon(*icon)
-                        .disabled(!enabled)
-                        .action(Box::new(action))
-                };
-                menu = menu.item(item);
-            }
-            ContextMenuNode::Submenu {
-                label,
-                icon,
-                enabled,
-                entries,
-            } => {
-                let entries = entries.clone();
-                let target = target.clone();
-                let action_context = action_context.clone();
-                let submenu = PopupMenu::build(window, cx, move |menu, window, cx| {
-                    append_nodes(menu, &entries, &target, &action_context, window, cx)
-                });
-                menu = menu.item(
-                    PopupMenuItem::submenu(*label, submenu)
-                        .icon(*icon)
-                        .disabled(!enabled),
-                );
+    let Some(dispatched) = target.action(action) else {
+        return menu;
+    };
+    let item = if action.action_id == "system.native-menu" {
+        let hover_action = dispatched.clone();
+        let hover_context = action_context.clone();
+        let hover_triggered = Rc::new(Cell::new(false));
+        let label = action.label.clone();
+        let icon = popup_icon(&action.icon_key);
+        PopupMenuItem::element(move |_, cx| {
+            let hover_context = hover_context.clone();
+            let hover_action = hover_action.clone();
+            let hover_triggered = hover_triggered.clone();
+            h_flex()
+                .id("context-menu-show-more-hover")
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .on_hover(move |hovered, window, cx| {
+                    if !*hovered {
+                        hover_triggered.set(false);
+                        return;
+                    }
+                    if hover_triggered.replace(true) {
+                        return;
+                    }
+                    hover_context.focus(window, cx);
+                    window.dispatch_action(Box::new(hover_action.clone()), cx);
+                })
+                .child(label.clone())
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
+        })
+        .icon(icon)
+        .disabled(!action.enabled)
+        .action(Box::new(dispatched))
+    } else {
+        PopupMenuItem::new(action.label.clone())
+            .icon(popup_icon(&action.icon_key))
+            .disabled(!action.enabled)
+            .action(Box::new(dispatched))
+    };
+    menu = menu.item(item);
+    menu
+}
+
+fn append_sections(
+    mut menu: PopupMenu,
+    sections: &[kite_core::context_menu_model::MenuSectionPlan],
+    target: &ContextMenuTarget,
+    action_context: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> PopupMenu {
+    for (section_index, section) in sections.iter().enumerate() {
+        if section_index > 0 {
+            menu = menu.separator();
+        }
+        for action in &section.entries {
+            menu = append_action(menu, action, target, action_context, window, cx);
+        }
+    }
+    menu
+}
+
+fn append_plan(
+    mut menu: PopupMenu,
+    plan: &MenuPlan,
+    target: &ContextMenuTarget,
+    action_context: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> PopupMenu {
+    for (group_index, group) in plan.groups.iter().enumerate() {
+        if group_index > 0 {
+            menu = menu.separator();
+        }
+        for entry in &group.entries {
+            match entry {
+                MenuEntryPlan::Action(action) => {
+                    menu = append_action(menu, action, target, action_context, window, cx);
+                }
+                MenuEntryPlan::Submenu(entry_submenu) => {
+                    let Some(submenu) = plan.find_submenu(&entry_submenu.id) else {
+                        continue;
+                    };
+                    let submenu_clone = submenu.clone();
+                    let target = target.clone();
+                    let action_context = action_context.clone();
+                    let popup = PopupMenu::build(window, cx, move |menu, window, cx| {
+                        append_sections(
+                            menu,
+                            &submenu_clone.sections,
+                            &target,
+                            &action_context,
+                            window,
+                            cx,
+                        )
+                    });
+                    menu = menu.item(
+                        PopupMenuItem::submenu(submenu.label.clone(), popup)
+                            .icon(popup_icon(&submenu.icon_key)),
+                    );
+                }
             }
         }
     }
@@ -842,25 +466,41 @@ pub(crate) fn render_context_menu(
     cx: &mut App,
 ) -> PopupMenu {
     let policy = ContextMenuPolicy::current();
-    let model = build_model(target, policy);
-    let menu = menu.label(target.title.clone()).separator();
-    append_nodes(menu, &model.entries, target, &action_context, window, cx)
+    let plan = build_plan(target, policy);
+    let mut menu = menu.label(plan.title.clone());
+    if !plan.groups.is_empty() {
+        menu = menu.separator();
+        menu = append_plan(menu, &plan, target, &action_context, window, cx);
+    }
+    menu
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ContextMenuCapabilities, ContextMenuCommand, ContextMenuModel, ContextMenuNode,
-        ContextMenuPolicy, ContextMenuTarget, VcsMenuCommand, build_model,
-    };
-    use crate::platform::HostPlatform;
-    use kite_core::agent::AgentMenuCommand;
-    use std::path::PathBuf;
+    use super::*;
+    use crate::actions::ContextMenuCommand;
+    use kite_core::context_menu_model::ActionRisk;
 
-    fn target() -> ContextMenuTarget {
-        ContextMenuTarget::directory(
-            PathBuf::from(r"C:\repo\src"),
-            "src".to_string(),
+    fn target(is_dir: bool) -> ContextMenuTarget {
+        let path = if is_dir {
+            PathBuf::from(r"C:\repo\src")
+        } else {
+            PathBuf::from(r"C:\repo\src\main.rs")
+        };
+        let working_directory = if is_dir {
+            path.clone()
+        } else {
+            PathBuf::from(r"C:\repo\src")
+        };
+        ContextMenuTarget::entry(
+            path,
+            if is_dir {
+                "src".to_string()
+            } else {
+                "main.rs".to_string()
+            },
+            is_dir,
+            working_directory,
             ContextMenuCapabilities {
                 loading: false,
                 can_paste: true,
@@ -875,48 +515,6 @@ mod tests {
             },
         )
         .with_agent_available(true)
-    }
-
-    fn file_target() -> ContextMenuTarget {
-        ContextMenuTarget::entry(
-            PathBuf::from(r"C:\repo\src\main.rs"),
-            "main.rs".to_string(),
-            false,
-            PathBuf::from(r"C:\repo\src"),
-            ContextMenuCapabilities {
-                loading: false,
-                can_paste: true,
-                git_available: true,
-                svn_available: false,
-                supports_transfer_ops: true,
-                supports_cut: true,
-                supports_rename: true,
-                supports_delete: true,
-                supports_favorite: true,
-                is_shell_namespace: false,
-            },
-        )
-    }
-
-    fn archive_target() -> ContextMenuTarget {
-        ContextMenuTarget::entry(
-            PathBuf::from(r"C:\repo\report.zip"),
-            "report.zip".to_string(),
-            false,
-            PathBuf::from(r"C:\repo"),
-            ContextMenuCapabilities {
-                loading: false,
-                can_paste: true,
-                git_available: false,
-                svn_available: false,
-                supports_transfer_ops: true,
-                supports_cut: true,
-                supports_rename: true,
-                supports_delete: true,
-                supports_favorite: true,
-                is_shell_namespace: false,
-            },
-        )
     }
 
     fn windows_policy() -> ContextMenuPolicy {
@@ -940,484 +538,71 @@ mod tests {
         assert!(!capabilities.supports_delete);
     }
 
-    fn submenu_entries(model: &ContextMenuModel, label: &str) -> Vec<ContextMenuNode> {
-        model
-            .entries
+    #[test]
+    fn plan_uses_stable_root_order_and_native_tail() {
+        let plan = build_plan(&target(false), windows_policy());
+        let groups = plan
+            .groups
             .iter()
-            .find_map(|entry| match entry {
-                ContextMenuNode::Submenu {
-                    label: item_label,
-                    entries,
-                    ..
-                } if item_label == &label => Some(entries.clone()),
-                _ => None,
-            })
-            .expect("submenu")
-    }
-
-    #[test]
-    fn first_level_menu_keeps_git_svn_and_native_shell() {
-        let model = build_model(&target(), windows_policy());
-        let labels = model
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { label, .. } | ContextMenuNode::Submenu { label, .. } => {
-                    Some(*label)
-                }
-                ContextMenuNode::Separator => None,
-            })
+            .map(|group| group.id.as_str())
             .collect::<Vec<_>>();
-
-        assert_eq!(labels.first(), Some(&"刷新"));
-        assert!(labels.contains(&"Git"));
-        assert!(labels.contains(&"SVN"));
-        assert!(labels.contains(&"压缩"));
-        assert!(labels.contains(&"解压"));
-        assert!(labels.contains(&"新建文件夹"));
-        assert!(labels.contains(&"新建文件"));
-        assert!(labels.contains(&"添加到收藏"));
-        assert!(labels.contains(&"拷贝到…"));
-        assert!(labels.contains(&"复制完整路径"));
-        assert!(labels.contains(&"属性"));
-        assert!(labels.contains(&"使用 Agent"));
-        assert!(model.entries.iter().any(|entry| matches!(
-            entry,
-            ContextMenuNode::Item {
-                label: "显示更多选项 (Show more options)",
-                command: ContextMenuCommand::SystemMenu,
-                enabled: true,
-                ..
-            }
-        )));
+        assert_eq!(groups.first().copied(), Some("G10"));
+        assert_eq!(groups.last().copied(), Some("G99"));
+        let last = plan.groups.last().and_then(|group| group.entries.last());
+        assert!(matches!(
+            last,
+            Some(MenuEntryPlan::Action(action)) if action.action_id == "system.native-menu"
+        ));
     }
 
     #[test]
-    fn agent_menu_exposes_context_actions_and_configuration() {
-        let model = build_model(&target(), windows_policy());
-        let entries = submenu_entries(&model, "使用 Agent");
-        let commands = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item {
-                    command: ContextMenuCommand::Agent(command),
-                    enabled,
-                    ..
-                } if *enabled => Some(*command),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(commands.contains(&AgentMenuCommand::Ask));
-        assert!(commands.contains(&AgentMenuCommand::SummarizeFolder));
-        assert!(commands.contains(&AgentMenuCommand::ReviewChanges));
-        assert!(commands.contains(&AgentMenuCommand::GenerateCommitMessage));
-        assert!(commands.contains(&AgentMenuCommand::Configure));
-        assert!(!commands.contains(&AgentMenuCommand::ExplainFile));
-    }
-
-    #[test]
-    fn agent_actions_follow_profile_availability() {
-        let model = build_model(&target().with_agent_available(false), windows_policy());
-        let entries = submenu_entries(&model, "使用 Agent");
-        assert!(entries.iter().any(|entry| matches!(
-            entry,
-            ContextMenuNode::Item {
-                command: ContextMenuCommand::Agent(AgentMenuCommand::Ask),
-                enabled: false,
-                ..
-            }
-        )));
-        assert!(entries.iter().any(|entry| matches!(
-            entry,
-            ContextMenuNode::Item {
-                command: ContextMenuCommand::Agent(AgentMenuCommand::Configure),
-                enabled: true,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn agent_menu_explains_text_files_only() {
-        let capabilities = ContextMenuCapabilities {
-            loading: false,
-            can_paste: true,
-            git_available: false,
-            svn_available: false,
-            supports_transfer_ops: true,
-            supports_cut: true,
-            supports_rename: true,
-            supports_delete: true,
-            supports_favorite: true,
-            is_shell_namespace: false,
-        };
-        let text_model = build_model(
-            &ContextMenuTarget::entry(
-                PathBuf::from(r"C:\repo\main.rs"),
-                "main.rs".to_string(),
-                false,
-                PathBuf::from(r"C:\repo"),
-                capabilities,
-            ),
-            windows_policy(),
-        );
-        let binary_model = build_model(
-            &ContextMenuTarget::entry(
-                PathBuf::from(r"C:\repo\Kite.exe"),
-                "Kite.exe".to_string(),
-                false,
-                PathBuf::from(r"C:\repo"),
-                capabilities,
-            ),
-            windows_policy(),
-        );
-
-        assert!(
-            submenu_entries(&text_model, "使用 Agent")
-                .iter()
-                .any(|entry| {
-                    matches!(
-                        entry,
-                        ContextMenuNode::Item {
-                            command: ContextMenuCommand::Agent(AgentMenuCommand::ExplainFile),
-                            ..
-                        }
-                    )
-                })
-        );
-        assert!(
-            !submenu_entries(&binary_model, "使用 Agent")
-                .iter()
-                .any(|entry| {
-                    matches!(
-                        entry,
-                        ContextMenuNode::Item {
-                            command: ContextMenuCommand::Agent(AgentMenuCommand::ExplainFile),
-                            ..
-                        }
-                    )
-                })
-        );
-    }
-
-    #[test]
-    fn compression_menu_contains_zip_and_tar_gz() {
-        let model = build_model(&target(), windows_policy());
-        let commands = submenu_entries(&model, "压缩")
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { command, .. } => Some(*command),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(commands.contains(&ContextMenuCommand::CompressZip));
-        assert!(commands.contains(&ContextMenuCommand::CompressTarGz));
-    }
-
-    #[test]
-    fn extraction_menu_is_only_enabled_for_supported_archives() {
-        let archive_model = build_model(&archive_target(), windows_policy());
-        let commands = submenu_entries(&archive_model, "解压")
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item {
-                    command, enabled, ..
-                } if *enabled => Some(*command),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(commands.contains(&ContextMenuCommand::ExtractHere));
-        assert!(commands.contains(&ContextMenuCommand::ExtractTo));
-
-        let text_model = build_model(
-            &ContextMenuTarget::entry(
-                PathBuf::from(r"C:\repo\notes.txt"),
-                "notes.txt".to_string(),
-                false,
-                PathBuf::from(r"C:\repo"),
-                ContextMenuCapabilities {
-                    loading: false,
-                    can_paste: true,
-                    git_available: false,
-                    svn_available: false,
-                    supports_transfer_ops: true,
-                    supports_cut: true,
-                    supports_rename: true,
-                    supports_delete: true,
-                    supports_favorite: true,
-                    is_shell_namespace: false,
-                },
-            ),
-            windows_policy(),
-        );
-        assert!(text_model.entries.iter().any(|entry| matches!(
-            entry,
-            ContextMenuNode::Submenu {
-                label: "解压",
-                enabled: false,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn git_menu_contains_complete_action_set() {
-        let model = build_model(&target(), windows_policy());
-        let entries = submenu_entries(&model, "Git");
-        let commands = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { command, .. } => Some(*command),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitOpenClient)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitAdd)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitUnstage)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitCommit)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPull)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitPush)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitFetch)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitFetchAll)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitManageRemotes)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClone)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitInit)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitDiff)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitLog)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRebase)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitRevert)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::GitClean)));
-    }
-
-    #[test]
-    fn git_log_label_tracks_directory_and_file_scope() {
-        let directory_labels = submenu_entries(&build_model(&target(), windows_policy()), "Git")
-            .into_iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { label, .. } => Some(label),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(directory_labels.contains(&"查看目录历史"));
-
-        let file_labels = submenu_entries(&build_model(&file_target(), windows_policy()), "Git")
-            .into_iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { label, .. } => Some(label),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(file_labels.contains(&"查看文件历史"));
-    }
-
-    #[test]
-    fn svn_menu_contains_complete_action_set() {
-        let model = build_model(&target(), windows_policy());
-        let entries = submenu_entries(&model, "SVN");
-        let commands = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { command, .. } => Some(*command),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnUpdate)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnAdd)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnCommit)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnLock)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnUnlock)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnDiff)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnLog)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnRevert)));
-        assert!(commands.contains(&ContextMenuCommand::Vcs(VcsMenuCommand::SvnCleanup)));
-    }
-
-    #[test]
-    fn loading_disables_target_actions() {
-        let mut target = target();
-        target.loading = true;
-        let model = build_model(&target, windows_policy());
-        let native_shell_enabled = model.entries.iter().any(|entry| {
-            matches!(
-                entry,
-                ContextMenuNode::Item {
-                    label: "显示更多选项 (Show more options)",
-                    enabled,
-                    ..
-                } if !enabled
-            )
-        });
-        let vcs_disabled = model.entries.iter().all(|entry| match entry {
-            ContextMenuNode::Submenu { label, enabled, .. } if matches!(*label, "Git" | "SVN") => {
-                !enabled
-            }
-            _ => true,
-        });
-        let new_file_disabled = model.entries.iter().any(|entry| {
-            matches!(
-                entry,
-                ContextMenuNode::Item {
-                    command: ContextMenuCommand::NewFile,
-                    enabled: false,
-                    ..
-                }
-            )
-        });
-
-        assert!(native_shell_enabled);
-        assert!(vcs_disabled);
-        assert!(new_file_disabled);
-    }
-
-    #[test]
-    fn macos_policy_hides_unavailable_vcs_and_uses_platform_label() {
-        let mut target = target();
-        target.git_available = false;
-        target.svn_available = false;
-        let model = build_model(
-            &target,
-            ContextMenuPolicy::for_platform(HostPlatform::MacOS),
-        );
-        let labels = model
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { label, .. } | ContextMenuNode::Submenu { label, .. } => {
-                    Some(*label)
-                }
-                ContextMenuNode::Separator => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(!labels.contains(&"Git"));
-        assert!(!labels.contains(&"SVN"));
-        assert!(labels.contains(&"压缩"));
-        assert!(!labels.contains(&"解压"));
-        assert!(!labels.contains(&"刷新"));
-        assert!(labels.contains(&"macOS 系统菜单…"));
-    }
-
-    #[test]
-    fn entry_action_keeps_its_own_working_directory() {
-        let target = ContextMenuTarget::entry(
-            PathBuf::from(r"C:\repo\src\main.rs"),
-            "main.rs".to_string(),
-            false,
-            PathBuf::from(r"C:\repo\src"),
-            ContextMenuCapabilities {
-                loading: false,
-                can_paste: true,
-                git_available: true,
-                svn_available: false,
-                supports_transfer_ops: true,
-                supports_cut: true,
-                supports_rename: true,
-                supports_delete: true,
-                supports_favorite: true,
-                is_shell_namespace: false,
-            },
-        );
-        let action = target.action(ContextMenuCommand::Paste);
-
-        assert_eq!(action.target, PathBuf::from(r"C:\repo\src\main.rs"));
-        assert_eq!(action.working_directory, PathBuf::from(r"C:\repo\src"));
-        assert_eq!(action.command, ContextMenuCommand::Paste);
-    }
-
-    #[test]
-    fn shell_target_allows_transfer_and_hides_unsafe_operations() {
-        let target = ContextMenuTarget::entry(
-            PathBuf::from(r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\phone\photo.jpg"),
-            "photo.jpg".to_string(),
-            false,
-            PathBuf::from(r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\phone"),
-            ContextMenuCapabilities {
-                loading: false,
-                can_paste: true,
-                git_available: false,
-                svn_available: false,
-                supports_transfer_ops: true,
-                supports_cut: false,
-                supports_rename: false,
-                supports_delete: false,
-                supports_favorite: false,
-                is_shell_namespace: true,
-            },
-        );
-        let model = build_model(&target, windows_policy());
-        let commands = model
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ContextMenuNode::Item { command, .. } => Some(*command),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(commands.contains(&ContextMenuCommand::Open));
-        assert!(commands.contains(&ContextMenuCommand::Copy));
-        assert!(commands.contains(&ContextMenuCommand::CopyTo));
-        assert!(commands.contains(&ContextMenuCommand::CopyPath));
-        assert!(commands.contains(&ContextMenuCommand::Paste));
-        assert!(commands.contains(&ContextMenuCommand::NewFolder));
-        assert!(commands.contains(&ContextMenuCommand::NewFile));
-        assert!(commands.contains(&ContextMenuCommand::ShowProperties));
-        assert!(model.entries.iter().any(|entry| matches!(
-            entry,
-            ContextMenuNode::Item {
-                label: "删除设备项目",
-                command: ContextMenuCommand::Recycle,
-                enabled: false,
-                ..
-            }
-        )));
-        for command in [
-            ContextMenuCommand::AddFavorite,
-            ContextMenuCommand::Cut,
-            ContextMenuCommand::Rename,
-            ContextMenuCommand::Recycle,
-        ] {
-            assert!(model.entries.iter().any(|entry| matches!(
-                entry,
-                ContextMenuNode::Item {
-                    command: item_command,
-                    enabled: false,
-                    ..
-                } if *item_command == command
-            )));
+    fn every_windows_visible_action_has_a_stable_command_mapping() {
+        let mut target = target(true);
+        target.git_available = true;
+        target.svn_available = true;
+        let plan = build_plan(&target, windows_policy());
+        for action_id in plan.visible_action_ids() {
+            assert!(
+                ContextMenuCommand::from_action_id(action_id, None).is_some(),
+                "missing Windows dispatch mapping for {action_id}"
+            );
         }
     }
 
     #[test]
-    fn directory_action_targets_the_column_directory() {
-        let target = ContextMenuTarget::directory(
-            PathBuf::from(r"C:\repo\src\ui"),
-            "ui".to_string(),
-            ContextMenuCapabilities {
-                loading: false,
-                can_paste: true,
-                git_available: true,
-                svn_available: false,
-                supports_transfer_ops: true,
-                supports_cut: true,
-                supports_rename: true,
-                supports_delete: true,
-                supports_favorite: true,
-                is_shell_namespace: false,
-            },
-        );
-        let folder_action = target.action(ContextMenuCommand::NewFolder);
-        let file_action = target.action(ContextMenuCommand::NewFile);
-        let favorite_action = target.action(ContextMenuCommand::AddFavorite);
+    fn git_and_agent_are_declared_once_in_central_submenus() {
+        let plan = build_plan(&target(false), windows_policy());
+        let ids = plan.visible_action_ids();
+        assert_eq!(ids.iter().filter(|id| **id == "git.open-client").count(), 1);
+        assert_eq!(ids.iter().filter(|id| **id == "agent.ask").count(), 1);
+        assert!(plan.find_submenu("git").is_some());
+        assert!(plan.find_submenu("agent").is_some());
+    }
 
-        assert_eq!(folder_action.target, PathBuf::from(r"C:\repo\src\ui"));
-        assert_eq!(folder_action.working_directory, folder_action.target);
-        assert_eq!(file_action.target, PathBuf::from(r"C:\repo\src\ui"));
-        assert_eq!(file_action.working_directory, file_action.target);
-        assert_eq!(favorite_action.target, PathBuf::from(r"C:\repo\src\ui"));
-        assert_eq!(favorite_action.working_directory, favorite_action.target);
+    #[test]
+    fn multi_select_promotes_delete_to_destructive_group() {
+        let mut target = target(false);
+        target.paths = vec![
+            PathBuf::from(r"C:\repo\src\main.rs"),
+            PathBuf::from(r"C:\repo\src\lib.rs"),
+        ];
+        let plan = build_plan(&target, windows_policy());
+        let trash = plan
+            .groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .find_map(|entry| match entry {
+                MenuEntryPlan::Action(action) if action.action_id == "file.move-to-trash" => {
+                    Some(action)
+                }
+                _ => None,
+            })
+            .expect("trash action");
+        assert_eq!(trash.risk, ActionRisk::High);
+        assert_eq!(
+            trash.root_group,
+            kite_core::context_menu_model::RootGroup::Destructive
+        );
+        assert!(!plan.visible_action_ids().contains(&"file.rename"));
     }
 }

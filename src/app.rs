@@ -3528,17 +3528,27 @@ impl KiteApp {
                 self.open_agent_context(command, action, window, cx)
             }
             ContextMenuCommand::Copy => {
-                self.set_clipboard_path(action.target.clone(), ClipboardMode::Copy, cx)
+                self.set_clipboard_paths(action.paths.clone(), ClipboardMode::Copy, cx)
             }
-            ContextMenuCommand::CopyTo => self.copy_to_directory(action.target.clone(), window, cx),
+            ContextMenuCommand::CopyTo => self.copy_to_directory(action.paths.clone(), window, cx),
             ContextMenuCommand::CopyPath => {
-                cx.write_to_clipboard(ClipboardItem::new_string(path_text(&action.target)));
+                let text = action
+                    .paths
+                    .iter()
+                    .map(|path| path_text(path))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.error = None;
-                self.notice = Some("已复制完整路径".into());
+                self.notice = Some(if action.paths.len() > 1 {
+                    format!("已复制 {} 个完整路径", action.paths.len()).into()
+                } else {
+                    "已复制完整路径".into()
+                });
                 cx.notify();
             }
             ContextMenuCommand::Cut => {
-                self.set_clipboard_path(action.target.clone(), ClipboardMode::Cut, cx)
+                self.set_clipboard_paths(action.paths.clone(), ClipboardMode::Cut, cx)
             }
             ContextMenuCommand::Paste => {
                 let destination = paste_destination(&action.target, &action.working_directory);
@@ -3554,7 +3564,7 @@ impl KiteApp {
             ContextMenuCommand::RemoveFavorite => self.remove_favorite(action.target.clone(), cx),
             ContextMenuCommand::Rename => self.begin_rename_path(action.target.clone(), window, cx),
             ContextMenuCommand::Recycle => {
-                self.confirm_recycle_path(action.target.clone(), window, cx)
+                self.confirm_recycle_paths(action.paths.clone(), window, cx)
             }
             ContextMenuCommand::CompressZip => {
                 self.compress_path(action.target.clone(), ArchiveFormat::Zip, window, cx)
@@ -3585,14 +3595,19 @@ impl KiteApp {
                 self.run_vcs_command(command, action.target.clone(), window, cx)
             }
             ContextMenuCommand::SystemMenu => {
-                self.open_system_menu(action.target.clone(), window, cx)
+                self.open_system_menu(action.paths.clone(), window, cx)
             }
             ContextMenuCommand::Refresh => self.refresh(window, cx),
         }
     }
 
-    fn open_system_menu(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = match request_system_menu(window, &path) {
+    fn open_system_menu(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = match request_system_menu(window, &paths) {
             Ok(receiver) => receiver,
             Err(error) => {
                 self.notice = None;
@@ -4648,7 +4663,15 @@ impl KiteApp {
         self.paste_clipboard_into(self.current_dir.clone(), window, cx);
     }
 
-    fn copy_to_directory(&mut self, source: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    fn copy_to_directory(
+        &mut self,
+        sources: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if sources.is_empty() {
+            return;
+        }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -4690,12 +4713,22 @@ impl KiteApp {
             }) else {
                 return;
             };
-            let result =
-                shell_fs::copy_item_with_progress(source, destination_dir.clone(), owner).await;
+            let mut completed = 0usize;
+            let result = async {
+                for source in sources {
+                    shell_fs::copy_item_with_progress(source, destination_dir.clone(), owner)
+                        .await?;
+                    completed += 1;
+                }
+                Ok::<_, String>(completed)
+            }
+            .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(()) => {
+                Ok(item_count) => {
                     this.error = None;
-                    this.notice = Some(format!("已拷贝到 {}", destination_dir.display()).into());
+                    this.notice = Some(
+                        format!("已拷贝 {item_count} 项到 {}", destination_dir.display()).into(),
+                    );
                     if same_path(&this.current_dir, &destination_dir) {
                         this.refresh(window, cx);
                     } else {
@@ -4704,7 +4737,11 @@ impl KiteApp {
                 }
                 Err(error) => {
                     this.notice = None;
-                    this.error = Some(error.into());
+                    this.error = Some(if completed > 0 {
+                        format!("已拷贝 {completed} 项，后续操作失败：{error}").into()
+                    } else {
+                        error.into()
+                    });
                     cx.notify();
                 }
             });
@@ -6155,24 +6192,32 @@ impl KiteApp {
             paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::Open,
+            action_id: "open.default".to_string(),
+            variant_key: None,
         };
         let copy_path_action = ContextMenuAction {
             target: path.clone(),
             paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::CopyPath,
+            action_id: "clipboard.copy-path".to_string(),
+            variant_key: None,
         };
         let properties_action = ContextMenuAction {
             target: path.clone(),
             paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::ShowProperties,
+            action_id: "system.properties".to_string(),
+            variant_key: None,
         };
         let remove_action = favorite.then(|| ContextMenuAction {
             target: path.clone(),
             paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::RemoveFavorite,
+            action_id: "favorite.remove".to_string(),
+            variant_key: None,
         });
         let storage_row = storage.is_some();
 
@@ -6389,12 +6434,16 @@ impl KiteApp {
             paths: vec![path.clone()],
             working_directory: path.clone(),
             command: ContextMenuCommand::Open,
+            action_id: "open.default".to_string(),
+            variant_key: None,
         };
         let properties_action = ContextMenuAction {
             paths: vec![path.clone()],
             target: path,
             working_directory: PathBuf::from(&device.shell_path),
             command: ContextMenuCommand::ShowProperties,
+            action_id: "system.properties".to_string(),
+            variant_key: None,
         };
         let context = self.focus_handle.clone();
         let active = same_path(&self.current_dir, Path::new(&device.shell_path));
@@ -7295,6 +7344,8 @@ impl KiteApp {
                                             working_directory: preview_more_working_directory
                                                 .clone(),
                                             command: *command,
+                                            action_id: "preview.more".to_string(),
+                                            variant_key: Some(format!("preview-more:{index}")),
                                         }),
                                         !preview_more_supports_local_ops
                                             && *command == ContextMenuCommand::Copy,

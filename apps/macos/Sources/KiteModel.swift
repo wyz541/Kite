@@ -23,6 +23,17 @@ struct BrowserEntry: Identifiable, Hashable {
         gitStatus = dto.gitStatus
         svnStatus = dto.svnStatus
     }
+
+    init(contentMatch: BrowserContentFileMatch) {
+        path = contentMatch.path
+        name = contentMatch.name
+        isDirectory = false
+        kindLabel = contentMatch.kindLabel
+        size = contentMatch.size
+        modifiedUnixMs = contentMatch.modifiedUnixMs
+        gitStatus = nil
+        svnStatus = nil
+    }
 }
 
 enum BrowserColumnSortKey: String, CaseIterable, Identifiable, Codable {
@@ -2614,6 +2625,22 @@ final class KiteModel: ObservableObject {
                 .appendingPathComponent("kite-\(label)-log-\(UUID().uuidString).txt")
             try "\(label.uppercased()) 日志\n目标：\(path)\n\n\(text)\n"
                 .write(to: file, atomically: true, encoding: .utf8)
+            KitePlatform.open(file.path)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func openVcsDiff(tool: VcsToolDto, path: String) async {
+        let core = self.core
+        do {
+            let text = try await Task.detached(priority: .userInitiated) {
+                try core.runVcsQuery(tool: tool, query: .diff, path: path)
+            }.value
+            let label = tool == .git ? "git" : "svn"
+            let file = FileManager.default.temporaryDirectory
+                .appendingPathComponent("kite-\(label)-diff-\(UUID().uuidString).diff")
+            try text.write(to: file, atomically: true, encoding: .utf8)
             KitePlatform.open(file.path)
         } catch {
             errorMessage = error.localizedDescription

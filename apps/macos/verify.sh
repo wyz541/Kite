@@ -22,6 +22,9 @@ bash apps/macos/test-file-drag.sh
 echo "Testing Agent permission presentation..."
 bash apps/macos/Tests/run-agent-permission-presentation-smoke.sh
 
+echo "Testing canonical context-menu plan..."
+bash apps/macos/Tests/run-context-menu-plan-smoke.sh
+
 echo "Building release app..."
 bash apps/macos/build.sh
 

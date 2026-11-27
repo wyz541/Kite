@@ -8,12 +8,13 @@ use futures_channel::oneshot;
 use gpui_kit::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::System::Com::IBindCtx;
+use windows::Win32::System::Com::{CoTaskMemFree, IBindCtx};
 use windows::Win32::UI::Shell::{
     BHID_SFUIObject, CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
     CMINVOKECOMMANDINFOEX, DefSubclassProc, IContextMenu, IContextMenu2, IContextMenu3, IShellItem,
     IShellItemArray, RemoveWindowSubclass, SHCreateItemFromParsingName,
-    SHCreateShellItemArrayFromShellItem, SHOP_FILEPATH, SHObjectProperties, SetWindowSubclass,
+    SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject, SHOP_FILEPATH, SHObjectProperties,
+    SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HMENU, PostMessageW,
@@ -31,7 +32,7 @@ const WM_KITE_SYSTEM_MENU: u32 = WM_APP + 0x4B;
 
 struct PendingSystemMenu {
     hwnd: isize,
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     sender: oneshot::Sender<Result<bool, String>>,
 }
 
@@ -68,8 +69,11 @@ impl Drop for MenuGuard {
 
 pub(crate) fn request_system_menu(
     window: &Window,
-    path: &Path,
+    paths: &[PathBuf],
 ) -> Result<oneshot::Receiver<Result<bool, String>>, String> {
+    if paths.is_empty() {
+        return Err("没有可交给 Windows 原生菜单的目标".to_string());
+    }
     let hwnd = window_hwnd(window)?;
     let (sender, receiver) = oneshot::channel();
     {
@@ -81,7 +85,7 @@ pub(crate) fn request_system_menu(
         }
         *pending = Some(PendingSystemMenu {
             hwnd: hwnd.0 as isize,
-            path: path.to_path_buf(),
+            paths: paths.to_vec(),
             sender,
         });
     }
@@ -152,19 +156,35 @@ fn clear_pending_system_menu(hwnd: HWND) {
     }
 }
 
-fn show_native_context_menu_for_hwnd(hwnd: HWND, path: &Path) -> Result<bool, String> {
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-
+fn show_native_context_menu_for_hwnd(hwnd: HWND, paths: &[PathBuf]) -> Result<bool, String> {
+    if paths.is_empty() {
+        return Err("没有可交给 Windows 原生菜单的目标".to_string());
+    }
     unsafe {
-        let item: IShellItem =
-            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>)
-                .map_err(|error| format!("无法读取 Windows Shell 项目：{error}"))?;
-        let items: IShellItemArray = SHCreateShellItemArrayFromShellItem(&item)
-            .map_err(|error| format!("无法创建 Windows Shell 项目数组：{error}"))?;
+        let mut pidls = Vec::with_capacity(paths.len());
+        for path in paths {
+            let wide = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let item: IShellItem =
+                SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>)
+                    .map_err(|error| format!("无法读取 Windows Shell 项目：{error}"))?;
+            let pidl = SHGetIDListFromObject(&item)
+                .map_err(|error| format!("无法读取 Windows Shell 项目 ID：{error}"))?;
+            pidls.push(pidl);
+        }
+        let pidl_refs = pidls
+            .iter()
+            .map(|pidl| *pidl as *const _)
+            .collect::<Vec<_>>();
+        let items_result = SHCreateShellItemArrayFromIDLists(&pidl_refs);
+        for pidl in pidls {
+            CoTaskMemFree(Some(pidl as *const c_void));
+        }
+        let items: IShellItemArray =
+            items_result.map_err(|error| format!("无法创建 Windows Shell 项目数组：{error}"))?;
         let menu: IContextMenu = items
             .BindToHandler(None::<&IBindCtx>, &BHID_SFUIObject)
             .map_err(|error| format!("无法读取 Windows 右键菜单：{error}"))?;
@@ -270,7 +290,7 @@ unsafe extern "system" fn deferred_menu_subclass_proc(
         if let Some(pending) = pending
             && pending.hwnd == hwnd.0 as isize
         {
-            let result = show_native_context_menu_for_hwnd(hwnd, &pending.path);
+            let result = show_native_context_menu_for_hwnd(hwnd, &pending.paths);
             let _ = pending.sender.send(result);
         }
         return LRESULT(0);
@@ -371,8 +391,10 @@ mod tests {
             let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
             let _ = SetWindowSubclass(hwnd, Some(dismiss_menu_proc), TEST_SUBCLASS_ID, 0);
             let _ = SetTimer(Some(hwnd), TEST_TIMER_ID, 500, None);
-            let result =
-                show_native_context_menu_for_hwnd(hwnd, Path::new(env!("CARGO_MANIFEST_DIR")));
+            let result = show_native_context_menu_for_hwnd(
+                hwnd,
+                &[PathBuf::from(env!("CARGO_MANIFEST_DIR"))],
+            );
             let _ = RemoveWindowSubclass(hwnd, Some(dismiss_menu_proc), TEST_SUBCLASS_ID);
             let _ = DestroyWindow(hwnd);
             assert!(result.is_ok(), "{result:?}");
