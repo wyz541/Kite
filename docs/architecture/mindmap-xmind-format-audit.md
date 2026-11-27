@@ -1,10 +1,10 @@
 # XMind 图结构与连线格式兼容性审计
 
 - 状态：Core foundation 已实现，XMind 27.01 视觉复核待完成
-- Issues：#212、#213
+- Issues：#212、#213、#214、#215
 - 设计讨论：#201
 - 实现：`src/mindmap/graph_style.rs`
-- 测试：`tests/mindmap_graph_style.rs`
+- 测试：`tests/mindmap_graph_style.rs`、`tests/mindmap_markers_todo.rs`
 
 ## 结论摘要
 
@@ -32,6 +32,8 @@ Kite 当前只修改已知字段，不把 typed model 反向序列化成整棵�
 3. XMind style key registry
    - 确认存在 `line-class`、`line-corner`、`line-width`、`line-color`、`line-pattern`
    - 确认存在 `shape-corner`，但它属于主题形状，不是 connector radius
+
+主题 marker 与 TODO 的字段矩阵和不确定项见 [XMind 主题标记与 TODO 语义](mindmap-markers-todo.md)。
 
 兼容基线仍是讨论 #185 锁定的 XMind for macOS `27.01.05089`。本机当前安装的是 `26.05.01107`，所以本文把 26.05 已确认的内容标为“已观察”，把仅有 key、缺少稳定夹具的内容标为“实验性”；正式宣称一比一前必须在 27.01 上复验。
 

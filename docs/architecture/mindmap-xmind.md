@@ -56,8 +56,14 @@ AtomicFile 原子写入
 - `XmindPackage::save_as`
 - `XmindPackage::document_graph_style`
 - `XmindPackage::apply_document_graph_style`
+- `XmindPackage::topic_markers`
+- `XmindPackage::topic_header_markers`
+- `XmindPackage::apply_topic_markers`
+- `XmindPackage::remove_topic_marker`
+- `XmindPackage::topic_todo`
+- `XmindPackage::apply_topic_todo`
 
-图结构和连线的字段映射、兼容性状态与 UI 消费约束见 [XMind 图结构与连线格式兼容性审计](mindmap-xmind-format-audit.md)。
+图结构、连线、主题 marker 和 TODO 的字段映射、兼容性状态与 UI 消费约束见 [XMind 图结构与连线格式兼容性审计](mindmap-xmind-format-audit.md) 和 [XMind 主题标记与 TODO 语义](mindmap-markers-todo.md)。
 
 后续应在此模块上增加 typed topic model、命令栈和布局场景，而不是让 UI 直接操作 `serde_json::Value`。
 
