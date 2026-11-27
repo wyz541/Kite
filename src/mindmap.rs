@@ -14,6 +14,7 @@ pub use date::{
     DateDisplayFormat, DateFormatError, DateInsertionError, DateInsertionPlacement,
     DateInsertionRequest, DateInsertionResult, DateInsertionTarget, DateLocale, DatePartOrder,
     DatePrecision, DateStyle, StaticDateValue, SystemDatePattern, insert_date_into_topic,
+    insert_text_into_topic,
 };
 pub use graph_style::{
     ConnectorColor, ConnectorCornerRadius, ConnectorKind, ConnectorLinePattern, ConnectorStyle,
@@ -35,8 +36,8 @@ pub use topic_style::{
     apply_topic_style, read_topic_style,
 };
 pub use topic_todo::{
-    CompletionRendering, OpacitySemantics, TextDecoration as TodoTextDecoration, TodoStatus,
-    TodoUpdate, TopicTodoError, TopicTodoPatch, TopicTodoState, VisualTone,
+    CompletionRendering, OpacitySemantics, TaskPresentation, TextDecoration as TodoTextDecoration,
+    TodoStatus, TodoUpdate, TopicTodoError, TopicTodoPatch, TopicTodoState, VisualTone,
     apply_topic_todo as apply_topic_todo_to_content,
     read_topic_todo as read_topic_todo_from_content,
 };

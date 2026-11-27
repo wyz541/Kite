@@ -1,0 +1,291 @@
+{
+  "connector": {
+    "color": "#33669980",
+    "corner_radius": "12",
+    "kind": "rounded-elbow",
+    "pattern": "dash",
+    "width": "2pt"
+  },
+  "root_id": "root",
+  "schema_version": 1,
+  "structure": "logic-right",
+  "structure_class": "org.xmind.ui.logic.right",
+  "topics": [
+    {
+      "children": [
+        "alpha",
+        "modern-task",
+        "legacy-task",
+        "task-string-progress",
+        "empty-title"
+      ],
+      "depth": 0,
+      "id": "root",
+      "markers": [],
+      "opaque_marker_count": 0,
+      "parent_id": null,
+      "shape_class": null,
+      "style": {
+        "alignment": "center",
+        "border_color": "#D0D7DE",
+        "border_pattern": "solid",
+        "border_width": 2,
+        "corner_radius": 8,
+        "fill_color": "#F6F8FA",
+        "font_family": "PingFang SC",
+        "font_size": 16,
+        "font_weight": "bold",
+        "italic": false,
+        "strike": false,
+        "text_color": null,
+        "underline": false
+      },
+      "task": null,
+      "title": "平台对等验收"
+    },
+    {
+      "children": [
+        "alpha-child"
+      ],
+      "depth": 1,
+      "id": "alpha",
+      "markers": [
+        {
+          "family": "priority",
+          "id": "priority-1",
+          "label": "P1",
+          "opaque": false
+        },
+        {
+          "family": "flag",
+          "id": "flag-red",
+          "label": "⚑",
+          "opaque": false
+        },
+        {
+          "family": "other",
+          "id": "future-marker",
+          "label": "MA",
+          "opaque": true
+        }
+      ],
+      "opaque_marker_count": 2,
+      "parent_id": "root",
+      "shape_class": "org.xmind.ui.topic.callout",
+      "style": {
+        "alignment": "left",
+        "border_color": "#C58A00",
+        "border_pattern": "dash",
+        "border_width": 3,
+        "corner_radius": 18,
+        "fill_color": "#FFF8E1",
+        "font_family": "Avenir Next",
+        "font_size": 14,
+        "font_weight": "600",
+        "italic": true,
+        "strike": true,
+        "text_color": "#1F2328",
+        "underline": true
+      },
+      "task": null,
+      "title": "Alpha"
+    },
+    {
+      "children": [],
+      "depth": 2,
+      "id": "alpha-child",
+      "markers": [
+        {
+          "family": "star",
+          "id": "star-blue",
+          "label": "★",
+          "opaque": false
+        }
+      ],
+      "opaque_marker_count": 0,
+      "parent_id": "alpha",
+      "shape_class": null,
+      "style": {
+        "alignment": null,
+        "border_color": null,
+        "border_pattern": null,
+        "border_width": 1,
+        "corner_radius": null,
+        "fill_color": null,
+        "font_family": null,
+        "font_size": 12.5,
+        "font_weight": null,
+        "italic": false,
+        "strike": false,
+        "text_color": null,
+        "underline": false
+      },
+      "task": null,
+      "title": "Alpha child"
+    },
+    {
+      "children": [],
+      "depth": 1,
+      "id": "modern-task",
+      "markers": [
+        {
+          "family": "task",
+          "id": "task-start",
+          "label": "○",
+          "opaque": false
+        }
+      ],
+      "opaque_marker_count": 0,
+      "parent_id": "root",
+      "shape_class": null,
+      "style": {
+        "alignment": null,
+        "border_color": "#0969DA",
+        "border_pattern": null,
+        "border_width": 1.5,
+        "corner_radius": null,
+        "fill_color": "#DDF4FF",
+        "font_family": null,
+        "font_size": 12.5,
+        "font_weight": null,
+        "italic": false,
+        "strike": false,
+        "text_color": null,
+        "underline": false
+      },
+      "task": {
+        "effectiveProgress": 1,
+        "effectiveStatus": "done",
+        "hasConflict": true,
+        "legacyProgress": 0,
+        "legacyStatus": "not-started",
+        "source": "modern+legacy",
+        "taskDueDate": "2026-11-30",
+        "taskPresentation": "todo-checkbox",
+        "taskProgress": 0.875,
+        "taskStartDate": "2026-11-27",
+        "todoProgress": 1,
+        "todoStatus": "done"
+      },
+      "title": "Modern task wins"
+    },
+    {
+      "children": [],
+      "depth": 1,
+      "id": "legacy-task",
+      "markers": [
+        {
+          "family": "task",
+          "id": "task-half",
+          "label": "50%",
+          "opaque": false
+        }
+      ],
+      "opaque_marker_count": 0,
+      "parent_id": "root",
+      "shape_class": null,
+      "style": {
+        "alignment": null,
+        "border_color": null,
+        "border_pattern": null,
+        "border_width": 1,
+        "corner_radius": null,
+        "fill_color": null,
+        "font_family": null,
+        "font_size": 12.5,
+        "font_weight": null,
+        "italic": false,
+        "strike": false,
+        "text_color": null,
+        "underline": false
+      },
+      "task": {
+        "effectiveProgress": 0.5,
+        "effectiveStatus": "in-progress",
+        "hasConflict": false,
+        "legacyProgress": 0.5,
+        "legacyStatus": "in-progress",
+        "source": "legacy",
+        "taskDueDate": null,
+        "taskPresentation": null,
+        "taskProgress": null,
+        "taskStartDate": null,
+        "todoProgress": null,
+        "todoStatus": null
+      },
+      "title": "Legacy marker fallback"
+    },
+    {
+      "children": [],
+      "depth": 1,
+      "id": "task-string-progress",
+      "markers": [],
+      "opaque_marker_count": 0,
+      "parent_id": "root",
+      "shape_class": null,
+      "style": {
+        "alignment": null,
+        "border_color": null,
+        "border_pattern": null,
+        "border_width": 1,
+        "corner_radius": null,
+        "fill_color": null,
+        "font_family": null,
+        "font_size": 12.5,
+        "font_weight": null,
+        "italic": false,
+        "strike": false,
+        "text_color": null,
+        "underline": false
+      },
+      "task": {
+        "effectiveProgress": 0.5,
+        "effectiveStatus": "paused",
+        "hasConflict": false,
+        "legacyProgress": null,
+        "legacyStatus": null,
+        "source": "modern",
+        "taskDueDate": null,
+        "taskPresentation": "todo-progress",
+        "taskProgress": null,
+        "taskStartDate": null,
+        "todoProgress": 0.5,
+        "todoStatus": "paused"
+      },
+      "title": "String progress"
+    },
+    {
+      "children": [],
+      "depth": 1,
+      "id": "empty-title",
+      "markers": [
+        {
+          "family": "tag",
+          "id": "tag-release",
+          "label": "#",
+          "opaque": false
+        }
+      ],
+      "opaque_marker_count": 0,
+      "parent_id": "root",
+      "shape_class": null,
+      "style": {
+        "alignment": null,
+        "border_color": null,
+        "border_pattern": null,
+        "border_width": 1,
+        "corner_radius": null,
+        "fill_color": null,
+        "font_family": null,
+        "font_size": 12.5,
+        "font_weight": null,
+        "italic": false,
+        "strike": false,
+        "text_color": null,
+        "underline": false
+      },
+      "task": null,
+      "title": "未命名主题"
+    }
+  ]
+}

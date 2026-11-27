@@ -53,6 +53,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dunce = "1"
 encoding_rs = "0.8.42"
 flate2 = "1.1.10"
+fontdb = "0.23.0"
 dirs = "6"
 grep-matcher = "0.1.9"
 grep-regex = "0.1.14"

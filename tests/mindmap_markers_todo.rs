@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use kite_core::mindmap::{
     MarkerEntry, MarkerFamily, MarkerKind, OpacitySemantics, PriorityMarker, SlotUpdate,
-    TaskProgress, TodoStatus, TodoTextDecoration, TodoUpdate, TopicMarkerError, TopicMarkerPatch,
-    TopicTodoPatch, TopicTodoState, VisualTone, XmindPackage,
+    TaskPresentation, TaskProgress, TodoStatus, TodoTextDecoration, TodoUpdate, TopicMarkerError,
+    TopicMarkerPatch, TopicTodoPatch, TopicTodoState, VisualTone, XmindPackage,
 };
 use serde_json::{Value, json};
 use zip::write::SimpleFileOptions;
@@ -342,6 +342,180 @@ fn paused_progress_has_a_distinct_status_and_no_completion_style() {
 }
 
 #[test]
+fn modern_task_fields_take_precedence_over_conflicting_legacy_markers() {
+    let package = XmindPackage::from_bytes(synthetic_package()).expect("parse package");
+
+    let checkbox = package
+        .topic_todo(0, "topic-checkbox")
+        .expect("read checkbox task");
+    assert_eq!(checkbox.status, TodoStatus::NotStarted);
+    assert_eq!(checkbox.progress, Some(TaskProgress::Start));
+    assert_eq!(checkbox.presentation, Some(TaskPresentation::TodoCheckbox));
+    assert_eq!(checkbox.start_date.as_deref(), Some("2026-01-02T03:04:05Z"));
+    assert_eq!(checkbox.due_date.as_deref(), Some("2026-01-09"));
+    assert_eq!(
+        checkbox.markers.task_progress(),
+        Some(TaskProgress::Done),
+        "the conflicting legacy marker remains inspectable"
+    );
+
+    let progress = package
+        .topic_todo(0, "topic-progress")
+        .expect("read progress task");
+    assert_eq!(progress.status, TodoStatus::InProgress { eighths: 3 });
+    assert_eq!(progress.progress, Some(TaskProgress::ThreeEighths));
+    assert_eq!(progress.presentation, Some(TaskPresentation::TodoProgress));
+    assert_eq!(
+        progress.markers.task_progress(),
+        Some(TaskProgress::Done),
+        "modern progress must win over a conflicting legacy task-done marker"
+    );
+
+    let planned = package
+        .topic_todo(0, "topic-planned")
+        .expect("read planned task");
+    assert_eq!(planned.status, TodoStatus::InProgress { eighths: 5 });
+    assert_eq!(planned.progress, Some(TaskProgress::FiveEighths));
+    assert_eq!(planned.presentation, Some(TaskPresentation::PlannedTask));
+
+    let done = package
+        .topic_todo(0, "topic-modern-done")
+        .expect("read modern done task");
+    assert_eq!(done.status, TodoStatus::Done);
+    assert_eq!(done.progress, Some(TaskProgress::Done));
+    assert_eq!(
+        done.markers.task_progress(),
+        Some(TaskProgress::Start),
+        "modern done/1 must win over a conflicting legacy task-start marker"
+    );
+
+    assert_eq!(TaskProgress::from_ratio(0.0), Some(TaskProgress::Start));
+    assert_eq!(TaskProgress::from_ratio(0.01), Some(TaskProgress::Eighth));
+    assert_eq!(
+        TaskProgress::from_ratio(0.375),
+        Some(TaskProgress::ThreeEighths)
+    );
+    assert_eq!(
+        TaskProgress::from_ratio(0.99),
+        Some(TaskProgress::SevenEighths)
+    );
+    assert_eq!(TaskProgress::from_ratio(1.0), Some(TaskProgress::Done));
+    assert_eq!(TaskProgress::from_ratio(f64::NAN), None);
+    assert_eq!(TaskProgress::from_ratio(1.01), None);
+}
+
+#[test]
+fn todo_updates_keep_modern_fields_legacy_markers_and_unknown_data_in_sync() {
+    let mut package = XmindPackage::from_bytes(synthetic_package()).expect("parse package");
+    let task_before = find_topic(package.content(), "topic-checkbox")["task"].clone();
+    let notes_before = find_topic(package.content(), "topic-checkbox")["notes"].clone();
+    let future_before =
+        find_topic(package.content(), "topic-checkbox")["futureTaskTopicField"].clone();
+
+    let completed = package
+        .apply_topic_todo(
+            0,
+            "topic-checkbox",
+            &TopicTodoPatch {
+                update: TodoUpdate::SetCompleted(true),
+            },
+        )
+        .expect("complete modern checkbox");
+    assert_eq!(completed.status, TodoStatus::Done);
+    assert_eq!(completed.presentation, Some(TaskPresentation::TodoCheckbox));
+
+    let topic = find_topic(package.content(), "topic-checkbox");
+    assert_eq!(topic["taskPresentation"], json!("todo-checkbox"));
+    assert_eq!(topic["todoStatus"], json!("done"));
+    assert_eq!(topic["todoProgress"], json!(1.0));
+    assert_eq!(topic["taskProgress"], json!(1.0));
+    assert_eq!(
+        topic["markers"],
+        json!([{
+            "markerId": "task-done",
+            "futureTaskMarker": {"kept": true}
+        }])
+    );
+    assert_eq!(topic["task"], task_before);
+    assert_eq!(topic["notes"], notes_before);
+    assert_eq!(topic["futureTaskTopicField"], future_before);
+
+    let path = test_path("modern-task-save-reopen");
+    package.save_as(&path).expect("save modern task");
+    let mut reopened = XmindPackage::open(&path).expect("reopen modern task");
+    let reopened_state = reopened
+        .topic_todo(0, "topic-checkbox")
+        .expect("read reopened modern task");
+    assert_eq!(reopened_state.status, TodoStatus::Done);
+    assert_eq!(
+        reopened_state.start_date.as_deref(),
+        Some("2026-01-02T03:04:05Z")
+    );
+    assert_eq!(reopened_state.due_date.as_deref(), Some("2026-01-09"));
+    assert_eq!(
+        find_topic(reopened.content(), "topic-checkbox")["task"],
+        task_before
+    );
+    assert_eq!(
+        find_topic(reopened.content(), "topic-checkbox")["notes"],
+        notes_before
+    );
+
+    let restored = reopened
+        .apply_topic_todo(
+            0,
+            "topic-checkbox",
+            &TopicTodoPatch {
+                update: TodoUpdate::SetCompleted(false),
+            },
+        )
+        .expect("uncomplete modern checkbox");
+    assert_eq!(restored.status, TodoStatus::NotStarted);
+    let topic = find_topic(reopened.content(), "topic-checkbox");
+    assert_eq!(topic["todoStatus"], json!("todo"));
+    assert_eq!(topic["todoProgress"], json!(0.0));
+    assert_eq!(topic["taskProgress"], json!(0.0));
+    assert_eq!(
+        topic["markers"],
+        json!([{
+            "markerId": "task-start",
+            "futureTaskMarker": {"kept": true}
+        }])
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn paused_modern_task_preserves_numeric_progress_and_uses_legacy_pause_marker() {
+    let mut package = XmindPackage::from_bytes(synthetic_package()).expect("parse package");
+    let state = package
+        .apply_topic_todo(
+            0,
+            "topic-progress",
+            &TopicTodoPatch {
+                update: TodoUpdate::SetProgress(TaskProgress::Paused),
+            },
+        )
+        .expect("pause modern task");
+    assert_eq!(state.status, TodoStatus::Paused);
+    assert_eq!(state.progress, Some(TaskProgress::Paused));
+    assert_eq!(state.presentation, Some(TaskPresentation::TodoProgress));
+
+    let topic = find_topic(package.content(), "topic-progress");
+    assert_eq!(topic["taskPresentation"], json!("todo-progress"));
+    assert_eq!(topic["todoStatus"], json!("todo"));
+    assert_eq!(topic["todoProgress"], json!(0.375));
+    assert_eq!(topic["taskProgress"], json!(0.375));
+    assert_eq!(topic["markers"][0]["markerId"], json!("task-pause"));
+
+    let reopened = package
+        .topic_todo(0, "topic-progress")
+        .expect("reread paused modern task");
+    assert_eq!(reopened.status, TodoStatus::Paused);
+}
+
+#[test]
 fn capability_fixture_root_accepts_header_markers_without_changing_its_subtree() {
     let mut package = XmindPackage::open(&fixture_path(UI_FIXTURE)).expect("open UI fixture");
     let manifest = ui_fixture_manifest();
@@ -506,6 +680,62 @@ fn synthetic_package() -> Vec<u8> {
                             "title": "No markers",
                             "task": {"status": "opaque", "future": true},
                             "children": {"attached": []}
+                        },
+                        {
+                            "id": "topic-checkbox",
+                            "class": "topic",
+                            "title": "Modern checkbox",
+                            "taskPresentation": "todo-checkbox",
+                            "todoStatus": "todo",
+                            "todoProgress": 0,
+                            "taskProgress": 0,
+                            "taskStartDate": "2026-01-02T03:04:05Z",
+                            "taskDueDate": "2026-01-09",
+                            "markers": [
+                                {
+                                    "markerId": "task-done",
+                                    "futureTaskMarker": {"kept": true}
+                                }
+                            ],
+                            "task": {
+                                "source": "opaque",
+                                "unknown": {"kept": true}
+                            },
+                            "notes": {
+                                "plain": {"content": "Modern task notes"},
+                                "futureNotes": "kept"
+                            },
+                            "futureTaskTopicField": {"kept": true}
+                        },
+                        {
+                            "id": "topic-progress",
+                            "class": "topic",
+                            "title": "Modern progress",
+                            "taskPresentation": "todo-progress",
+                            "todoStatus": "todo",
+                            "todoProgress": 0.375,
+                            "taskProgress": 0.375,
+                            "markers": [{"markerId": "task-done"}]
+                        },
+                        {
+                            "id": "topic-planned",
+                            "class": "topic",
+                            "title": "Planned task",
+                            "taskPresentation": "planned-task",
+                            "todoStatus": "todo",
+                            "todoProgress": 0.625,
+                            "taskProgress": 0.625,
+                            "markers": []
+                        },
+                        {
+                            "id": "topic-modern-done",
+                            "class": "topic",
+                            "title": "Modern done",
+                            "taskPresentation": "todo-progress",
+                            "todoStatus": "done",
+                            "todoProgress": 1,
+                            "taskProgress": 1,
+                            "markers": [{"markerId": "task-start"}]
                         }
                     ]
                 }

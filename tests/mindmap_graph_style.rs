@@ -82,6 +82,24 @@ fn ui_fixture_exposes_logic_right_without_becoming_dirty() {
 }
 
 #[test]
+fn connector_read_uses_root_fields_before_theme_field_fallbacks() {
+    let package = XmindPackage::from_bytes(synthetic_package()).expect("parse package");
+    let connector = package
+        .document_graph_style(0)
+        .expect("read layered connector")
+        .connector
+        .expect("root and theme connector");
+
+    assert_eq!(connector.kind, ConnectorKind::Curved);
+    assert_eq!(connector.width, Some(ConnectorWidth::new("1pt").unwrap()));
+    assert_eq!(
+        connector.color,
+        Some(ConnectorColor::new("#AABBCC").unwrap()),
+        "color is inherited from the theme when root local style omits it"
+    );
+}
+
+#[test]
 fn connector_reads_theme_central_topic_when_root_style_is_absent() {
     let mut package = XmindPackage::from_bytes(synthetic_package()).expect("parse package");
     package
@@ -212,11 +230,46 @@ fn synthetic_theme_edit_preserves_unknown_json_and_unrelated_styles() {
         content[0]["theme"]["centralTopic"]["properties"]["unknown-central-property"],
         json!("kept")
     );
+    for category in ["centralTopic", "mainTopic", "subTopic", "level3"] {
+        assert_eq!(
+            content[0]["theme"][category]["properties"]["line-class"],
+            json!("org.xmind.branchConnection.straight"),
+            "document connector patch must be synchronized to theme.{category}"
+        );
+        assert_eq!(
+            content[0]["theme"][category]["properties"]["line-width"],
+            json!("3pt")
+        );
+        assert_eq!(
+            content[0]["theme"][category]["properties"]["line-color"],
+            json!("#00000066")
+        );
+        assert_eq!(
+            content[0]["theme"][category]["properties"]["line-pattern"],
+            json!("dash")
+        );
+        assert_eq!(
+            content[0]["theme"][category]["properties"]["line-corner"],
+            json!("4")
+        );
+    }
     assert_eq!(
-        content[0]["theme"]["mainTopic"]["properties"]["line-class"],
-        json!("org.xmind.branchConnection.elbow"),
-        "document edit must not rewrite the mainTopic style category"
+        content[0]["theme"]["mainTopic"]["properties"]["unknown-main-property"],
+        json!("kept")
     );
+    assert_eq!(
+        content[0]["theme"]["subTopic"]["properties"]["unknown-sub-property"],
+        json!("kept")
+    );
+    assert_eq!(
+        content[0]["theme"]["level3"]["properties"]["unknown-level-property"],
+        json!("kept")
+    );
+    assert_eq!(
+        content[0]["theme"]["map"],
+        json!({"properties": {"svg:fill": "#FFFFFF"}})
+    );
+    assert_eq!(content[0]["theme"]["futureThemeField"], json!("kept"));
     assert_eq!(
         content[0]["extensions"][0]["content"]["centralTopic"],
         json!("org.xmind.ui.map.clockwise"),
@@ -238,16 +291,99 @@ fn synthetic_theme_edit_preserves_unknown_json_and_unrelated_styles() {
         br#"{"activeSheetId":"sheet-1","futureMetadata":true}"#.to_vec()
     );
     let reopened = XmindPackage::open(&output).expect("reopen synthetic package");
+    for category in ["centralTopic", "mainTopic", "subTopic", "level3"] {
+        assert_eq!(
+            reopened.content()[0]["theme"][category]["properties"]["line-pattern"],
+            json!("dash")
+        );
+        assert_eq!(
+            reopened.content()[0]["theme"][category]["properties"]["line-color"],
+            json!("#00000066")
+        );
+    }
     assert_eq!(
-        reopened.content()[0]["theme"]["centralTopic"]["properties"]["line-pattern"],
-        json!("dash")
+        reopened.content()[0]["theme"]["subTopic"]["properties"]["unknown-sub-property"],
+        json!("kept")
     );
     assert_eq!(
-        reopened.content()[0]["theme"]["centralTopic"]["properties"]["line-color"],
-        json!("#00000066")
+        reopened.content()[0]["theme"]["level3"]["properties"]["unknown-level-property"],
+        json!("kept")
     );
 
     let _ = fs::remove_file(output);
+}
+
+#[test]
+fn theme_edit_creates_central_topic_but_does_not_invent_other_categories() {
+    let mut package = XmindPackage::from_bytes(synthetic_package()).expect("parse package");
+    package
+        .edit_content_json(|content| {
+            let theme = content[0]["theme"].as_object_mut().expect("theme object");
+            theme.remove("centralTopic");
+            theme.remove("subTopic");
+            theme.remove("level3");
+            Ok(())
+        })
+        .expect("remove optional theme categories");
+
+    package
+        .apply_document_graph_style(
+            0,
+            &DocumentGraphStylePatch {
+                structure: None,
+                connector: Some(ConnectorStylePatch {
+                    color: Some(ConnectorColor::new("#123456").unwrap()),
+                    ..ConnectorStylePatch::default()
+                }),
+            },
+        )
+        .expect("apply color to surviving theme categories");
+
+    let theme = &package.content()[0]["theme"];
+    assert_eq!(
+        theme["centralTopic"]["properties"]["line-color"],
+        json!("#123456")
+    );
+    assert_eq!(
+        theme["mainTopic"]["properties"]["line-color"],
+        json!("#123456")
+    );
+    assert!(theme.get("subTopic").is_none());
+    assert!(theme.get("level3").is_none());
+    assert_eq!(theme["futureThemeField"], json!("kept"));
+}
+
+#[test]
+fn graph_edit_does_not_create_a_theme_when_the_sheet_has_none() {
+    let mut package = XmindPackage::from_bytes(synthetic_package()).expect("parse package");
+    package
+        .edit_content_json(|content| {
+            content[0]
+                .as_object_mut()
+                .expect("sheet object")
+                .remove("theme");
+            Ok(())
+        })
+        .expect("remove theme");
+
+    package
+        .apply_document_graph_style(
+            0,
+            &DocumentGraphStylePatch {
+                structure: None,
+                connector: Some(ConnectorStylePatch {
+                    color: Some(ConnectorColor::new("#ABC123").unwrap()),
+                    ..ConnectorStylePatch::default()
+                }),
+            },
+        )
+        .expect("apply root-local color");
+
+    assert!(package.content()[0].get("theme").is_none());
+    assert_eq!(
+        package.content()[0]["rootTopic"]["style"]["properties"]["line-color"],
+        json!("#ABC123")
+    );
 }
 
 #[test]
@@ -394,6 +530,20 @@ fn synthetic_package() -> Vec<u8> {
                     "properties": {
                         "line-class": "org.xmind.branchConnection.elbow",
                         "unknown-main-property": "kept"
+                    }
+                },
+                "subTopic": {
+                    "id": "sub-style",
+                    "properties": {
+                        "line-class": "org.xmind.branchConnection.curve",
+                        "unknown-sub-property": "kept"
+                    }
+                },
+                "level3": {
+                    "id": "level3-style",
+                    "properties": {
+                        "line-class": "org.xmind.branchConnection.curve",
+                        "unknown-level-property": "kept"
                     }
                 },
                 "map": {

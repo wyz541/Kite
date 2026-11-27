@@ -6,15 +6,19 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
-use crate::mindmap_ffi::{MindmapGraphStructureDto, MindmapTopicMarkerDto, MindmapTopicStyleDto};
+use crate::mindmap_ffi::{
+    MindmapDatePartOrderDto, MindmapGraphStructureDto, MindmapTopicMarkerDto, MindmapTopicStyleDto,
+};
 
 const MIN_NODE_WIDTH: f32 = 168.0;
 const MAX_NODE_WIDTH: f32 = 320.0;
 const NODE_HEIGHT: f32 = 42.0;
 const HORIZONTAL_GAP: f32 = 74.0;
 const VERTICAL_GAP: f32 = 18.0;
+const VISIBLE_MARKER_LIMIT: usize = 8;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MindmapVisualStyle {
@@ -31,6 +35,8 @@ pub struct MindmapVisualStyle {
     pub border_pattern: Option<String>,
     pub corner_radius: Option<u16>,
     pub alignment: Option<String>,
+    pub line_height: Option<String>,
+    pub letter_spacing: Option<String>,
 }
 
 impl MindmapVisualStyle {
@@ -49,6 +55,8 @@ impl MindmapVisualStyle {
             border_pattern: style.border_pattern.clone(),
             corner_radius: style.corner_radius,
             alignment: style.alignment.clone(),
+            line_height: style.line_height.clone(),
+            letter_spacing: style.letter_spacing.clone(),
         }
     }
 
@@ -102,6 +110,12 @@ impl MindmapVisualStyle {
             .and_then(|value| value.get("fo:text-align"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        let line_height = properties
+            .and_then(|value| value.get("fo:line-height"))
+            .and_then(xmind_string);
+        let letter_spacing = properties
+            .and_then(|value| value.get("fo:letter-spacing"))
+            .and_then(xmind_string);
         Self {
             font_family: family,
             font_size,
@@ -120,8 +134,182 @@ impl MindmapVisualStyle {
             border_pattern,
             corner_radius,
             alignment,
+            line_height,
+            letter_spacing,
         }
     }
+}
+
+fn xmind_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse the numeric portion of an XMind measurement while preserving the raw
+/// value in the DTO for lossless writes.
+pub fn measurement_number(value: Option<&str>) -> Option<f64> {
+    let value = value?.trim();
+    let numeric = value
+        .trim_end_matches(|character: char| character.is_ascii_alphabetic() || character == '%')
+        .trim();
+    numeric.parse().ok()
+}
+
+/// GPUI does not expose CSS-like letter spacing. This produces a visual-only
+/// approximation with thin spaces while the persisted title remains unchanged.
+pub fn letter_spacing_preview(text: &str, spacing: Option<f64>) -> String {
+    let Some(spacing) = spacing.filter(|value| *value > 0.05) else {
+        return text.to_owned();
+    };
+    let spacer = if spacing >= 0.35 {
+        "\u{2009}\u{2009}"
+    } else {
+        "\u{2009}"
+    };
+    let mut output = String::with_capacity(text.len() + text.chars().count() * 2);
+    for (index, character) in text.chars().enumerate() {
+        if index > 0 {
+            output.push_str(spacer);
+        }
+        output.push(character);
+    }
+    output
+}
+
+/// Resolve the host's short-date order into a stable request for Core.
+pub fn system_date_pattern() -> (MindmapDatePartOrderDto, String) {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::RegKey;
+        use winreg::enums::HKEY_CURRENT_USER;
+
+        if let Ok(international) =
+            RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Control Panel\International")
+        {
+            let short_date = international
+                .get_value::<String, _>("sShortDate")
+                .unwrap_or_default();
+            let separator = international
+                .get_value::<String, _>("sDate")
+                .unwrap_or_else(|_| "/".to_string());
+            return parse_system_date_pattern(&short_date, &separator);
+        }
+    }
+    (MindmapDatePartOrderDto::YearMonthDay, "/".to_string())
+}
+
+/// Pure parser used by the Windows locale reader and regression tests.
+pub fn parse_system_date_pattern(
+    short_date: &str,
+    separator_hint: &str,
+) -> (MindmapDatePartOrderDto, String) {
+    let lower = short_date.to_ascii_lowercase();
+    let year = lower.find('y');
+    let month = lower.find('m');
+    let day = lower.find('d');
+    let order = match (year, month, day) {
+        (Some(year), Some(month), Some(day)) if year < month && month < day => {
+            MindmapDatePartOrderDto::YearMonthDay
+        }
+        (Some(year), Some(month), Some(day)) if month < day && day < year => {
+            MindmapDatePartOrderDto::MonthDayYear
+        }
+        (Some(year), Some(month), Some(day)) if day < month && month < year => {
+            MindmapDatePartOrderDto::DayMonthYear
+        }
+        _ => MindmapDatePartOrderDto::YearMonthDay,
+    };
+    let separator = separator_hint
+        .trim()
+        .chars()
+        .find(|character| !character.is_ascii_alphanumeric() && !character.is_whitespace())
+        .unwrap_or('/')
+        .to_string();
+    (order, separator)
+}
+
+/// Installed font families, cached for the lifetime of the process. The raw
+/// requested family remains in the document; this list is only for rendering
+/// fallback and the picker.
+pub fn system_font_families() -> Vec<String> {
+    static FONTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut database = fontdb::Database::new();
+            database.load_system_fonts();
+            let mut families = database
+                .faces()
+                .flat_map(|face| face.families.iter().map(|(family, _)| family.clone()))
+                .collect::<Vec<_>>();
+            families.sort_by_key(|family| family.to_ascii_lowercase());
+            families.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            if families.is_empty() {
+                families = vec![
+                    "Segoe UI".to_string(),
+                    "Arial".to_string(),
+                    "Calibri".to_string(),
+                    "Consolas".to_string(),
+                ];
+            }
+            families
+        })
+        .clone()
+}
+
+pub fn missing_font_family(requested: Option<&str>, available: &[String]) -> Option<String> {
+    let requested = requested?.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    let generic = [
+        "serif",
+        "sans-serif",
+        "monospace",
+        "cursive",
+        "fantasy",
+        "system-ui",
+    ];
+    let found = requested.split(',').map(str::trim).any(|candidate| {
+        generic
+            .iter()
+            .any(|name| candidate.eq_ignore_ascii_case(name))
+            || available
+                .iter()
+                .any(|family| family.eq_ignore_ascii_case(candidate))
+    });
+    (!found).then(|| requested.to_string())
+}
+
+pub fn resolve_render_font(
+    requested: Option<&str>,
+    available: &[String],
+    fallback: &str,
+) -> String {
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return fallback.to_string();
+    };
+    for candidate in requested.split(',').map(str::trim) {
+        if [
+            "serif",
+            "sans-serif",
+            "monospace",
+            "cursive",
+            "fantasy",
+            "system-ui",
+        ]
+        .iter()
+        .any(|name| candidate.eq_ignore_ascii_case(name))
+            || available
+                .iter()
+                .any(|family| family.eq_ignore_ascii_case(candidate))
+        {
+            return candidate.to_string();
+        }
+    }
+    fallback.to_string()
 }
 
 fn parse_measurement(value: &Value) -> Option<f64> {
@@ -158,7 +346,11 @@ impl MindmapMarker {
     }
 
     fn from_json(value: &Value) -> Option<Self> {
-        let marker_id = value.get("markerId")?.as_str()?.to_owned();
+        let marker_id = value
+            .get("markerId")?
+            .as_str()
+            .filter(|value| !value.is_empty())?
+            .to_owned();
         let family = marker_family(&marker_id).to_owned();
         Some(Self {
             marker_id: marker_id.clone(),
@@ -209,6 +401,10 @@ fn marker_label(marker_id: &str) -> String {
         "task-7oct" => "88%".to_string(),
         "task-done" => "✓".to_string(),
         "task-pause" => "Ⅱ".to_string(),
+        "symbol-wrong" => "⛔".to_string(),
+        "symbol-attention" => "⚠".to_string(),
+        "symbol-pause" => "Ⅱ".to_string(),
+        "symbol-ok" => "✓".to_string(),
         value if value.starts_with("flag-") => "⚑".to_string(),
         value if value.starts_with("star-") => "★".to_string(),
         value if value.starts_with("tag-") => "#".to_string(),
@@ -236,7 +432,125 @@ pub struct MindmapTopic {
     pub style: MindmapVisualStyle,
     pub shape_class: Option<String>,
     pub markers: Vec<MindmapMarker>,
+    pub opaque_marker_count: usize,
     pub is_complete: bool,
+    /// Flat read-only convenience fields consumed by the Windows inspector.
+    pub task_presentation: Option<String>,
+    pub todo_status: Option<String>,
+    pub todo_progress: Option<f64>,
+    /// Full normalized task semantics shared by the Windows and macOS parity
+    /// projections.
+    pub task: Option<MindmapTaskSemantics>,
+}
+
+/// XMind 27.1 task fields retained verbatim for canonical UI parity checks.
+///
+/// Modern top-level task fields take precedence over legacy `task-*` marker
+/// fallbacks. Unknown or conflicting values are normalized without rewriting the
+/// source document so both native renderers make the same decision.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MindmapTaskSemantics {
+    pub task_presentation: Option<String>,
+    pub todo_status: Option<String>,
+    pub todo_progress: Option<f64>,
+    pub task_progress: Option<f64>,
+    pub task_start_date: Option<String>,
+    pub task_due_date: Option<String>,
+    pub legacy_status: Option<String>,
+    pub legacy_progress: Option<f64>,
+    pub effective_status: Option<String>,
+    pub effective_progress: Option<f64>,
+    pub source: Option<String>,
+    pub has_conflict: bool,
+}
+
+impl MindmapTaskSemantics {
+    fn from_topic(object: &Map<String, Value>, markers: &[MindmapMarker]) -> Option<Self> {
+        let task_presentation = string_field(object, "taskPresentation");
+        let todo_status = string_field(object, "todoStatus");
+        let todo_progress = number_field(object, "todoProgress");
+        let task_progress = number_field(object, "taskProgress");
+        let task_start_date = string_field(object, "taskStartDate");
+        let task_due_date = string_field(object, "taskDueDate");
+
+        let (legacy_status, legacy_progress) = markers
+            .iter()
+            .find(|marker| marker.marker_id.starts_with("task-"))
+            .map(|marker| task_marker_state(&marker.marker_id))
+            .unwrap_or((None, None));
+
+        let modern_present = task_presentation.is_some()
+            || todo_status.is_some()
+            || todo_progress.is_some()
+            || task_progress.is_some()
+            || task_start_date.is_some()
+            || task_due_date.is_some();
+        let modern_progress = todo_progress.or(task_progress).map(normalize_progress);
+        let modern_status = todo_status
+            .as_deref()
+            .and_then(normalize_task_status)
+            .map(ToOwned::to_owned)
+            .or_else(|| modern_progress.and_then(status_from_progress))
+            .or_else(|| modern_present.then(|| "not-started".to_owned()));
+
+        if !modern_present && legacy_status.is_none() && legacy_progress.is_none() {
+            return None;
+        }
+
+        let effective_status = modern_status.clone().or_else(|| legacy_status.clone());
+        let effective_progress = modern_progress.or(legacy_progress);
+        let status_conflict = modern_status
+            .as_deref()
+            .zip(legacy_status.as_deref())
+            .is_some_and(|(modern, legacy)| modern != legacy);
+        let progress_conflict = modern_progress
+            .zip(legacy_progress)
+            .is_some_and(|(modern, legacy)| (modern - legacy).abs() > 0.000_001);
+        let source = match (
+            modern_present,
+            legacy_status.is_some() || legacy_progress.is_some(),
+        ) {
+            (true, true) => "modern+legacy",
+            (true, false) => "modern",
+            (false, true) => "legacy",
+            (false, false) => unreachable!(),
+        };
+
+        Some(Self {
+            task_presentation,
+            todo_status,
+            todo_progress: todo_progress.map(normalize_progress),
+            task_progress: task_progress.map(normalize_progress),
+            task_start_date,
+            task_due_date,
+            legacy_status,
+            legacy_progress,
+            effective_status,
+            effective_progress,
+            source: Some(source.to_owned()),
+            has_conflict: status_conflict || progress_conflict,
+        })
+    }
+
+    fn to_canonical_json(&self) -> Value {
+        canonical_object(vec![
+            (
+                "effectiveProgress",
+                optional_number(self.effective_progress),
+            ),
+            ("effectiveStatus", optional_string(&self.effective_status)),
+            ("hasConflict", Value::Bool(self.has_conflict)),
+            ("legacyProgress", optional_number(self.legacy_progress)),
+            ("legacyStatus", optional_string(&self.legacy_status)),
+            ("source", optional_string(&self.source)),
+            ("taskDueDate", optional_string(&self.task_due_date)),
+            ("taskPresentation", optional_string(&self.task_presentation)),
+            ("taskProgress", optional_number(self.task_progress)),
+            ("taskStartDate", optional_string(&self.task_start_date)),
+            ("todoProgress", optional_number(self.todo_progress)),
+            ("todoStatus", optional_string(&self.todo_status)),
+        ])
+    }
 }
 
 impl MindmapTopic {
@@ -245,12 +559,281 @@ impl MindmapTopic {
     }
 
     pub fn marker_summary(&self) -> String {
-        self.markers
+        let mut visible = self
+            .markers
             .iter()
-            .filter(|marker| !marker.is_task() || marker.marker_id == "task-done")
+            .filter(|marker| {
+                !marker.is_task() || matches!(marker.marker_id.as_str(), "task-done" | "task-pause")
+            })
             .map(|marker| marker.label.clone())
+            .collect::<Vec<_>>();
+        if self.is_complete && !visible.iter().any(|label| label == "✓") {
+            visible.insert(0, "✓".to_string());
+        }
+        let total = visible.len();
+        let mut summary = visible
+            .into_iter()
+            .take(VISIBLE_MARKER_LIMIT)
             .collect::<Vec<_>>()
-            .join(" · ")
+            .join(" ");
+        if total > VISIBLE_MARKER_LIMIT {
+            summary.push_str(&format!(" +{}", total - VISIBLE_MARKER_LIMIT));
+        }
+        summary
+    }
+
+    fn to_canonical_json(&self) -> Value {
+        let marker_values = self
+            .markers
+            .iter()
+            .map(|marker| {
+                canonical_object(vec![
+                    ("family", Value::String(marker.family.clone())),
+                    ("id", Value::String(marker.marker_id.clone())),
+                    ("label", Value::String(marker.label.clone())),
+                    ("opaque", Value::Bool(marker.family == "other")),
+                ])
+            })
+            .collect::<Vec<_>>();
+        canonical_object(vec![
+            (
+                "children",
+                Value::Array(
+                    self.child_ids
+                        .iter()
+                        .map(|id| Value::String(id.clone()))
+                        .collect(),
+                ),
+            ),
+            ("depth", json!(self.depth)),
+            ("id", Value::String(self.id.clone())),
+            ("markers", Value::Array(marker_values)),
+            ("opaque_marker_count", json!(self.opaque_marker_count)),
+            ("parent_id", optional_string(&self.parent_id)),
+            ("shape_class", optional_string(&self.shape_class)),
+            ("style", self.style.to_canonical_json()),
+            (
+                "task",
+                self.task
+                    .as_ref()
+                    .map_or(Value::Null, MindmapTaskSemantics::to_canonical_json),
+            ),
+            ("title", Value::String(self.title.clone())),
+        ])
+    }
+}
+
+impl MindmapVisualStyle {
+    fn to_canonical_json(&self) -> Value {
+        canonical_object(vec![
+            ("alignment", optional_string(&self.alignment)),
+            ("border_color", optional_string(&self.border_color)),
+            ("border_pattern", optional_string(&self.border_pattern)),
+            (
+                "border_width",
+                optional_number(Some(self.border_width.unwrap_or(1.0))),
+            ),
+            ("corner_radius", json!(self.corner_radius)),
+            ("fill_color", optional_string(&self.fill_color)),
+            ("font_family", optional_string(&self.font_family)),
+            (
+                "font_size",
+                optional_number(Some(self.font_size.unwrap_or(12.5))),
+            ),
+            ("font_weight", optional_string(&self.font_weight)),
+            ("italic", Value::Bool(self.italic)),
+            ("strike", Value::Bool(self.strike)),
+            ("text_color", optional_string(&self.text_color)),
+            ("underline", Value::Bool(self.underline)),
+        ])
+    }
+}
+
+impl MindmapCanonicalConnector {
+    fn to_canonical_json(&self) -> Value {
+        canonical_object(vec![
+            ("color", optional_string(&self.color)),
+            ("corner_radius", optional_string(&self.corner_radius)),
+            ("kind", optional_string(&self.kind)),
+            ("pattern", optional_string(&self.pattern)),
+            ("width", optional_string(&self.width)),
+        ])
+    }
+}
+
+fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn number_field(object: &Map<String, Value>, key: &str) -> Option<f64> {
+    let value = object.get(key)?;
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(value) => parse_percent_or_number(value),
+        _ => None,
+    }
+}
+
+fn parse_percent_or_number(value: &str) -> Option<f64> {
+    let value = value.trim();
+    if let Some(percent) = value.strip_suffix('%') {
+        return percent
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|value| value / 100.0);
+    }
+    value.parse().ok()
+}
+
+fn normalize_progress(value: f64) -> f64 {
+    let value = if value > 1.0 && value <= 100.0 {
+        value / 100.0
+    } else {
+        value
+    };
+    value.clamp(0.0, 1.0)
+}
+
+fn normalize_task_status(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "todo" | "not-started" | "not_started" | "notstarted" | "open" => Some("not-started"),
+        "in-progress" | "in_progress" | "inprogress" | "progress" | "started" => {
+            Some("in-progress")
+        }
+        "paused" | "blocked" | "on-hold" | "on_hold" => Some("paused"),
+        "done" | "completed" | "complete" => Some("done"),
+        _ => None,
+    }
+}
+
+fn status_from_progress(progress: f64) -> Option<String> {
+    let status = if progress >= 1.0 {
+        "done"
+    } else if progress > 0.0 {
+        "in-progress"
+    } else {
+        "not-started"
+    };
+    Some(status.to_owned())
+}
+
+fn task_marker_state(marker_id: &str) -> (Option<String>, Option<f64>) {
+    let progress = match marker_id {
+        "task-start" => Some(0.0),
+        "task-oct" => Some(1.0 / 8.0),
+        "task-quarter" => Some(2.0 / 8.0),
+        "task-3oct" => Some(3.0 / 8.0),
+        "task-half" => Some(4.0 / 8.0),
+        "task-5oct" => Some(5.0 / 8.0),
+        "task-3quar" => Some(6.0 / 8.0),
+        "task-7oct" => Some(7.0 / 8.0),
+        "task-done" => Some(1.0),
+        "task-pause" => None,
+        _ => None,
+    };
+    let status = if marker_id == "task-pause" {
+        "paused"
+    } else if progress.is_some_and(|progress| progress >= 1.0) {
+        "done"
+    } else if progress.is_some_and(|progress| progress > 0.0) {
+        "in-progress"
+    } else if progress.is_some() {
+        "not-started"
+    } else {
+        "in-progress"
+    };
+    (Some(status.to_owned()), progress)
+}
+
+fn optional_string(value: &Option<String>) -> Value {
+    value
+        .as_ref()
+        .map_or(Value::Null, |value| Value::String(value.clone()))
+}
+
+fn optional_number(value: Option<f64>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64
+    {
+        return json!(value as i64);
+    }
+    serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
+}
+
+fn canonical_object(entries: Vec<(&str, Value)>) -> Value {
+    let mut entries = entries;
+    entries.sort_by_key(|(key, _)| *key);
+    let mut object = Map::new();
+    for (key, value) in entries {
+        object.insert(key.to_owned(), value);
+    }
+    Value::Object(object)
+}
+
+fn structure_name(value: Option<&str>) -> String {
+    match value {
+        Some("org.xmind.ui.logic.right" | "org.xmind.ui.logic-chart.right") => "logic-right",
+        Some("org.xmind.ui.logic.left" | "org.xmind.ui.logic-chart.left") => "logic-left",
+        Some("org.xmind.ui.org-chart.down") => "org-chart",
+        Some("org.xmind.ui.tree.right") => "tree",
+        Some(value) if value.starts_with("org.xmind.ui.map") => "mind-map",
+        Some(_) => "unknown",
+        None => "unknown",
+    }
+    .to_owned()
+}
+
+fn connector_from_sheet(sheet: &Value) -> MindmapCanonicalConnector {
+    let properties = sheet
+        .pointer("/rootTopic/style/properties")
+        .and_then(Value::as_object)
+        .or_else(|| {
+            sheet
+                .pointer("/theme/centralTopic/properties")
+                .and_then(Value::as_object)
+        });
+    let Some(properties) = properties else {
+        return MindmapCanonicalConnector::default();
+    };
+    MindmapCanonicalConnector {
+        kind: properties
+            .get("line-class")
+            .and_then(Value::as_str)
+            .map(connector_kind_name),
+        corner_radius: property_string(properties, "line-corner"),
+        width: property_string(properties, "line-width"),
+        color: property_string(properties, "line-color"),
+        pattern: property_string(properties, "line-pattern"),
+    }
+}
+
+fn connector_kind_name(value: &str) -> String {
+    match value {
+        "org.xmind.branchConnection.curve" => "curved",
+        "org.xmind.branchConnection.straight" => "straight",
+        "org.xmind.branchConnection.elbow" => "elbow",
+        "org.xmind.branchConnection.roundedElbow" => "rounded-elbow",
+        _ => value,
+    }
+    .to_owned()
+}
+
+fn property_string(properties: &Map<String, Value>, key: &str) -> Option<String> {
+    match properties.get(key)? {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
     }
 }
 
@@ -258,23 +841,51 @@ impl MindmapTopic {
 pub struct MindmapTree {
     pub topics: BTreeMap<String, MindmapTopic>,
     pub root_id: Option<String>,
+    pub structure: String,
+    pub structure_class: Option<String>,
+    pub connector: MindmapCanonicalConnector,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MindmapCanonicalConnector {
+    pub kind: Option<String>,
+    pub corner_radius: Option<String>,
+    pub width: Option<String>,
+    pub color: Option<String>,
+    pub pattern: Option<String>,
 }
 
 impl MindmapTree {
     pub fn from_content_json(content_json: &str) -> Result<Self, String> {
         let root: Value = serde_json::from_str(content_json)
-            .map_err(|error| format!("content.json 不是有效 JSON：{error}"))?;
+            .map_err(|error| format!("invalid_json: content.json 不是有效 JSON：{error}"))?;
         let sheets = root
             .as_array()
-            .ok_or_else(|| "content.json 根节点必须是数组".to_string())?;
-        let root_topic = sheets
+            .ok_or_else(|| "invalid_root_shape: content.json 根节点必须是数组".to_string())?;
+        let sheet = sheets
             .first()
-            .and_then(|sheet| sheet.get("rootTopic"))
-            .ok_or_else(|| "content.json 不包含 rootTopic".to_string())?;
-        let mut tree = Self::default();
+            .ok_or_else(|| "missing_root_topic: content.json 不能为空".to_string())?;
+        let root_topic = sheet
+            .get("rootTopic")
+            .ok_or_else(|| "missing_root_topic: content.json 不包含 rootTopic".to_string())?;
+        let mut tree = Self {
+            structure: structure_name(
+                sheet
+                    .get("rootTopic")
+                    .and_then(|root| root.get("structureClass"))
+                    .and_then(Value::as_str),
+            ),
+            structure_class: sheet
+                .get("rootTopic")
+                .and_then(|root| root.get("structureClass"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            connector: connector_from_sheet(sheet),
+            ..Self::default()
+        };
         tree.walk_topic(root_topic, None, 0)?;
         if tree.root_id.is_none() {
-            return Err("rootTopic 无效".to_string());
+            return Err("missing_root_topic: rootTopic 无效".to_string());
         }
         Ok(tree)
     }
@@ -287,15 +898,15 @@ impl MindmapTree {
     ) -> Result<(), String> {
         let object = value
             .as_object()
-            .ok_or_else(|| "topic 必须是对象".to_string())?;
+            .ok_or_else(|| "invalid_topic: topic 必须是对象".to_string())?;
         let id = object
             .get("id")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "topic 缺少 id".to_string())?
+            .ok_or_else(|| "missing_topic_id: topic 缺少 id".to_string())?
             .to_owned();
         if self.topics.contains_key(&id) {
-            return Err(format!("topic id 重复：{id}"));
+            return Err(format!("duplicate_topic_id: topic id 重复：{id}"));
         }
         if depth == 0 {
             self.root_id = Some(id.clone());
@@ -321,16 +932,16 @@ impl MindmapTree {
                     .and_then(Value::as_str)
             })
             .map(ToOwned::to_owned);
-        let markers = object
+        let marker_values = object
             .get("markers")
             .and_then(Value::as_array)
-            .map(|markers| {
-                markers
-                    .iter()
-                    .filter_map(MindmapMarker::from_json)
-                    .collect::<Vec<_>>()
-            })
+            .cloned()
             .unwrap_or_default();
+        let markers = marker_values
+            .iter()
+            .filter_map(MindmapMarker::from_json)
+            .collect::<Vec<_>>();
+        let opaque_marker_count = marker_values.len().saturating_sub(markers.len());
         let child_values = object
             .get("children")
             .and_then(Value::as_object)
@@ -343,7 +954,16 @@ impl MindmapTree {
             .filter_map(|child| child.get("id").and_then(Value::as_str))
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
-        let is_complete = markers.iter().any(|marker| marker.marker_id == "task-done");
+        let task = MindmapTaskSemantics::from_topic(object, &markers);
+        let task_presentation = task
+            .as_ref()
+            .and_then(|task| task.task_presentation.clone());
+        let todo_status = task.as_ref().and_then(|task| task.todo_status.clone());
+        let todo_progress = task.as_ref().and_then(|task| task.todo_progress);
+        let is_complete = task
+            .as_ref()
+            .and_then(|task| task.effective_status.as_deref())
+            .is_some_and(|status| status == "done");
         self.topics.insert(
             id.clone(),
             MindmapTopic {
@@ -355,13 +975,57 @@ impl MindmapTree {
                 style,
                 shape_class,
                 markers,
+                opaque_marker_count,
                 is_complete,
+                task_presentation,
+                todo_status,
+                todo_progress,
+                task,
             },
         );
         for child in child_values {
             self.walk_topic(&child, Some(&id), depth + 1)?;
         }
         Ok(())
+    }
+
+    /// Stable projection consumed by the macOS and Windows UI parity tests.
+    ///
+    /// The projection walks sibling order (not map order), uses document IDs,
+    /// excludes paths/timestamps/random values, and embeds XMind 27.1 task and
+    /// graph fields so both native parsers can be checked against one golden.
+    pub fn canonical_projection(&self) -> Value {
+        let mut topics = Vec::new();
+        if let Some(root_id) = self.root_id.as_deref() {
+            self.collect_canonical_topics(root_id, &mut topics);
+        }
+        canonical_object(vec![
+            ("connector", self.connector.to_canonical_json()),
+            ("root_id", optional_string(&self.root_id)),
+            ("schema_version", json!(1)),
+            ("structure", Value::String(self.structure.clone())),
+            ("structure_class", optional_string(&self.structure_class)),
+            ("topics", Value::Array(topics)),
+        ])
+    }
+
+    pub fn canonical_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.canonical_projection()).map_err(|error| error.to_string())
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        let canonical = self.canonical_json()?;
+        Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
+    }
+
+    fn collect_canonical_topics(&self, id: &str, output: &mut Vec<Value>) {
+        let Some(topic) = self.topics.get(id) else {
+            return;
+        };
+        output.push(topic.to_canonical_json());
+        for child_id in &topic.child_ids {
+            self.collect_canonical_topics(child_id, output);
+        }
     }
 
     pub fn selected(&self, id: Option<&str>) -> Option<&MindmapTopic> {
@@ -501,6 +1165,14 @@ pub struct MindmapNodeLayout {
     pub depth: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MindmapEdgeAnchors {
+    pub start_x: f32,
+    pub start_y: f32,
+    pub end_x: f32,
+    pub end_y: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MindmapLayout {
     pub nodes: Vec<MindmapNodeLayout>,
@@ -515,6 +1187,43 @@ pub struct MindmapLayout {
 impl MindmapLayout {
     pub fn node(&self, id: &str) -> Option<&MindmapNodeLayout> {
         self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// Choose connectors on the node side that faces the other node. Org charts
+    /// and tree charts use vertical anchors; side layouts use the actual branch
+    /// direction so left-side mindmap branches and logic-left never cut through
+    /// their nodes.
+    pub fn edge_anchors(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+        structure: MindmapGraphStructureDto,
+    ) -> Option<MindmapEdgeAnchors> {
+        let parent = self.node(parent_id)?;
+        let child = self.node(child_id)?;
+        if structure == MindmapGraphStructureDto::OrgChart {
+            return Some(MindmapEdgeAnchors {
+                start_x: parent.center_x,
+                start_y: parent.center_y + parent.height / 2.0,
+                end_x: child.center_x,
+                end_y: child.center_y - child.height / 2.0,
+            });
+        }
+        if child.center_x < parent.center_x {
+            Some(MindmapEdgeAnchors {
+                start_x: parent.center_x - parent.width / 2.0,
+                start_y: parent.center_y,
+                end_x: child.center_x + child.width / 2.0,
+                end_y: child.center_y,
+            })
+        } else {
+            Some(MindmapEdgeAnchors {
+                start_x: parent.center_x + parent.width / 2.0,
+                start_y: parent.center_y,
+                end_x: child.center_x - child.width / 2.0,
+                end_y: child.center_y,
+            })
+        }
     }
 }
 
@@ -542,13 +1251,19 @@ impl<'a> LayoutEngine<'a> {
     }
 
     fn node_width(&self, topic: &MindmapTopic) -> f32 {
-        let chars = topic.title.chars().count().min(26) as f32;
+        let marker_chars = topic.marker_summary().chars().count().min(18) as f32;
+        let chars = (topic.title.chars().count() as f32 + marker_chars / 2.0).min(34.0);
         ((MIN_NODE_WIDTH + chars * 5.6) * self.zoom)
             .clamp(MIN_NODE_WIDTH * self.zoom, MAX_NODE_WIDTH * self.zoom)
     }
 
-    fn node_height(&self) -> f32 {
-        NODE_HEIGHT * self.zoom
+    fn node_height(&self, topic: &MindmapTopic) -> f32 {
+        let marker_row = if topic.marker_summary().is_empty() {
+            0.0
+        } else {
+            14.0
+        };
+        (NODE_HEIGHT + marker_row) * self.zoom
     }
 
     fn child_y_gap(&self) -> f32 {
@@ -590,7 +1305,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x: direction * depth as f32 * self.horizontal_step(),
                 center_y: y,
                 width: self.node_width(topic),
-                height: self.node_height(),
+                height: self.node_height(topic),
                 parent_id: topic.parent_id.clone(),
                 depth,
             },
@@ -646,7 +1361,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x: 0.0,
                 center_y: y,
                 width: self.node_width(root),
-                height: self.node_height(),
+                height: self.node_height(root),
                 parent_id: None,
                 depth: 0,
             },
@@ -681,7 +1396,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x: direction * depth as f32 * self.horizontal_step(),
                 center_y: y,
                 width: self.node_width(topic),
-                height: self.node_height(),
+                height: self.node_height(topic),
                 parent_id: topic.parent_id.clone(),
                 depth,
             },
@@ -721,7 +1436,7 @@ impl<'a> LayoutEngine<'a> {
                 center_x,
                 center_y,
                 width: self.node_width(topic),
-                height: self.node_height(),
+                height: self.node_height(topic),
                 parent_id: topic.parent_id.clone(),
                 depth,
             },

@@ -76,6 +76,29 @@ jobs:
       - name: Run Agent permission UI tests
         run: cargo test --locked --lib agent_permission_ui::tests
 
+      - name: Run Mindmap import and format tests
+        shell: pwsh
+        run: |
+          cargo test --locked --lib mindmap -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tests = @(
+            'mindmap_ffi_format',
+            'mindmap_graph_style',
+            'mindmap_import',
+            'mindmap_import_adapters',
+            'mindmap_import_corpus',
+            'mindmap_import_docx_txt',
+            'mindmap_import_service_ffi',
+            'mindmap_markers_todo',
+            'mindmap_topic_style_date',
+            'mindmap_windows_model',
+            'mindmap_xmind'
+          )
+          foreach ($test in $tests) {
+            cargo test --locked --test $test -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --features windows-ui,agent-fixture -- -D warnings
 

@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "title": "HTML Import Corpus",
+  "children": [
+    {
+      "title": "Overview",
+      "kind": {
+        "role": "structure",
+        "kind": {
+          "heading": {
+            "level": 1
+          }
+        }
+      },
+      "task": null,
+      "children": [
+        {
+          "title": "HTML sentence one is long enough.",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "HTML sentence two is long enough;",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "HTML sentence three is long enough.",
+          "kind": {
+            "role": "content",
+            "kind": "sentence",
+            "split_from_paragraph": true
+          },
+          "task": null,
+          "children": [],
+          "notes": [],
+          "links": [],
+          "attachments": [],
+          "tables": []
+        },
+        {
+          "title": "Details",
+          "kind": {
+            "role": "structure",
+            "kind": {
+              "heading": {
+                "level": 2
+              }
+            }
+          },
+          "task": null,
+          "children": [
+            {
+              "title": "Read the guide.",
+              "kind": {
+                "role": "content",
+                "kind": "sentence",
+                "split_from_paragraph": true
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "Keep v2.0.0 intact.",
+              "kind": {
+                "role": "content",
+                "kind": "sentence",
+                "split_from_paragraph": true
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "Alpha",
+              "kind": {
+                "role": "structure",
+                "kind": {
+                  "list_item": {
+                    "ordered": false,
+                    "level": 1
+                  }
+                }
+              },
+              "task": null,
+              "children": [],
+              "notes": [
+                {
+                  "text": "Alpha",
+                  "format": "plain",
+                  "label": "Original paragraph"
+                }
+              ],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "Beta",
+              "kind": {
+                "role": "structure",
+                "kind": {
+                  "list_item": {
+                    "ordered": false,
+                    "level": 1
+                  }
+                }
+              },
+              "task": null,
+              "children": [],
+              "notes": [
+                {
+                  "text": "Beta",
+                  "format": "plain",
+                  "label": "Original paragraph"
+                }
+              ],
+              "links": [],
+              "attachments": [],
+              "tables": []
+            },
+            {
+              "title": "Image: diagram",
+              "kind": {
+                "role": "content",
+                "kind": {
+                  "other": "image"
+                },
+                "split_from_paragraph": false
+              },
+              "task": null,
+              "children": [],
+              "notes": [],
+              "links": [
+                {
+                  "label": "diagram",
+                  "target": "https://example.com/html.png",
+                  "kind": "image"
+                }
+              ],
+              "attachments": [
+                {
+                  "name": "html.png",
+                  "media_type": null,
+                  "uri": "https://example.com/html.png",
+                  "data": null
+                }
+              ],
+              "tables": []
+            }
+          ],
+          "notes": [
+            {
+              "text": "Read the guide. Keep v2.0.0 intact.",
+              "format": "plain",
+              "label": "Original paragraph"
+            }
+          ],
+          "links": [
+            {
+              "label": "the guide",
+              "target": "https://example.com/html",
+              "kind": "hyperlink"
+            }
+          ],
+          "attachments": [],
+          "tables": [
+            {
+              "caption": null,
+              "headers": [
+                "Field",
+                "Value"
+              ],
+              "rows": [
+                [
+                  "Nodes",
+                  "3000"
+                ]
+              ]
+            }
+          ]
+        }
+      ],
+      "notes": [
+        {
+          "text": "HTML sentence one is long enough. HTML sentence two is long enough; HTML sentence three is long enough.",
+          "format": "plain",
+          "label": "Original paragraph"
+        }
+      ],
+      "links": [],
+      "attachments": [],
+      "tables": []
+    }
+  ],
+  "notes": [],
+  "links": [],
+  "attachments": [],
+  "tables": [],
+  "warnings": [
+    {
+      "code": "unsupported_element",
+      "severity": "warning",
+      "message": "Container <html> was traversed without a direct semantic mapping"
+    },
+    {
+      "code": "unsupported_element",
+      "severity": "warning",
+      "message": "Image is represented as a reference; no external resource was fetched"
+    }
+  ],
+  "stats": {
+    "split_fragments": 5,
+    "merged_fragments": 0,
+    "truncated_titles": 0,
+    "skipped_items": 0
+  }
+}

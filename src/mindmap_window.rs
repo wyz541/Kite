@@ -10,17 +10,20 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_fl
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kite_core::mindmap_ffi::{
-    self, MindmapConnectorKindDto, MindmapDatePlacementDto, MindmapDatePrecisionDto,
-    MindmapDateRequestDto, MindmapDateStyleDto, MindmapDateTargetDto, MindmapDocumentDto,
-    MindmapDocumentStyleDto, MindmapDocumentStylePatchDto, MindmapEditDto,
+    self, MindmapConnectorKindDto, MindmapDateKindDto, MindmapDatePlacementDto,
+    MindmapDatePrecisionDto, MindmapDateRequestDto, MindmapDateStyleDto, MindmapDateTargetDto,
+    MindmapDocumentDto, MindmapDocumentStyleDto, MindmapDocumentStylePatchDto, MindmapEditDto,
     MindmapGraphStructureDto, MindmapTodoDto, MindmapTodoStatusDto, MindmapTopicMarkersDto,
     MindmapTopicStyleDto,
 };
 use serde_json::Value;
 
 use crate::actions::*;
+use crate::mindmap_actions::MindmapToggleTodo;
 use crate::mindmap_ui_model::{
-    MindmapLayout, MindmapNodeLayout, MindmapOutlineRow, MindmapTopic, MindmapTree, topic_json,
+    MindmapLayout, MindmapNodeLayout, MindmapOutlineRow, MindmapTopic, MindmapTree,
+    letter_spacing_preview, measurement_number, missing_font_family, resolve_render_font,
+    system_date_pattern, system_font_families, topic_json,
 };
 
 #[derive(Clone, Debug)]
@@ -43,6 +46,9 @@ struct GraphDraft {
     structure: MindmapGraphStructureDto,
     connector: MindmapConnectorKindDto,
     corner_radius: u16,
+    width: String,
+    color: String,
+    pattern: String,
 }
 
 impl Default for GraphDraft {
@@ -51,6 +57,9 @@ impl Default for GraphDraft {
             structure: MindmapGraphStructureDto::LogicRight,
             connector: MindmapConnectorKindDto::Curved,
             corner_radius: 12,
+            width: "2pt".to_string(),
+            color: "#8F9BA8".to_string(),
+            pattern: "solid".to_string(),
         }
     }
 }
@@ -61,6 +70,7 @@ struct DateDraft {
     precision: MindmapDatePrecisionDto,
     target: MindmapDateTargetDto,
     placement: MindmapDatePlacementDto,
+    kind: MindmapDateKindDto,
 }
 
 impl Default for DateDraft {
@@ -70,6 +80,7 @@ impl Default for DateDraft {
             precision: MindmapDatePrecisionDto::DateOnly,
             target: MindmapDateTargetDto::Title,
             placement: MindmapDatePlacementDto::End,
+            kind: MindmapDateKindDto::Date,
         }
     }
 }
@@ -84,6 +95,7 @@ struct EdgeRender {
     color: Hsla,
     connector: MindmapConnectorKindDto,
     corner_radius: f32,
+    pattern: String,
 }
 
 pub struct MindmapWindow {
@@ -95,6 +107,8 @@ pub struct MindmapWindow {
     collapsed: BTreeSet<String>,
     search_input: Entity<InputState>,
     inline_input: Entity<InputState>,
+    date_input: Entity<InputState>,
+    time_input: Entity<InputState>,
     editing_id: Option<String>,
     graph: GraphDraft,
     style_draft: MindmapTopicStyleDto,
@@ -112,6 +126,7 @@ pub struct MindmapWindow {
     zen_mode: bool,
     copied_topic_json: Option<String>,
     copied_style: Option<MindmapTopicStyleDto>,
+    system_fonts: Vec<String>,
     undo_stack: Vec<MindmapSnapshot>,
     redo_stack: Vec<MindmapSnapshot>,
     status: SharedString,
@@ -150,6 +165,21 @@ impl MindmapWindow {
                 .clean_on_escape()
         });
         let inline_input = cx.new(|cx| InputState::new(window, cx).clean_on_escape());
+        let now = Local::now();
+        let date_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .placeholder("YYYY-MM-DD")
+                .clean_on_escape();
+            input.set_value(now.format("%Y-%m-%d").to_string(), window, cx);
+            input
+        });
+        let time_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .placeholder("HH:MM:SS")
+                .clean_on_escape();
+            input.set_value(now.format("%H:%M:%S").to_string(), window, cx);
+            input
+        });
         let search_subscription = cx.subscribe_in(
             &search_input,
             window,
@@ -188,6 +218,8 @@ impl MindmapWindow {
             collapsed: BTreeSet::new(),
             search_input,
             inline_input,
+            date_input,
+            time_input,
             editing_id: None,
             graph: GraphDraft::default(),
             style_draft: MindmapTopicStyleDto::default(),
@@ -196,6 +228,9 @@ impl MindmapWindow {
                 status: MindmapTodoStatusDto::NotStarted,
                 progress_eighths: None,
                 is_complete: false,
+                task_presentation: None,
+                todo_status: Some("todo".to_string()),
+                todo_progress: Some(0.0),
             },
             date: DateDraft::default(),
             zoom: 0.82,
@@ -209,6 +244,7 @@ impl MindmapWindow {
             zen_mode: false,
             copied_topic_json: None,
             copied_style: None,
+            system_fonts: system_font_families(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             status: "正在通过 Rust Core 读取 XMind…".into(),
@@ -274,7 +310,16 @@ impl MindmapWindow {
             Err(error) => self.fail(error.to_string()),
         }
         match mindmap_ffi::read_mindmap_topic_todo(path, 0, topic_id) {
-            Ok(todo) => self.todo = todo,
+            Ok(mut todo) => {
+                if let Some(topic) = self
+                    .tree
+                    .topics
+                    .get(&self.selected_id.clone().unwrap_or_default())
+                {
+                    merge_topic_task_fields(&mut todo, topic);
+                }
+                self.todo = todo;
+            }
             Err(error) => self.fail(error.to_string()),
         }
     }
@@ -350,7 +395,10 @@ impl MindmapWindow {
         {
             self.markers = markers;
         }
-        if let Ok(todo) = mindmap_ffi::read_mindmap_topic_todo(path, 0, topic_id) {
+        if let Ok(mut todo) = mindmap_ffi::read_mindmap_topic_todo(path, 0, topic_id.clone()) {
+            if let Some(topic) = self.tree.topics.get(&topic_id) {
+                merge_topic_task_fields(&mut todo, topic);
+            }
             self.todo = todo;
         }
     }
@@ -663,25 +711,18 @@ impl MindmapWindow {
         self.update_style(style, cx);
     }
 
-    fn update_graph(
-        &mut self,
-        structure: MindmapGraphStructureDto,
-        connector: MindmapConnectorKindDto,
-        corner_radius: u16,
-        cx: &mut Context<Self>,
-    ) {
+    fn update_graph(&mut self, graph: GraphDraft, cx: &mut Context<Self>) {
         let patch = MindmapDocumentStylePatchDto {
-            structure,
-            connector_kind: connector,
-            connector_corner_radius: Some(corner_radius),
+            structure: graph.structure,
+            connector_kind: graph.connector,
+            connector_corner_radius: Some(graph.corner_radius),
+            connector_width: Some(graph.width.clone()),
+            connector_color: Some(graph.color.clone()),
+            connector_pattern: Some(graph.pattern.clone()),
         };
         let path = self.path.display().to_string();
         let previous_graph = self.graph.clone();
-        self.graph = GraphDraft {
-            structure,
-            connector,
-            corner_radius,
-        };
+        self.graph = graph;
         if !self.run_document_operation(
             |expected| mindmap_ffi::update_mindmap_document_style(path, expected, 0, patch),
             cx,
@@ -751,21 +792,51 @@ impl MindmapWindow {
         );
     }
 
+    fn shift_date(&mut self, days: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let today = Local::now().date_naive();
+        let current = self.date_input.read(cx).value().trim().to_string();
+        let base = if days == 0 {
+            today
+        } else {
+            chrono::NaiveDate::parse_from_str(&current, "%Y-%m-%d").unwrap_or(today)
+        };
+        let next = base
+            .checked_add_signed(chrono::Duration::days(days))
+            .unwrap_or(today);
+        self.date_input.update(cx, |input, cx| {
+            input.set_value(next.format("%Y-%m-%d").to_string(), window, cx);
+        });
+        cx.notify();
+    }
+
     fn insert_date(&mut self, cx: &mut Context<Self>) {
         let Some(topic_id) = self.selected_id.clone() else {
             return;
         };
-        let today = Local::now().format("%Y-%m-%d").to_string();
+        let date = self.date_input.read(cx).value().trim().to_string();
+        let time = if matches!(self.date.precision, MindmapDatePrecisionDto::DateOnly) {
+            None
+        } else {
+            Some(self.time_input.read(cx).value().trim().to_string())
+        };
         let precision = self.date.precision;
+        let (system_date_order, system_date_separator) =
+            if matches!(self.date.style, MindmapDateStyleDto::System) {
+                let (order, separator) = system_date_pattern();
+                (Some(order), Some(separator))
+            } else {
+                (None, None)
+            };
         let request = MindmapDateRequestDto {
-            date: today,
-            time: None,
+            date,
+            time,
             style: self.date.style,
             precision,
             target: self.date.target,
             placement: self.date.placement,
-            system_date_order: None,
-            system_date_separator: None,
+            kind: self.date.kind,
+            system_date_order,
+            system_date_separator,
         };
         let previous = self.document.clone();
         match mindmap_ffi::insert_mindmap_date(
@@ -777,7 +848,11 @@ impl MindmapWindow {
         ) {
             Ok(result) => {
                 self.record_success(previous, result.document);
-                self.status = format!("已插入日期：{}", result.text).into();
+                self.status = if matches!(self.date.kind, MindmapDateKindDto::Due) {
+                    format!("已插入截止文本：{}（未映射 XMind deadline）", result.text).into()
+                } else {
+                    format!("已插入日期：{}", result.text).into()
+                };
             }
             Err(error) => self.fail(error.to_string()),
         }
@@ -798,7 +873,7 @@ impl MindmapWindow {
                 self.redo_stack.push(current);
                 match mindmap_ffi::open_mindmap_document(self.path.display().to_string()) {
                     Ok(document) => {
-                        self.apply_restored_document(document);
+                        self.apply_restored_document(document, cx);
                         self.status = "已撤销".into();
                     }
                     Err(error) => self.fail(error.to_string()),
@@ -826,7 +901,7 @@ impl MindmapWindow {
                 self.undo_stack.push(current);
                 match mindmap_ffi::open_mindmap_document(self.path.display().to_string()) {
                     Ok(document) => {
-                        self.apply_restored_document(document);
+                        self.apply_restored_document(document, cx);
                         self.status = "已重做".into();
                     }
                     Err(error) => self.fail(error.to_string()),
@@ -840,7 +915,8 @@ impl MindmapWindow {
         cx.notify();
     }
 
-    fn apply_restored_document(&mut self, document: MindmapDocumentDto) {
+    fn apply_restored_document(&mut self, document: MindmapDocumentDto, cx: &mut Context<Self>) {
+        let previous_structure = self.graph.structure;
         self.document = document;
         match MindmapTree::from_content_json(&self.document.content_json) {
             Ok(tree) => {
@@ -852,9 +928,13 @@ impl MindmapWindow {
                     self.selected_id = tree.root_id.clone();
                 }
                 self.tree = tree;
+                self.load_graph(cx);
                 self.rebuild_layout();
                 self.load_inspector_detached();
                 self.error = None;
+                if self.graph.structure != previous_structure {
+                    self.fit_canvas(cx);
+                }
             }
             Err(error) => self.fail(error),
         }
@@ -1229,6 +1309,12 @@ impl MindmapWindow {
                     .when(self.todo.is_complete, |this| this.line_through())
                     .child(title),
             )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(todo_status_label(&self.todo)),
+            )
             .child(section_title("图结构与连线"))
             .child(structure_controls(self, cx))
             .child(connector_controls(self, cx))
@@ -1236,6 +1322,17 @@ impl MindmapWindow {
             .child(priority_controls(self, cx))
             .child(progress_controls(self, cx))
             .child(generic_marker_controls(self, cx))
+            .when(self.markers.opaque_count > 0, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child(format!(
+                            "保留 {} 个未知/非对象 marker；Kite 不会改写其内容",
+                            self.markers.opaque_count
+                        )),
+                )
+            })
             .child(section_title("日期"))
             .child(date_controls(self, cx))
             .child(section_title("字体与节点格式"))
@@ -1373,6 +1470,11 @@ impl MindmapWindow {
                     move |bounds, _, window, _| {
                         for edge in &edges {
                             let mut builder = PathBuilder::stroke(px(edge.width));
+                            if let Some(dash_array) =
+                                connector_dash_array(&edge.pattern, edge.width)
+                            {
+                                builder = builder.dash_array(&dash_array);
+                            }
                             let start = point(
                                 px(bounds.origin.x.as_f32() + edge.from_x),
                                 px(bounds.origin.y.as_f32() + edge.from_y),
@@ -1554,10 +1656,39 @@ impl MindmapWindow {
                 cx.theme().foreground
             },
         );
-        let font_size = style.font_size.unwrap_or(13.0).clamp(9.0, 28.0) as f32;
+        let font_size = style.font_size.unwrap_or(13.0).clamp(8.0, 48.0) as f32;
+        let line_height = measurement_number(style.line_height.as_deref())
+            .unwrap_or(1.25)
+            .clamp(0.8, 2.5) as f32;
+        let letter_spacing = measurement_number(style.letter_spacing.as_deref());
+        let display_title = letter_spacing_preview(&topic.title, letter_spacing);
+        let alignment = text_align_for(style.alignment.as_deref());
+        let render_font =
+            resolve_render_font(style.font_family.as_deref(), &self.system_fonts, "Segoe UI");
         let marker = topic.marker_summary();
         let left = x - width / 2.0;
         let top = y - height / 2.0;
+        let checkbox_id = id.clone();
+        let checkbox = div()
+            .id(SharedString::from(format!("mindmap-todo-{id}")))
+            .flex_shrink_0()
+            .size(px(15.))
+            .rounded_sm()
+            .border_1()
+            .border_color(if topic.is_complete { text } else { border })
+            .when(topic.is_complete, |this| this.bg(text))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(rgb(0x111315))
+            .cursor_pointer()
+            .when(topic.is_complete, |this| this.child("✓"))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.selected_id = Some(checkbox_id.clone());
+                this.toggle_todo(cx);
+            }));
         let body = if editing {
             Input::new(&self.inline_input)
                 .aria_label("主题标题")
@@ -1565,45 +1696,64 @@ impl MindmapWindow {
                 .text_size(px(font_size))
                 .into_any_element()
         } else {
-            v_flex()
+            h_flex()
                 .min_w_0()
                 .w_full()
-                .gap_0p5()
+                .gap_1p5()
                 .items_center()
                 .child(
-                    div()
-                        .max_w_full()
-                        .truncate()
-                        .text_size(px(font_size))
-                        .text_color(text)
-                        .when(style.italic, |this| this.italic())
-                        .when(style.underline, |this| this.underline())
-                        .when(style.strike || topic.is_complete, |this| {
-                            this.line_through()
-                        })
-                        .when(
-                            style
-                                .font_weight
-                                .as_deref()
-                                .is_some_and(|weight| weight == "bold" || weight >= "600"),
-                            |this| this.font_weight(FontWeight::BOLD),
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .items_start()
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w_full()
+                                .truncate()
+                                .text_size(px(font_size))
+                                .line_height(relative(line_height))
+                                .text_align(alignment)
+                                .text_color(text)
+                                .font_family(render_font)
+                                .when(style.italic, |this| this.italic())
+                                .when(style.underline, |this| this.underline())
+                                .when(style.strike || topic.is_complete, |this| {
+                                    this.line_through()
+                                })
+                                .when(is_bold_weight(style.font_weight.as_deref()), |this| {
+                                    this.font_weight(FontWeight::BOLD)
+                                })
+                                .when(topic.is_complete, |this| this.opacity(0.62))
+                                .child(display_title),
                         )
-                        .when_some(style.font_family.clone(), |this, family| {
-                            this.font_family(family)
-                        })
-                        .child(topic.title.clone()),
+                        .when(!marker.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .max_w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .text_color(if topic.is_complete {
+                                        cx.theme().muted_foreground
+                                    } else {
+                                        cx.theme().primary
+                                    })
+                                    .child(marker),
+                            )
+                        }),
                 )
-                .when(!marker.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .font_family("monospace")
-                            .text_color(cx.theme().primary)
-                            .child(marker),
-                    )
-                })
+                .child(checkbox)
                 .into_any_element()
         };
+
+        let border_width = style
+            .border_width
+            .unwrap_or(if selected { 2.0 } else { 1.0 })
+            .clamp(0.0, 12.0) as f32
+            * self.zoom;
+        let border_pattern = style.border_pattern.as_deref().unwrap_or("solid");
+        let corner_radius = style.corner_radius.unwrap_or(8) as f32 * self.zoom;
 
         div()
             .id(SharedString::from(format!("mindmap-node-{id}")))
@@ -1617,14 +1767,23 @@ impl MindmapWindow {
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
+            .rounded(px(corner_radius))
             .bg(if topic.is_complete {
                 fill.opacity(0.55)
             } else {
                 fill
             })
-            .border_2()
-            .border_color(if selected { cx.theme().primary } else { border })
+            .when(border_width <= 0.0 || border_pattern == "none", |this| {
+                this.border_0()
+            })
+            .when(border_width > 0.0 && border_pattern != "none", |this| {
+                this.border(px(border_width))
+                    .border_color(if selected { cx.theme().primary } else { border })
+                    .when(
+                        matches!(border_pattern, "dash" | "dot" | "dash-dot"),
+                        |this| this.border_dashed(),
+                    )
+            })
             .shadow_sm()
             .cursor_pointer()
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -1644,23 +1803,28 @@ impl MindmapWindow {
             .iter()
             .filter_map(|node| {
                 let parent_id = node.parent_id.as_ref()?;
-                let parent = self.layout.node(parent_id)?;
-                let edge_color = self
-                    .tree
-                    .topics
-                    .get(&node.id)
-                    .and_then(|topic| topic.style.border_color.as_deref())
-                    .and_then(parse_hex_color)
-                    .unwrap_or_else(|| cx.theme().border);
+                let anchors =
+                    self.layout
+                        .edge_anchors(parent_id, &node.id, self.graph.structure)?;
+                let topic = self.tree.topics.get(&node.id)?;
+                let mut edge_color =
+                    parse_hex_color(&self.graph.color).unwrap_or_else(|| cx.theme().border);
+                if topic.is_complete {
+                    edge_color = edge_color.opacity(0.38);
+                }
+                let base_width = measurement_number(Some(&self.graph.width))
+                    .unwrap_or(2.0)
+                    .clamp(0.5, 12.0) as f32;
                 Some(EdgeRender {
-                    from_x: parent.center_x + origin_x + parent.width / 2.0,
-                    from_y: parent.center_y + origin_y,
-                    to_x: node.center_x + origin_x - node.width / 2.0,
-                    to_y: node.center_y + origin_y,
-                    width: self.zoom.clamp(0.25, 2.5) * 1.8,
+                    from_x: anchors.start_x + origin_x,
+                    from_y: anchors.start_y + origin_y,
+                    to_x: anchors.end_x + origin_x,
+                    to_y: anchors.end_y + origin_y,
+                    width: base_width * self.zoom,
                     color: edge_color,
                     connector: self.graph.connector,
                     corner_radius: self.graph.corner_radius as f32 * self.zoom,
+                    pattern: self.graph.pattern.clone(),
                 })
             })
             .collect()
@@ -1765,6 +1929,7 @@ impl Render for MindmapWindow {
             )
             .on_action(cx.listener(|this, _: &MindmapCopyTopicStyle, _, cx| this.copy_style(cx)))
             .on_action(cx.listener(|this, _: &MindmapPasteTopicStyle, _, cx| this.paste_style(cx)))
+            .on_action(cx.listener(|this, _: &MindmapToggleTodo, _, cx| this.toggle_todo(cx)))
             .on_action(cx.listener(|this, _: &MindmapZoomIn, _, cx| this.zoom_by(1.1, cx)))
             .on_action(cx.listener(|this, _: &MindmapZoomOut, _, cx| this.zoom_by(0.9, cx)))
             .on_action(cx.listener(|this, _: &MindmapResetZoom, _, cx| this.reset_zoom(cx)))
@@ -1835,6 +2000,13 @@ fn graph_draft_from_style(style: MindmapDocumentStyleDto) -> GraphDraft {
         structure: style.structure,
         connector: style.connector_kind,
         corner_radius: style.connector_corner_radius.unwrap_or(12),
+        width: style.connector_width.unwrap_or_else(|| "2pt".to_string()),
+        color: style
+            .connector_color
+            .unwrap_or_else(|| "#8F9BA8".to_string()),
+        pattern: style
+            .connector_pattern
+            .unwrap_or_else(|| "solid".to_string()),
     }
 }
 
@@ -1847,14 +2019,37 @@ fn empty_markers() -> MindmapTopicMarkersDto {
     }
 }
 
+fn merge_topic_task_fields(todo: &mut MindmapTodoDto, topic: &MindmapTopic) {
+    if todo.task_presentation.is_none() {
+        todo.task_presentation = topic.task_presentation.clone();
+    }
+    if todo.todo_status.is_none() {
+        todo.todo_status = topic.todo_status.clone();
+    }
+    if todo.todo_progress.is_none() {
+        todo.todo_progress = topic.todo_progress;
+    }
+    if topic.is_complete {
+        todo.status = MindmapTodoStatusDto::Done;
+        todo.is_complete = true;
+        todo.progress_eighths = Some(8);
+        todo.todo_status = Some("done".to_string());
+        todo.todo_progress = Some(1.0);
+    }
+}
+
 fn parse_hex_color(value: &str) -> Option<Hsla> {
     let value = value.trim().trim_start_matches('#');
-    let rgb_value = match value.len() {
-        6 => u32::from_str_radix(value, 16).ok()?,
-        8 => u32::from_str_radix(&value[..6], 16).ok()?,
-        _ => return None,
-    };
-    Some(rgb(rgb_value).into())
+    match value.len() {
+        6 => u32::from_str_radix(value, 16)
+            .ok()
+            .map(|value| rgb(value).into()),
+        8 => u32::from_str_radix(value, 16)
+            .ok()
+            .map(rgba)
+            .map(Into::into),
+        _ => None,
+    }
 }
 
 fn style_color(value: Option<&str>, fallback: Hsla) -> Hsla {
@@ -1882,15 +2077,15 @@ fn structure_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>)
         .flex_wrap()
         .gap_1()
         .children(structures.into_iter().map(|(structure, label)| {
-            let connector = view.graph.connector;
-            let radius = view.graph.corner_radius;
+            let mut graph = view.graph.clone();
+            graph.structure = structure;
             Button::new(SharedString::from(format!("structure-{label}")))
                 .small()
                 .outline()
                 .selected(view.graph.structure == structure)
                 .label(label)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.update_graph(structure, connector, radius, cx);
+                    this.update_graph(graph.clone(), cx);
                 }))
         }))
         .into_any_element()
@@ -1910,15 +2105,15 @@ fn connector_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>)
                 .flex_wrap()
                 .gap_1()
                 .children(connectors.into_iter().map(|(connector, label)| {
-                    let structure = view.graph.structure;
-                    let radius = view.graph.corner_radius;
+                    let mut graph = view.graph.clone();
+                    graph.connector = connector;
                     Button::new(SharedString::from(format!("connector-{label}")))
                         .small()
                         .outline()
                         .selected(view.graph.connector == connector)
                         .label(label)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.update_graph(structure, connector, radius, cx);
+                            this.update_graph(graph.clone(), cx);
                         }))
                 })),
         )
@@ -1933,13 +2128,9 @@ fn connector_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>)
                         .ghost()
                         .label("−")
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let radius = this.graph.corner_radius.saturating_sub(4);
-                            this.update_graph(
-                                this.graph.structure,
-                                this.graph.connector,
-                                radius,
-                                cx,
-                            );
+                            let mut graph = this.graph.clone();
+                            graph.corner_radius = graph.corner_radius.saturating_sub(4);
+                            this.update_graph(graph, cx);
                         })),
                 )
                 .child(
@@ -1954,13 +2145,58 @@ fn connector_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>)
                         .ghost()
                         .label("+")
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let radius = (this.graph.corner_radius + 4).min(256);
-                            this.update_graph(
-                                this.graph.structure,
-                                this.graph.connector,
-                                radius,
-                                cx,
+                            let mut graph = this.graph.clone();
+                            graph.corner_radius = (graph.corner_radius + 4).min(256);
+                            this.update_graph(graph, cx);
+                        })),
+                ),
+        )
+        .child(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .items_center()
+                .child(div().text_xs().text_color(rgb(0x8F9BA8)).child("线宽"))
+                .child(
+                    Button::new("connector-width")
+                        .small()
+                        .outline()
+                        .label(view.graph.width.clone())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            let mut graph = this.graph.clone();
+                            graph.width = next_graph_width(&graph.width);
+                            this.update_graph(graph, cx);
+                        })),
+                )
+                .child(
+                    Button::new("connector-color")
+                        .small()
+                        .outline()
+                        .label("线色")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            let mut graph = this.graph.clone();
+                            graph.color = next_color(
+                                Some(&graph.color),
+                                &["#8F9BA8", "#7FB4FF", "#B85D28", "#5A8F73", "#B76E79AA"],
                             );
+                            this.update_graph(graph, cx);
+                        })),
+                )
+                .child(
+                    Button::new("connector-pattern")
+                        .small()
+                        .outline()
+                        .selected(view.graph.pattern != "solid")
+                        .label(match view.graph.pattern.as_str() {
+                            "dash" => "虚线",
+                            "dot" => "点线",
+                            "dash-dot" => "点划线",
+                            _ => "实线",
+                        })
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            let mut graph = this.graph.clone();
+                            graph.pattern = next_graph_pattern(&graph.pattern);
+                            this.update_graph(graph, cx);
                         })),
                 ),
         )
@@ -2005,6 +2241,7 @@ fn progress_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) 
         ("task-half", "50%"),
         ("task-3quar", "75%"),
         ("task-done", "100%"),
+        ("task-pause", "暂停"),
     ];
     h_flex()
         .flex_wrap()
@@ -2030,7 +2267,14 @@ fn generic_marker_controls(
 ) -> AnyElement {
     let markers = view.markers.markers.clone();
     let has = |id: &str| markers.iter().any(|marker| marker.marker_id == id);
-    let choices = [("flag-red", "⚑"), ("star-yellow", "★"), ("tag-purple", "#")];
+    let choices = [
+        ("flag-red", "⚑"),
+        ("star-yellow", "★"),
+        ("tag-purple", "#"),
+        ("symbol-wrong", "阻滞"),
+        ("symbol-attention", "风险"),
+        ("symbol-pause", "等待"),
+    ];
     h_flex()
         .flex_wrap()
         .gap_1()
@@ -2087,15 +2331,109 @@ fn date_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) -> A
                             };
                             cx.notify();
                         })),
+                )
+                .child(
+                    Button::new("date-kind")
+                        .small()
+                        .outline()
+                        .selected(matches!(view.date.kind, MindmapDateKindDto::Due))
+                        .label(match view.date.kind {
+                            MindmapDateKindDto::Date => "普通日期",
+                            MindmapDateKindDto::Due => "截止文本",
+                        })
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.date.kind = match this.date.kind {
+                                MindmapDateKindDto::Date => MindmapDateKindDto::Due,
+                                MindmapDateKindDto::Due => MindmapDateKindDto::Date,
+                            };
+                            cx.notify();
+                        })),
                 ),
         )
         .child(
-            Button::new("insert-today")
-                .small()
-                .outline()
-                .label("插入今天")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.insert_date(cx))),
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(Input::new(&view.date_input).aria_label("日期 YYYY-MM-DD"))
+                .child(Input::new(&view.time_input).aria_label("时间 HH:MM:SS")),
         )
+        .child(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .items_center()
+                .child(
+                    Button::new("date-minus-day")
+                        .small()
+                        .ghost()
+                        .label("−1天")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.shift_date(-1, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("date-today")
+                        .small()
+                        .ghost()
+                        .label("今天")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.shift_date(0, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("date-plus-day")
+                        .small()
+                        .ghost()
+                        .label("+1天")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.shift_date(1, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("date-precision")
+                        .small()
+                        .outline()
+                        .label(date_precision_label(view.date.precision))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.date.precision = next_date_precision(this.date.precision);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("date-placement")
+                        .small()
+                        .outline()
+                        .label(
+                            if matches!(view.date.placement, MindmapDatePlacementDto::Start) {
+                                "插入开头"
+                            } else {
+                                "插入结尾"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.date.placement = match this.date.placement {
+                                MindmapDatePlacementDto::Start => MindmapDatePlacementDto::End,
+                                MindmapDatePlacementDto::End => MindmapDatePlacementDto::Start,
+                            };
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("insert-date")
+                        .small()
+                        .outline()
+                        .label("插入")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.insert_date(cx))),
+                ),
+        )
+        .when(matches!(view.date.kind, MindmapDateKindDto::Due), |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child("“截止”当前写为可编辑文本前缀，不冒充 XMind 结构化 deadline。"),
+            )
+        })
         .into_any_element()
 }
 
@@ -2106,6 +2444,17 @@ fn font_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) -> A
         .clone()
         .unwrap_or_else(|| "Segoe UI".to_string());
     let size = view.style_draft.font_size.unwrap_or(13.0);
+    let system_fonts = view.system_fonts.clone();
+    let missing_font = missing_font_family(view.style_draft.font_family.as_deref(), &system_fonts);
+    let font_for_picker = system_fonts.clone();
+    let line_height = measurement_number(view.style_draft.line_height.as_deref()).unwrap_or(1.25);
+    let letter_spacing =
+        measurement_number(view.style_draft.letter_spacing.as_deref()).unwrap_or(0.0);
+    let alignment = view
+        .style_draft
+        .alignment
+        .clone()
+        .unwrap_or_else(|| "center".to_string());
     v_flex()
         .gap_1()
         .child(
@@ -2116,12 +2465,15 @@ fn font_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) -> A
                     Button::new("font-family")
                         .small()
                         .outline()
-                        .label(font)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        .label(format!("{font}（系统）"))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let fonts = font_for_picker.clone();
                             this.mutate_style(
                                 |style| {
-                                    style.font_family =
-                                        Some(next_font(style.font_family.as_deref()));
+                                    style.font_family = Some(next_system_font(
+                                        style.font_family.as_deref(),
+                                        &fonts,
+                                    ));
                                 },
                                 cx,
                             );
@@ -2166,6 +2518,16 @@ fn font_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) -> A
                         })),
                 ),
         )
+        .when_some(missing_font, |this, missing| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child(format!(
+                        "字体缺失：{missing}；当前显示回退到系统字体，保存仍保留原字体族"
+                    )),
+            )
+        })
         .child(
             h_flex()
                 .flex_wrap()
@@ -2235,6 +2597,113 @@ fn font_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) -> A
                             );
                         })),
                 ),
+        )
+        .child(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .items_center()
+                .child(
+                    Button::new("text-alignment")
+                        .small()
+                        .outline()
+                        .label(format!("对齐：{}", alignment_label(&alignment)))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.mutate_style(
+                                |style| {
+                                    style.alignment =
+                                        Some(next_alignment(style.alignment.as_deref()))
+                                },
+                                cx,
+                            );
+                        })),
+                )
+                .child(
+                    Button::new("line-height-minus")
+                        .small()
+                        .ghost()
+                        .label("行高−")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.mutate_style(
+                                |style| {
+                                    let value = measurement_number(style.line_height.as_deref())
+                                        .unwrap_or(1.25);
+                                    style.line_height =
+                                        Some((value - 0.1).clamp(0.8, 2.5).to_string());
+                                },
+                                cx,
+                            );
+                        })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family("monospace")
+                        .child(format!("{line_height:.2}")),
+                )
+                .child(
+                    Button::new("line-height-plus")
+                        .small()
+                        .ghost()
+                        .label("行高+")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.mutate_style(
+                                |style| {
+                                    let value = measurement_number(style.line_height.as_deref())
+                                        .unwrap_or(1.25);
+                                    style.line_height =
+                                        Some((value + 0.1).clamp(0.8, 2.5).to_string());
+                                },
+                                cx,
+                            );
+                        })),
+                )
+                .child(
+                    Button::new("letter-spacing-minus")
+                        .small()
+                        .ghost()
+                        .label("字距−")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.mutate_style(
+                                |style| {
+                                    let value = measurement_number(style.letter_spacing.as_deref())
+                                        .unwrap_or(0.0);
+                                    style.letter_spacing =
+                                        Some(format!("{}pt", (value - 0.05).clamp(0.0, 2.0)));
+                                },
+                                cx,
+                            );
+                        })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family("monospace")
+                        .child(format!("{letter_spacing:.2}pt")),
+                )
+                .child(
+                    Button::new("letter-spacing-plus")
+                        .small()
+                        .ghost()
+                        .label("字距+")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.mutate_style(
+                                |style| {
+                                    let value = measurement_number(style.letter_spacing.as_deref())
+                                        .unwrap_or(0.0);
+                                    style.letter_spacing =
+                                        Some(format!("{}pt", (value + 0.05).clamp(0.0, 2.0)));
+                                },
+                                cx,
+                            );
+                        })),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("行高/字距为 Kite UI 实验能力；XMind 27.1 静态资源未确认视觉支持。"),
         )
         .into_any_element()
 }
@@ -2341,6 +2810,23 @@ fn node_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) -> A
                     );
                 })),
         )
+        .child(
+            Button::new("border-pattern")
+                .small()
+                .outline()
+                .label(border_pattern_label(
+                    view.style_draft.border_pattern.as_deref(),
+                ))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.mutate_style(
+                        |style| {
+                            style.border_pattern =
+                                Some(next_border_pattern(style.border_pattern.as_deref()))
+                        },
+                        cx,
+                    );
+                })),
+        )
         .child(div().text_xs().text_color(rgb(0x8F9BA8)).child("圆角"))
         .child(
             Button::new("node-corner-minus")
@@ -2381,23 +2867,19 @@ fn node_controls(view: &mut MindmapWindow, cx: &mut Context<MindmapWindow>) -> A
         .into_any_element()
 }
 
-fn next_font(current: Option<&str>) -> String {
-    const FONTS: &[&str] = &[
-        "Segoe UI",
-        "Arial",
-        "Calibri",
-        "Georgia",
-        "Consolas",
-        "Times New Roman",
-    ];
-    let index = current
-        .and_then(|value| {
-            FONTS
-                .iter()
-                .position(|font| font.eq_ignore_ascii_case(value))
-        })
-        .unwrap_or(0);
-    FONTS[(index + 1) % FONTS.len()].to_string()
+fn next_system_font(current: Option<&str>, fonts: &[String]) -> String {
+    if fonts.is_empty() {
+        return "Segoe UI".to_string();
+    }
+    let current = current
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .unwrap_or_default();
+    let index = fonts
+        .iter()
+        .position(|font| font.eq_ignore_ascii_case(current))
+        .map_or(0, |index| (index + 1) % fonts.len());
+    fonts[index].clone()
 }
 
 fn next_color(current: Option<&str>, palette: &[&str]) -> String {
@@ -2426,6 +2908,136 @@ fn date_style_label(style: MindmapDateStyleDto) -> &'static str {
         MindmapDateStyleDto::Chinese => "中文",
         MindmapDateStyleDto::EnglishUs => "English US",
         MindmapDateStyleDto::System => "系统",
+    }
+}
+
+fn next_date_precision(value: MindmapDatePrecisionDto) -> MindmapDatePrecisionDto {
+    match value {
+        MindmapDatePrecisionDto::DateOnly => MindmapDatePrecisionDto::Minutes,
+        MindmapDatePrecisionDto::Minutes => MindmapDatePrecisionDto::Seconds,
+        MindmapDatePrecisionDto::Seconds => MindmapDatePrecisionDto::DateOnly,
+    }
+}
+
+fn date_precision_label(value: MindmapDatePrecisionDto) -> &'static str {
+    match value {
+        MindmapDatePrecisionDto::DateOnly => "仅日期",
+        MindmapDatePrecisionDto::Minutes => "到分钟",
+        MindmapDatePrecisionDto::Seconds => "到秒",
+    }
+}
+
+fn todo_status_label(todo: &MindmapTodoDto) -> String {
+    let legacy = match todo.status {
+        MindmapTodoStatusDto::NotStarted => "待办 · 未开始".to_string(),
+        MindmapTodoStatusDto::InProgress => format!(
+            "待办 · 进行中 {}%",
+            todo.progress_eighths.unwrap_or(0) * 100 / 8
+        ),
+        MindmapTodoStatusDto::Paused => "待办 · 已暂停（marker）".to_string(),
+        MindmapTodoStatusDto::Done => "待办 · 已完成".to_string(),
+    };
+    let mut parts = vec![legacy];
+    if let Some(status) = todo.todo_status.as_deref() {
+        let progress = todo
+            .todo_progress
+            .map(|value| format!(" {:.0}%", value.clamp(0.0, 1.0) * 100.0))
+            .unwrap_or_default();
+        parts.push(format!("27.1 todoStatus={status}{progress}"));
+    }
+    if let Some(presentation) = todo.task_presentation.as_deref() {
+        parts.push(format!("taskPresentation={presentation}"));
+    }
+    parts.join(" · ")
+}
+
+fn text_align_for(alignment: Option<&str>) -> TextAlign {
+    match alignment.unwrap_or("center") {
+        "left" => TextAlign::Left,
+        "right" => TextAlign::Right,
+        _ => TextAlign::Center,
+    }
+}
+
+fn alignment_label(alignment: &str) -> &'static str {
+    match alignment {
+        "inherited" => "继承",
+        "left" => "左",
+        "right" => "右",
+        "justify" => "两端",
+        _ => "居中",
+    }
+}
+
+fn next_alignment(current: Option<&str>) -> String {
+    match current.unwrap_or("center") {
+        "inherited" => "left",
+        "left" => "center",
+        "center" => "right",
+        "right" => "justify",
+        _ => "left",
+    }
+    .to_string()
+}
+
+fn is_bold_weight(weight: Option<&str>) -> bool {
+    match weight.unwrap_or_default() {
+        "bold" | "bolder" | "semibold" => true,
+        value => value.parse::<u16>().is_ok_and(|weight| weight >= 600),
+    }
+}
+
+fn next_graph_width(current: &str) -> String {
+    const WIDTHS: &[&str] = &["1pt", "2pt", "3pt", "4pt", "6pt"];
+    let index = WIDTHS
+        .iter()
+        .position(|width| width.eq_ignore_ascii_case(current))
+        .unwrap_or(1);
+    WIDTHS[(index + 1) % WIDTHS.len()].to_string()
+}
+
+fn next_graph_pattern(current: &str) -> String {
+    match current {
+        "solid" => "dash",
+        "dash" => "dot",
+        "dot" => "dash-dot",
+        _ => "solid",
+    }
+    .to_string()
+}
+
+fn next_border_pattern(current: Option<&str>) -> String {
+    match current.unwrap_or("solid") {
+        "solid" => "dash",
+        "dash" => "dot",
+        "dot" => "none",
+        _ => "solid",
+    }
+    .to_string()
+}
+
+fn border_pattern_label(pattern: Option<&str>) -> &'static str {
+    match pattern.unwrap_or("solid") {
+        "dash" => "虚线",
+        "dot" => "点线",
+        "dash-dot" => "点划线",
+        "none" => "无边框",
+        _ => "实线",
+    }
+}
+
+fn connector_dash_array(pattern: &str, width: f32) -> Option<Vec<Pixels>> {
+    let unit = width.max(1.0);
+    match pattern {
+        "dash" => Some(vec![px(unit * 3.0), px(unit * 2.0)]),
+        "dot" => Some(vec![px((unit * 0.5).max(1.0)), px(unit * 2.0)]),
+        "dash-dot" => Some(vec![
+            px(unit * 4.0),
+            px(unit * 2.0),
+            px((unit * 0.5).max(1.0)),
+            px(unit * 2.0),
+        ]),
+        _ => None,
     }
 }
 

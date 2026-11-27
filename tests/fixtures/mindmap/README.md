@@ -26,3 +26,7 @@
 `import/` 是 Markdown、DOCX、TXT、HTML、OPML 转换的固定跨平台语料。每个格式包含 normal、edge、malformed 三类文件，`import/manifest.json` 记录大小、SHA-256 和语料总哈希。
 
 说明与验收边界见 `docs/architecture/mindmap-import-corpus.md`。除非同步更新哈希和结构/警告断言，不要修改这些文件。
+
+## `ui-tree-parity/`
+
+macOS 与 Windows 两个原生 UI 解析器共用同一份 canonical tree schema、golden JSON 和 SHA-256。fixture 覆盖结构/连线、markers、空标题、现代 XMind 27.1 task 字段、legacy task marker fallback 及两者冲突归一化。契约见该目录的 `README.md`。

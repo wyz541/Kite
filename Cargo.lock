@@ -3742,6 +3742,7 @@ dependencies = [
  "dunce",
  "encoding_rs",
  "flate2",
+ "fontdb",
  "futures-channel",
  "gpui-kit",
  "grep-matcher",

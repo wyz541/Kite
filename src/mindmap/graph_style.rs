@@ -321,23 +321,32 @@ pub struct ConnectorStyle {
 
 impl ConnectorStyle {
     pub fn from_properties(properties: &Map<String, Value>) -> Option<Self> {
-        let kind = properties
-            .get(CONNECTOR_CLASS_FIELD)
+        Self::from_properties_with_fallback(Some(properties), None)
+    }
+
+    /// Read a connector style with field-level precedence: every value comes from
+    /// `primary` when present, otherwise from `fallback`.
+    pub fn from_properties_with_fallback(
+        primary: Option<&Map<String, Value>>,
+        fallback: Option<&Map<String, Value>>,
+    ) -> Option<Self> {
+        let field = |name: &str| {
+            primary
+                .and_then(|properties| properties.get(name))
+                .or_else(|| fallback.and_then(|properties| properties.get(name)))
+        };
+        let kind = field(CONNECTOR_CLASS_FIELD)
             .and_then(Value::as_str)
             .map(ConnectorKind::from_xmind_value)?;
-        let corner_radius = properties
-            .get(CONNECTOR_CORNER_FIELD)
-            .and_then(ConnectorCornerRadius::from_xmind_value);
-        let width = properties
-            .get(CONNECTOR_WIDTH_FIELD)
+        let corner_radius =
+            field(CONNECTOR_CORNER_FIELD).and_then(ConnectorCornerRadius::from_xmind_value);
+        let width = field(CONNECTOR_WIDTH_FIELD)
             .and_then(value_as_xmind_string)
             .map(ConnectorWidth);
-        let color = properties
-            .get(CONNECTOR_COLOR_FIELD)
+        let color = field(CONNECTOR_COLOR_FIELD)
             .and_then(value_as_xmind_string)
             .map(ConnectorColor);
-        let pattern = properties
-            .get(CONNECTOR_PATTERN_FIELD)
+        let pattern = field(CONNECTOR_PATTERN_FIELD)
             .and_then(Value::as_str)
             .map(ConnectorLinePattern::from_xmind_value);
         Some(Self {
@@ -393,7 +402,8 @@ pub enum GraphStyleError {
 /// Read the document-level graph style from one sheet.
 ///
 /// Connector fields use the root topic's explicit style first, then XMind's
-/// `theme.centralTopic` fallback.
+/// `theme.centralTopic` fallback. The fallback is field-level so a root style that
+/// only overrides the connector kind still inherits the theme's width or color.
 pub fn read_document_graph_style(
     content: &Value,
     sheet_index: usize,
@@ -404,16 +414,12 @@ pub fn read_document_graph_style(
         .get(STRUCTURE_CLASS_FIELD)
         .and_then(Value::as_str)
         .map(GraphStructure::from_xmind_value);
-    let connector = root
-        .pointer("/style/properties")
-        .and_then(Value::as_object)
-        .and_then(ConnectorStyle::from_properties)
-        .or_else(|| {
-            sheet
-                .pointer("/theme/centralTopic/properties")
-                .and_then(Value::as_object)
-                .and_then(ConnectorStyle::from_properties)
-        });
+    let root_properties = root.pointer("/style/properties").and_then(Value::as_object);
+    let theme_properties = sheet
+        .pointer("/theme/centralTopic/properties")
+        .and_then(Value::as_object);
+    let connector =
+        ConnectorStyle::from_properties_with_fallback(root_properties, theme_properties);
 
     Ok(DocumentGraphStyle {
         structure,
@@ -427,11 +433,15 @@ pub fn read_document_graph_style(
 ///
 /// - `rootTopic.structureClass`
 /// - `rootTopic.style.properties.{line-class,line-corner,line-width,line-color,line-pattern}`
-/// - the same connector fields in `theme.centralTopic.properties` when a theme exists
+/// - the same connector fields in existing `theme.centralTopic`, `mainTopic`,
+///   `subTopic`, and `level3` properties when a theme exists
 ///
-/// No topic/style object is replaced wholesale, and the skeleton-structure extension
-/// is intentionally left untouched because its exact update semantics are not yet
-/// verified against the XMind 27.01 compatibility baseline.
+/// A missing `theme.centralTopic` is created because it is the minimum known theme
+/// object needed for the document-level fallback. Other missing theme categories
+/// are not invented. No topic/style object is replaced wholesale, and the
+/// skeleton-structure extension is intentionally left untouched because its exact
+/// update semantics are not yet verified against the XMind 27.01 compatibility
+/// baseline.
 pub fn apply_document_graph_style(
     content: &mut Value,
     sheet_index: usize,
@@ -480,15 +490,20 @@ pub fn apply_document_graph_style(
                     path: format!("sheets[{sheet_index}]"),
                 })?;
             let theme = object_field_mut(sheet, "theme", sheet_index, "theme")?;
-            if theme.contains_key("centralTopic") {
-                let central_topic =
-                    object_field_mut(theme, "centralTopic", sheet_index, "theme.centralTopic")?;
-                let properties = object_field_mut(
-                    central_topic,
-                    "properties",
-                    sheet_index,
-                    "theme.centralTopic.properties",
-                )?;
+            if !theme.contains_key("centralTopic") {
+                theme.insert("centralTopic".to_owned(), json!({}));
+            }
+            for topic_field in ["centralTopic", "mainTopic", "subTopic", "level3"] {
+                let Some(topic) = theme.get_mut(topic_field) else {
+                    continue;
+                };
+                let path = format!("theme.{topic_field}");
+                let topic = topic
+                    .as_object_mut()
+                    .ok_or(GraphStyleError::InvalidObject { path })?;
+                let properties_path = format!("theme.{topic_field}.properties");
+                let properties =
+                    object_field_mut(topic, "properties", sheet_index, &properties_path)?;
                 apply_connector_properties(properties, connector);
             }
         }
