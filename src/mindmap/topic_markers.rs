@@ -136,6 +136,42 @@ impl TaskProgress {
     pub fn is_paused(self) -> bool {
         self == Self::Paused
     }
+
+    /// Converts an XMind modern task ratio in the inclusive `0..=1` range to one
+    /// of the legacy eighth-step task markers. Intermediate values are rounded to
+    /// the nearest eighth; positive values below one eighth become `Eighth`.
+    pub fn from_ratio(value: f64) -> Option<Self> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return None;
+        }
+        let rounded = (value * 8.0).round() as u8;
+        let eighths = if value == 0.0 {
+            0
+        } else if value == 1.0 {
+            8
+        } else {
+            rounded.clamp(1, 7)
+        };
+        Some(match eighths {
+            0 => Self::Start,
+            1 => Self::Eighth,
+            2 => Self::Quarter,
+            3 => Self::ThreeEighths,
+            4 => Self::Half,
+            5 => Self::FiveEighths,
+            6 => Self::ThreeQuarters,
+            7 => Self::SevenEighths,
+            8 => Self::Done,
+            _ => return None,
+        })
+    }
+
+    /// Returns the modern XMind `0..=1` task ratio for this progress marker, or
+    /// `None` for the paused marker, which has no numeric progress baked into its
+    /// legacy marker ID.
+    pub fn ratio(self) -> Option<f64> {
+        self.eighths().map(|eighths| f64::from(eighths) / 8.0)
+    }
 }
 
 /// Coarse family used by UI code to choose a marker glyph while retaining the
@@ -542,7 +578,7 @@ fn sheet_at_mut(content: &mut Value, sheet_index: usize) -> Result<&mut Value, T
         .ok_or(TopicMarkerError::SheetNotFound { index: sheet_index })
 }
 
-fn topic_at<'a>(
+pub(super) fn topic_at<'a>(
     content: &'a Value,
     sheet_index: usize,
     topic_id: &str,
@@ -558,7 +594,7 @@ fn topic_at<'a>(
     })
 }
 
-fn topic_at_mut<'a>(
+pub(super) fn topic_at_mut<'a>(
     content: &'a mut Value,
     sheet_index: usize,
     topic_id: &str,
